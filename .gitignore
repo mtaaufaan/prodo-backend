@@ -4,7 +4,7 @@
 
 # Binary hasil build
 bin/
-prodo-backend
+/prodo-backend
 *.exe
 *.exe~
 *.dll

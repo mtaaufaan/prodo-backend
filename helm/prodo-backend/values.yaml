@@ -1,0 +1,105 @@
+# ============================================================
+# prodo-backend Helm Chart — Default Values
+# Override dengan: --values values.dev.yaml
+# ============================================================
+
+# Jumlah replika pod
+replicaCount: 2
+
+image:
+  repository: harbor.prodo.internal/prodo/backend
+  pullPolicy: IfNotPresent
+  # Tag di-override saat deploy CI/CD dengan sha-<commit>
+  tag: "latest"
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: false
+  name: ""
+
+# Pod annotations (untuk Prometheus scraping, dll)
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/metrics"
+  prometheus.io/port: "3001"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532      # nonroot (sama dengan distroless)
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3001
+
+# Ingress dikelola Caddy di luar cluster — tidak pakai ingress k8s
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# HPA — diaktifkan di production
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Liveness & readiness probe via /health endpoint
+# (tersedia setelah S0-18)
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Environment variables non-sensitif
+env:
+  APP_ENV: "production"
+  SERVER_PORT: "3001"
+  SHUTDOWN_TIMEOUT: "30s"
+  KEYCLOAK_AUDIENCE: "prodo-backend"
+  MINIO_BUCKET: "prodo-attachments"
+  MINIO_USE_SSL: "false"
+  CORS_ALLOW_ORIGINS: "https://prodo.local"
+  ASYNQ_CONCURRENCY: "10"
+
+# Secrets di-inject dari OpenBao/Vault via env vars
+# Tidak disimpan di values — di-set saat deploy via --set atau external secret
+secretEnv:
+  VAULT_ADDR: ""
+  VAULT_TOKEN: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
