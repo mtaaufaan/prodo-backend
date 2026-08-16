@@ -1,0 +1,31 @@
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+bin/
+tmp/
+coverage.out
+coverage.html
+
+# Environment files (JANGAN masuk ke image)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# Test files (tidak dibutuhkan di production image)
+**/*_test.go
+
+# Documentation
+docs/
+*.md
+
+# CI/CD
+.github/
+
+# Development tools
+air.toml

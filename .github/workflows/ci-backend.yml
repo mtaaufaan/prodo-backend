@@ -1,0 +1,149 @@
+# ============================================================
+# PRODO Backend — CI Pipeline
+# Trigger: pull_request ke branch main
+# Jobs: lint → test → build (sequential, fail-fast)
+# ============================================================
+
+name: CI Backend
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/ci-backend.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ── Job 1: Lint ─────────────────────────────────────────────
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.59.1
+          args: --timeout=5m
+
+  # ── Job 2: Test ──────────────────────────────────────────────
+  test:
+    name: Test (go test + race detector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+
+    services:
+      # PostgreSQL untuk integration tests (jika ada)
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: prodo_test
+          POSTGRES_PASSWORD: prodo_test_secret
+          POSTGRES_DB: prodo_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      # Redis untuk integration tests (jika ada)
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    env:
+      # Test env — tidak pakai Vault, pakai env langsung
+      APP_ENV: test
+      DATABASE_URL: postgres://prodo_test:prodo_test_secret@localhost:5432/prodo_test?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/PRODO
+      MINIO_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: test
+      MINIO_SECRET_KEY: test_secret
+      VAULT_ADDR: ""
+      VAULT_TOKEN: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./... -race -count=1 -timeout=5m
+
+      - name: Generate coverage report
+        if: always()
+        run: |
+          go test ./... -race -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out | grep total
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.out
+          retention-days: 7
+
+  # ── Job 3: Build ─────────────────────────────────────────────
+  build:
+    name: Build binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: |
+          mkdir -p bin
+          go build -ldflags="-s -w" -o bin/prodo-backend ./cmd/api/main.go
+          echo "✓ Build berhasil: $(ls -lh bin/prodo-backend)"
+
+      - name: Verify binary
+        run: |
+          file bin/prodo-backend
+          # Binary tidak bisa dijalankan tanpa env vars, tapi pastikan file valid
+          ls -la bin/prodo-backend

@@ -1,0 +1,50 @@
+# ============================================================
+# prodo-backend — Go .gitignore
+# ============================================================
+
+# Binary hasil build
+bin/
+prodo-backend
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+coverage.out
+coverage.html
+coverage.xml
+
+# Build cache (bukan go cache — itu di $GOPATH)
+tmp/
+
+# Environment files — JANGAN commit secrets
+.env
+.env.local
+.env.*.local
+.env.development
+.env.staging
+.env.production
+
+# Air (hot reload tool) — generated config
+tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenBao / Vault dev keys — JANGAN commit!
+infra/openbao/.dev-init-keys.json
+
+# golang-migrate: jangan exclude migrations/ — itu harus di-commit
+# Tapi exclude generated files
+*.db
