@@ -34,4 +34,5 @@ func main() {
 
 	fmt.Println("PRODO Backend shutting down...")
 }
-// H2 CI verification 2026-08-17T04:26:24Z
+
+// H2 CI verification: confirms ci-backend.yml triggers on PR to develop.
