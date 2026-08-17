@@ -3,12 +3,15 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/joho/godotenv"
 )
 
 // Config menyimpan seluruh konfigurasi aplikasi yang dibaca dari environment variables.
@@ -64,6 +67,14 @@ type Config struct {
 // Jika VAULT_ADDR dan VAULT_TOKEN di-set, secrets sensitif dimuat dari OpenBao
 // dan menimpa nilai env vars yang ada (env vars tetap sebagai fallback).
 func Load() (*Config, error) {
+	// Muat .env.local jika ada (dev lokal) -- tidak menimpa env var yang sudah
+	// di-set (CI, shell export, container) sesuai perilaku default godotenv.
+	// File tidak ada = dianggap normal (CI/production selalu set env var
+	// langsung, tidak lewat file).
+	if err := godotenv.Load(".env.local"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("membaca .env.local: %w", err)
+	}
+
 	cfg := &Config{}
 	if err := env.Parse(cfg); err != nil {
 		return nil, fmt.Errorf("membaca env vars: %w", err)
