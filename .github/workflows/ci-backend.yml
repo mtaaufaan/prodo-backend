@@ -1,6 +1,6 @@
 # ============================================================
 # PRODO Backend — CI Pipeline
-# Trigger: pull_request ke branch main
+# Trigger: pull_request ke branch develop atau main
 # Jobs: lint → test → build (sequential, fail-fast)
 # ============================================================
 
@@ -9,6 +9,7 @@ name: CI Backend
 on:
   pull_request:
     branches:
+      - develop
       - main
     paths:
       - '**.go'
