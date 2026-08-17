@@ -1,0 +1,21 @@
+apiVersion: v2
+name: prodo-backend
+description: PRODO Enterprise Task Management — Backend API
+type: application
+
+# Chart version — bump setiap kali ada perubahan chart template
+version: 0.1.0
+
+# App version — sesuaikan dengan versi binary backend
+appVersion: "0.1.0"
+
+keywords:
+  - prodo
+  - task-management
+  - backend
+  - go
+  - fiber
+
+maintainers:
+  - name: Taufan
+    email: muhammad.taufan@rds.co.id
