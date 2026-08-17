@@ -1,0 +1,41 @@
+# ============================================================
+# prodo-backend — Dev Override Values
+# Dipakai dengan: --values values.dev.yaml
+# ============================================================
+
+# 1 replika cukup untuk dev
+replicaCount: 1
+
+image:
+  # Gunakan placeholder sampai S0-18 (Fiber app) selesai
+  repository: nginx
+  tag: "alpine"
+  pullPolicy: Always
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+autoscaling:
+  enabled: false
+
+env:
+  APP_ENV: "development"
+  SERVER_PORT: "3001"
+  SHUTDOWN_TIMEOUT: "10s"
+  KEYCLOAK_ISSUER: "http://localhost:8080/realms/PRODO"
+  KEYCLOAK_AUDIENCE: "prodo-backend"
+  MINIO_ENDPOINT: "localhost:9000"
+  MINIO_BUCKET: "prodo-attachments"
+  MINIO_USE_SSL: "false"
+  CORS_ALLOW_ORIGINS: "http://localhost:5173"
+  ASYNQ_CONCURRENCY: "5"
+
+secretEnv:
+  VAULT_ADDR: "http://localhost:8200"
+  DATABASE_URL: "postgres://prodo:prodo_dev_secret@localhost:5432/prodo_dev"
+  REDIS_URL: "redis://:redis_dev_secret@localhost:6379/0"

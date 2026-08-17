@@ -35,7 +35,7 @@ type Config struct {
 	RedisURL string `env:"REDIS_URL" envDefault:""`
 
 	// Keycloak (OIDC)
-	KeycloakIssuer   string `env:"KEYCLOAK_ISSUER" envDefault:""`   // e.g. http://localhost:8080/realms/PRODO
+	KeycloakIssuer   string `env:"KEYCLOAK_ISSUER" envDefault:""` // e.g. http://localhost:8080/realms/PRODO
 	KeycloakAudience string `env:"KEYCLOAK_AUDIENCE" envDefault:"prodo-backend"`
 
 	// MinIO (Object Storage)
@@ -117,7 +117,7 @@ type vaultKVResponse struct {
 func (c *Config) vaultGet(ctx context.Context, path string) (map[string]string, error) {
 	url := fmt.Sprintf("%s/v1/secret/data/%s", c.VaultAddr, path)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (c *Config) vaultGet(ctx context.Context, path string) (map[string]string, 
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request ke Vault gagal: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // close error on a read-only response body is not actionable
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
