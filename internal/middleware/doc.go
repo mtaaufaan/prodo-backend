@@ -1,2 +1,3 @@
-// Package middleware holds custom Fiber middleware. Implemented from S1.
+// Package middleware holds custom Fiber middleware (request ID, structured
+// logging -- see request_id.go, logging.go).
 package middleware
