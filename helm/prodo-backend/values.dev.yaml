@@ -7,10 +7,66 @@
 replicaCount: 1
 
 image:
-  # Gunakan placeholder sampai S0-18 (Fiber app) selesai
+  # Placeholder untuk verifikasi infra k3s/Helm/Caddy (S0-11) saja -- S0-18
+  # (Fiber app) sendiri sudah selesai, tapi deploy image asli ke k3s butuh
+  # pekerjaan terpisah dulu (pod perlu bisa reach Postgres/Redis/Keycloak,
+  # yang saat ini cuma reachable via "localhost" dari perspektif host, bukan
+  # dari dalam network namespace pod k3s). Ditunda ke sprint infra berikutnya.
   repository: nginx
   tag: "alpine"
   pullPolicy: Always
+
+# nginx:alpine (placeholder di atas) butuh menulis ke /var/cache/nginx dan
+# /etc/nginx/conf.d saat startup, dan defaultnya jalan sebagai user image
+# sendiri -- bukan UID 65532 (nonroot distroless) yang di-hardcode values.yaml
+# untuk backend Go asli. Kombinasi readOnlyRootFilesystem + UID paksa itu benar
+# untuk image asli tapi bikin nginx CrashLoopBackOff terus (read-only lalu
+# permission denied). Relaksasi ini HANYA untuk placeholder; jangan bawa ke
+# values.yaml produksi.
+securityContext:
+  readOnlyRootFilesystem: false
+  # values.yaml drops ALL capabilities (correct hardening for the real Go
+  # binary, which needs none) -- but that includes CAP_CHOWN, which
+  # nginx:alpine's entrypoint needs to chown its temp dirs even as root.
+  capabilities:
+    drop: []
+podSecurityContext:
+  # Helm deep-merges values maps -- an empty {} here would NOT clear
+  # values.yaml's runAsUser: 65532 (distroless nonroot UID), which nginx:alpine
+  # doesn't have filesystem permissions for. Override every subkey explicitly.
+  runAsNonRoot: false
+  runAsUser: 0
+  fsGroup: 0
+
+# values.yaml default probe hits :3001/health -- correct for the real Go
+# backend (S0-18), but nginx:alpine placeholder always listens on 80 and has
+# no /health path, so the pod never turns Ready and gets restart-looped by
+# the liveness probe. Point probes at nginx's actual root instead; remove
+# this whole block once the real backend image replaces the placeholder.
+livenessProbe:
+  httpGet:
+    path: /
+    port: 80
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 80
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# values.yaml's targetPort: 3001 is correct for the real Go backend but
+# nginx:alpine placeholder listens on 80 -- without this override the Service
+# (and therefore the NodePort) never actually reaches the container. Remove
+# once the real backend image replaces the placeholder.
+service:
+  targetPort: 80
 
 resources:
   limits:
@@ -27,7 +83,11 @@ env:
   APP_ENV: "development"
   SERVER_PORT: "3001"
   SHUTDOWN_TIMEOUT: "10s"
-  KEYCLOAK_ISSUER: "http://localhost:8080/realms/PRODO"
+  # Port harus sama dengan KEYCLOAK_PORT di infra/.env (default 8080; di mesin
+  # ini di-override ke 8081 karena bentrok port dengan service lain -- lihat
+  # docs/environment-setup.md §9 "Port sudah dipakai"). Helm tidak baca file
+  # .env host, jadi nilai ini harus disesuaikan MANUAL kalau override berubah.
+  KEYCLOAK_ISSUER: "http://localhost:8081/realms/PRODO"
   KEYCLOAK_AUDIENCE: "prodo-backend"
   MINIO_ENDPOINT: "localhost:9000"
   MINIO_BUCKET: "prodo-attachments"
@@ -36,6 +96,15 @@ env:
   ASYNQ_CONCURRENCY: "5"
 
 secretEnv:
+  # "localhost" only works while the deployed image is the S0 placeholder
+  # (nginx:alpine, which never reads these) -- a pod running inside k3s has
+  # its own network namespace and can't reach the host's Docker Compose
+  # network via localhost. Once S0-18's real backend image is deployed here,
+  # these need to change to a reachable address (e.g. host.docker.internal,
+  # or run Postgres/Redis/Keycloak inside the same k3s cluster).
   VAULT_ADDR: "http://localhost:8200"
-  DATABASE_URL: "postgres://prodo:prodo_dev_secret@localhost:5432/prodo_dev"
+  # Port harus sama dengan POSTGRES_PORT di infra/.env (default 5432; di mesin
+  # ini di-override ke 5434 karena bentrok dengan service PostgreSQL native
+  # Windows -- lihat docs/environment-setup.md §9 "Port sudah dipakai").
+  DATABASE_URL: "postgres://prodo:prodo_dev_secret@localhost:5434/prodo_dev"
   REDIS_URL: "redis://:redis_dev_secret@localhost:6379/0"

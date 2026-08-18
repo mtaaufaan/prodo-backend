@@ -1,0 +1,4 @@
+-- Seed: contoh task/sprint untuk demo & manual testing lokal.
+-- Skeleton S0 -- tabel `tasks`/`sprints` belum ada (dibuat di sprint
+-- selanjutnya). File ini akan diisi dengan INSERT sungguhan begitu skema
+-- tersebut siap.
