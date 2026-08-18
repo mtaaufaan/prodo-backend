@@ -53,8 +53,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ── Harbor belum tersedia (dev/S0) ───────────────────────
+      # Tidak ada instance Harbor sungguhan sampai infra produksi
+      # disiapkan -- HARBOR_USERNAME/HARBOR_PASSWORD sengaja kosong.
+      # Step login/build-push di-skip (bukan fail) selama secret ini
+      # kosong, supaya CD tidak menampilkan red-X palsu di setiap push
+      # ke main. Begitu Harbor sungguhan ada, set kedua secret di GitHub
+      # repo settings dan step-step ini otomatis aktif kembali.
+      - name: Cek kredensial Harbor tersedia
+        id: check-harbor
+        run: |
+          if [ -n "${{ secrets.HARBOR_USERNAME }}" ]; then
+            echo "has-credentials=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-credentials=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HARBOR_USERNAME belum di-set -- build+push Harbor di-skip. Lihat docs/environment-setup.md."
+          fi
+
       # ── Login ke Harbor registry ────────────────────────────
       - name: Login to Harbor
+        if: steps.check-harbor.outputs.has-credentials == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -67,6 +85,7 @@ jobs:
       #   harbor.prodo.internal/prodo/backend:latest (hanya di main)
       #   harbor.prodo.internal/prodo/backend:v1.2.3 (jika push tag)
       - name: Extract metadata (tags & labels)
+        if: steps.check-harbor.outputs.has-credentials == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -85,6 +104,7 @@ jobs:
 
       # ── Build dan push image ─────────────────────────────────
       - name: Build and push Docker image
+        if: steps.check-harbor.outputs.has-credentials == 'true'
         id: push
         uses: docker/build-push-action@v6
         with:
@@ -104,6 +124,7 @@ jobs:
 
       # ── Summary ──────────────────────────────────────────────
       - name: Summary
+        if: steps.check-harbor.outputs.has-credentials == 'true'
         run: |
           echo "## 🚀 Image berhasil di-push ke Harbor" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -116,3 +137,12 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary (Harbor skipped)
+        if: steps.check-harbor.outputs.has-credentials != 'true'
+        run: |
+          echo "## ⏭️ Push ke Harbor di-skip" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`HARBOR_USERNAME\`/\`HARBOR_PASSWORD\` belum di-set di repo secrets --" >> $GITHUB_STEP_SUMMARY
+          echo "belum ada instance Harbor sungguhan di lingkungan ini (S0)." >> $GITHUB_STEP_SUMMARY
+          echo "Set kedua secret di GitHub repo settings begitu Harbor tersedia." >> $GITHUB_STEP_SUMMARY
