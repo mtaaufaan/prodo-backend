@@ -16,23 +16,39 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 
 	"github.com/mtaaufaan/prodo-backend/config"
+	"github.com/mtaaufaan/prodo-backend/internal/cache"
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/handler"
 )
 
 // main adalah entry point aplikasi PRODO backend.
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+}
+
+// run menjalankan aplikasi dan mengembalikan error alih-alih memanggil
+// log.Fatal/os.Exit langsung -- supaya defer (Close koneksi DB/Redis) selalu
+// sempat jalan sebelum proses berhenti.
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("FATAL: gagal membaca konfigurasi: %v", err)
+		return fmt.Errorf("membaca konfigurasi: %w", err)
 	}
 
 	ctx := context.Background()
 	pool, err := db.NewPool(ctx, cfg)
 	if err != nil {
-		log.Fatalf("FATAL: gagal konek ke database: %v", err)
+		return fmt.Errorf("konek ke database: %w", err)
 	}
 	defer pool.Close()
+
+	rdb, err := cache.New(ctx, cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("konek ke Redis: %w", err)
+	}
+	defer rdb.Close() //nolint:errcheck // best-effort close on shutdown
 
 	app := fiber.New()
 	app.Use(recover.New())
@@ -51,27 +67,30 @@ func main() {
 
 	app.Get("/health", handler.Health)
 
-	// TODO S0-20: Redis client (go-redis) + cache abstraction
 	// TODO S0-21: Asynq worker + scheduler
 	// TODO S0-22: Zap structured logging + request ID + OTEL trace injection
 
+	serverErr := make(chan error, 1)
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.ServerPort)
 		fmt.Printf("PRODO Backend starting — env=%s addr=%s\n", cfg.AppEnv, addr)
-		if err := app.Listen(addr); err != nil {
-			log.Fatalf("FATAL: server error: %v", err)
-		}
+		serverErr <- app.Listen(addr)
 	}()
 
-	// Graceful shutdown: tunggu SIGTERM atau SIGINT
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
-	<-quit
+
+	select {
+	case err := <-serverErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-quit:
+	}
 
 	fmt.Println("PRODO Backend shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	if err := app.ShutdownWithContext(ctx); err != nil {
+	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
 		log.Printf("WARN: shutdown error: %v", err)
 	}
+	return nil
 }
