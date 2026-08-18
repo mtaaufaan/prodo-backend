@@ -1,0 +1,4 @@
+-- Seed: 7 akun demo per role + organisasi contoh (lihat
+-- docs/environment-setup.md §5 daftar 7 akun demo).
+-- Skeleton S0 -- tabel `organizations`/`workspaces`/`users` belum ada.
+-- File ini akan diisi dengan INSERT sungguhan begitu skema tersebut siap.
