@@ -16,6 +16,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 
 	"github.com/mtaaufaan/prodo-backend/config"
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/handler"
 )
 
@@ -25,6 +26,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: gagal membaca konfigurasi: %v", err)
 	}
+
+	ctx := context.Background()
+	pool, err := db.NewPool(ctx, cfg)
+	if err != nil {
+		log.Fatalf("FATAL: gagal konek ke database: %v", err)
+	}
+	defer pool.Close()
 
 	app := fiber.New()
 	app.Use(recover.New())
@@ -43,7 +51,6 @@ func main() {
 
 	app.Get("/health", handler.Health)
 
-	// TODO S0-19: Database connection pool (pgx v5) + golang-migrate runner
 	// TODO S0-20: Redis client (go-redis) + cache abstraction
 	// TODO S0-21: Asynq worker + scheduler
 	// TODO S0-22: Zap structured logging + request ID + OTEL trace injection

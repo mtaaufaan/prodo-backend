@@ -10,7 +10,7 @@ MIGRATE      := migrate -path migrations -database "$(DATABASE_URL)"
 LINT_VERSION := v1.59.1
 
 .PHONY: all build run dev clean test test.unit test.cover \
-        db.migrate db.rollback db.status db.seed db.reset \
+        db.migrate migrate-up db.rollback db.status db.seed db.reset \
         lint fmt vet tidy docker.up docker.down help
 
 ## ── Build ──────────────────────────────────────────────────
@@ -54,6 +54,10 @@ db.migrate:
 	@echo "→ Running migrations up..."
 	$(MIGRATE) up
 	@echo "✓ Migrations applied"
+
+# Alias -- docs/sprint_backlog.md S0-19 DoD menyebut "make migrate-up" persis;
+# db.migrate tetap nama utama (konsisten dengan db.rollback/db.status/dst).
+migrate-up: db.migrate
 
 db.rollback:
 	@echo "→ Rolling back last migration..."

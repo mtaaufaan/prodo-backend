@@ -1,0 +1,4 @@
+-- Seed: Platform Admin default account
+-- Skeleton S0 -- tabel `users`/`platform_admins` belum ada (dibuat di sprint
+-- selanjutnya lewat migrations/, lihat docs/DATABASE_SCHEMA.md). File ini
+-- akan diisi dengan INSERT sungguhan begitu skema user siap.
