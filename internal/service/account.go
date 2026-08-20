@@ -25,6 +25,7 @@ const groupAdminInvitationTTL = 72 * time.Hour
 // supaya unit test bisa pakai fake tanpa DB nyata, lihat docs/coding-conventions.md §3.9.
 type accountRepository interface {
 	CreateGroupAdminInvitation(ctx context.Context, p *repository.CreateGroupAdminInvitationParams) (userID string, err error)
+	FindUserIDByProviderSub(ctx context.Context, providerSub string) (userID string, err error)
 }
 
 type AccountService struct {
@@ -59,6 +60,17 @@ type GroupAdminInvitation struct {
 	DisplayName     string
 	ActivationToken string
 	ExpiresAt       time.Time
+}
+
+// ResolveActorUserID mencari users.id internal dari Keycloak subject (klaim
+// JWT "sub") -- dipakai handler untuk mengisi invited_by/actor_id dari
+// Platform Admin yang sedang login (S1-05).
+func (s *AccountService) ResolveActorUserID(ctx context.Context, keycloakSub string) (string, error) {
+	userID, err := s.repo.FindUserIDByProviderSub(ctx, keycloakSub)
+	if err != nil {
+		return "", fmt.Errorf("service.ResolveActorUserID: %w", err)
+	}
+	return userID, nil
 }
 
 // CreateGroupAdmin membuat user Keycloak (disabled, wajib set password +

@@ -9,4 +9,17 @@ var (
 	// ErrEmailAlreadyExists dikembalikan saat email sudah terdaftar --
 	// baik di tabel users maupun di Keycloak.
 	ErrEmailAlreadyExists = errors.New("email already registered")
+
+	// ErrInvitationNotFound dikembalikan saat token aktivasi tidak
+	// ditemukan, sudah dipakai, atau sudah kedaluwarsa (US-073 AC).
+	ErrInvitationNotFound = errors.New("activation token not found, used, or expired")
+
+	// ErrUserNotFound dikembalikan saat lookup user (misal by Keycloak
+	// provider_sub) tidak menemukan baris.
+	ErrUserNotFound = errors.New("user not found")
+
+	// ErrWeakPassword dikembalikan saat password tidak memenuhi syarat
+	// kompleksitas (US-073 AC: 12+ karakter, huruf besar, kecil, angka,
+	// karakter spesial).
+	ErrWeakPassword = errors.New("password does not meet complexity requirements")
 )

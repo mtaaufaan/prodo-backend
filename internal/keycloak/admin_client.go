@@ -34,6 +34,11 @@ type AdminClient interface {
 	// bisa login setelah mengaktifkan akun lewat activation link (S1-06/07).
 	// Mengembalikan Keycloak user ID (subject/`sub`).
 	CreateDisabledUser(ctx context.Context, email, displayName string) (keycloakUserID string, err error)
+
+	// SetPassword menyetel password permanen (bukan temporary) dan
+	// menghapus requiredAction UPDATE_PASSWORD, menyisakan CONFIGURE_TOTP
+	// -- dipanggil S1-06 setelah token aktivasi tervalidasi.
+	SetPassword(ctx context.Context, keycloakUserID, newPassword string) error
 }
 
 type httpAdminClient struct {
@@ -166,6 +171,67 @@ func (c *httpAdminClient) CreateDisabledUser(ctx context.Context, email, display
 		return "", fmt.Errorf("keycloak.CreateDisabledUser: Location header kosong, tidak bisa ambil user ID")
 	}
 	return id, nil
+}
+
+func (c *httpAdminClient) SetPassword(ctx context.Context, keycloakUserID, newPassword string) error {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return fmt.Errorf("keycloak.SetPassword: %w", err)
+	}
+
+	credPayload, err := json.Marshal(map[string]any{
+		"type":      "password",
+		"value":     newPassword,
+		"temporary": false,
+	})
+	if err != nil {
+		return fmt.Errorf("keycloak.SetPassword: encode credential: %w", err)
+	}
+	if err := c.doJSON(ctx, tok, http.MethodPut,
+		fmt.Sprintf("%s/admin/realms/%s/users/%s/reset-password", c.baseURL, c.realm, keycloakUserID),
+		credPayload, http.StatusNoContent); err != nil {
+		return fmt.Errorf("keycloak.SetPassword: reset-password: %w", err)
+	}
+
+	// requiredActions diset eksplisit ke [CONFIGURE_TOTP] -- user selalu
+	// dibuat CreateDisabledUser dengan tepat [UPDATE_PASSWORD,
+	// CONFIGURE_TOTP], dan metode ini cuma dipanggil sekali per user tepat
+	// di titik password baru saja disetel.
+	actionsPayload, err := json.Marshal(map[string]any{
+		"requiredActions": []string{"CONFIGURE_TOTP"},
+	})
+	if err != nil {
+		return fmt.Errorf("keycloak.SetPassword: encode requiredActions: %w", err)
+	}
+	if err := c.doJSON(ctx, tok, http.MethodPut,
+		fmt.Sprintf("%s/admin/realms/%s/users/%s", c.baseURL, c.realm, keycloakUserID),
+		actionsPayload, http.StatusNoContent); err != nil {
+		return fmt.Errorf("keycloak.SetPassword: update requiredActions: %w", err)
+	}
+
+	return nil
+}
+
+// doJSON adalah helper request PUT/POST JSON umum dengan Authorization Bearer.
+func (c *httpAdminClient) doJSON(ctx context.Context, token, method, targetURL string, body []byte, wantStatus int) error {
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // close error on a read-only response body is not actionable
+
+	if resp.StatusCode != wantStatus {
+		respBody, _ := io.ReadAll(resp.Body) //nolint:errcheck // best-effort untuk pesan error
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 // splitDisplayName memecah "Nama Lengkap" jadi firstName/lastName --
