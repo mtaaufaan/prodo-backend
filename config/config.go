@@ -61,6 +61,10 @@ type Config struct {
 	// banyak origin dipisah koma untuk keperluan CORS).
 	AppBaseURL string `env:"APP_BASE_URL" envDefault:"http://localhost:5173"`
 
+	// MFAEncryptionKey -- passphrase pgcrypto untuk enkripsi totp_secret
+	// (S1-06), lihat docs/DATABASE_SCHEMA.md §5.4.
+	MFAEncryptionKey string `env:"MFA_ENCRYPTION_KEY" envDefault:""`
+
 	// MinIO (Object Storage)
 	MinIOEndpoint  string `env:"MINIO_ENDPOINT" envDefault:""`
 	MinIOAccessKey string `env:"MINIO_ACCESS_KEY" envDefault:""`

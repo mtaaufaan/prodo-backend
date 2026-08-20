@@ -22,7 +22,10 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/cache"
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/handler"
+	"github.com/mtaaufaan/prodo-backend/internal/keycloak"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
+	"github.com/mtaaufaan/prodo-backend/internal/service"
 	"github.com/mtaaufaan/prodo-backend/internal/telemetry"
 )
 
@@ -103,6 +106,31 @@ func run() error {
 	}))
 
 	app.Get("/health", handler.Health)
+
+	// S1-05/06: identity & Group Admin onboarding (US-073).
+	kcAdmin, err := keycloak.NewAdminClient(cfg.KeycloakIssuer, cfg.KeycloakAdminClientID, cfg.KeycloakAdminClientSecret)
+	if err != nil {
+		return fmt.Errorf("setup Keycloak admin client: %w", err)
+	}
+	jwtAuth, err := middleware.JWTAuth(cfg)
+	if err != nil {
+		return fmt.Errorf("setup JWT auth middleware: %w", err)
+	}
+
+	accountRepo := repository.NewAccountRepository(pool)
+	mfaRepo := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
+
+	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
+	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
+	mfaSvc := service.NewMFAService(mfaRepo)
+	activationSvc := service.NewActivationService(accountRepo, kcAdmin, mfaSvc, logger)
+
+	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
+	authHandler := handler.NewAuthHandler(activationSvc, logger)
+
+	v1 := app.Group("/api/v1")
+	v1.Post("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Create)
+	v1.Post("/auth/activate", authHandler.Activate)
 
 	serverErr := make(chan error, 1)
 	go func() {
