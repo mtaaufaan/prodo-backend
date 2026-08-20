@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS audit_logs_2027;
+DROP TABLE IF EXISTS audit_logs_2026;
+DROP TABLE IF EXISTS audit_logs_2025;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS platform_invitations;
