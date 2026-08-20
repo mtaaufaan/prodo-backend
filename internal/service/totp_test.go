@@ -61,4 +61,3 @@ func currentTOTPCode(t *testing.T, secret string) string {
 	now := time.Now()
 	return hotp(mustDecodeBase32(secret), now.Unix()/totpStepSeconds)
 }
-
