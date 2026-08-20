@@ -49,9 +49,13 @@ func JWTAuth(cfg *config.Config) (fiber.Handler, error) {
 	}
 
 	return func(c *fiber.Ctx) error {
+		// Kode error di sini pakai INVALID_CREDENTIALS (401), BUKAN
+		// UNAUTHORIZED -- docs/coding-conventions.md §7.3 mendefinisikan
+		// UNAUTHORIZED khusus untuk 403 (token valid tapi role tidak
+		// berizin, lihat RequirePlatformAdmin di bawah).
 		tokenStr, ok := strings.CutPrefix(c.Get("Authorization"), "Bearer ")
 		if !ok || tokenStr == "" {
-			return unauthorized(c, "UNAUTHORIZED", "Token tidak ditemukan")
+			return unauthorized(c, "INVALID_CREDENTIALS", "Token tidak ditemukan")
 		}
 
 		claims := &Claims{}
@@ -63,7 +67,7 @@ func JWTAuth(cfg *config.Config) (fiber.Handler, error) {
 			if errors.Is(err, jwt.ErrTokenExpired) {
 				return unauthorized(c, "TOKEN_EXPIRED", "Token sudah kedaluwarsa")
 			}
-			return unauthorized(c, "UNAUTHORIZED", "Token tidak valid")
+			return unauthorized(c, "INVALID_CREDENTIALS", "Token tidak valid")
 		}
 
 		c.Locals(claimsLocalsKey, claims)

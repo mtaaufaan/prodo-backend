@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // SHA-1 wajib dipakai untuk TOTP RFC 6238, bukan untuk hashing password
+	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
@@ -91,7 +92,10 @@ func verifyTOTP(base32Secret, code string, now time.Time) bool {
 
 	counter := now.Unix() / totpStepSeconds
 	for _, c := range []int64{counter - 1, counter, counter + 1} {
-		if hotp(key, c) == code {
+		// constant-time: kode OTP 6 digit rentan brute-force kalau
+		// perbandingannya bocor lewat timing (walau celahnya kecil, ini
+		// operasi murah untuk dibuat aman).
+		if subtle.ConstantTimeCompare([]byte(hotp(key, c)), []byte(code)) == 1 {
 			return true
 		}
 	}

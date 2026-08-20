@@ -118,7 +118,10 @@ func run() error {
 	}
 
 	accountRepo := repository.NewAccountRepository(pool)
-	mfaRepo := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
+	mfaRepo, err := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("setup MFA repository: %w", err)
+	}
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)

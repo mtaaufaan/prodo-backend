@@ -1,7 +1,10 @@
 // Package validator holds input validation helpers.
 package validator
 
-import "unicode"
+import (
+	"unicode"
+	"unicode/utf8"
+)
 
 const minPasswordLength = 12
 
@@ -10,7 +13,10 @@ const minPasswordLength = 12
 // karakter spesial. Mengembalikan pesan yang bisa langsung ditampilkan ke
 // user, atau string kosong kalau valid.
 func ValidatePasswordComplexity(password string) string {
-	if len(password) < minPasswordLength {
+	// RuneCountInString, bukan len() -- len() menghitung byte, jadi
+	// password multi-byte UTF-8 (emoji, aksara non-Latin) bisa lolos syarat
+	// "12 karakter" dengan jumlah karakter asli yang lebih sedikit.
+	if utf8.RuneCountInString(password) < minPasswordLength {
 		return "Password minimal 12 karakter"
 	}
 

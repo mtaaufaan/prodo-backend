@@ -267,7 +267,7 @@ func (r *AccountRepository) FindUserContactByID(ctx context.Context, userID stri
 // IS NULL) hanya mengizinkan SATU invitation pending per email. Kalau tidak
 // ada baris pending untuk email ini (sudah diaktivasi, atau tidak pernah
 // diundang) -> domain.ErrInvitationNotFound.
-func (r *AccountRepository) RegenerateInvitationToken(ctx context.Context, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error {
+func (r *AccountRepository) RegenerateInvitationToken(ctx context.Context, targetUserID, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("repository.RegenerateInvitationToken: begin tx: %w", err)
@@ -286,7 +286,10 @@ func (r *AccountRepository) RegenerateInvitationToken(ctx context.Context, email
 		return fmt.Errorf("repository.RegenerateInvitationToken: %w", domain.ErrInvitationNotFound)
 	}
 
-	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.activation_resent", "user", actorUserID); err != nil {
+	// entity_id = target Group Admin yang di-resend invitation-nya (yang
+	// "dimutasi", sesuai docs/DATABASE_SCHEMA.md §5.27) -- actor_id tetap
+	// Platform Admin yang melakukan aksi.
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.activation_resent", "user", targetUserID); err != nil {
 		return fmt.Errorf("repository.RegenerateInvitationToken: %w", err)
 	}
 
