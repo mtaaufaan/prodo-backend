@@ -27,6 +27,10 @@ func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p 
 	return f.returnID, nil
 }
 
+func (f *fakeAccountRepository) FindUserIDByProviderSub(_ context.Context, _ string) (string, error) {
+	return f.returnID, f.err
+}
+
 type fakeKeycloakClient struct {
 	userID string
 	err    error
@@ -37,6 +41,10 @@ func (f *fakeKeycloakClient) CreateDisabledUser(_ context.Context, _, _ string) 
 		return "", f.err
 	}
 	return f.userID, nil
+}
+
+func (f *fakeKeycloakClient) SetPassword(_ context.Context, _, _ string) error {
+	return f.err
 }
 
 func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {

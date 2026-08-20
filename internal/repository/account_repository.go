@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -97,4 +98,67 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: commit tx: %w", err)
 	}
 	return userID, nil
+}
+
+// FindUserIDByProviderSub resolve Keycloak subject (JWT "sub" claim) jadi
+// users.id internal PRODO -- dipakai handler untuk mengisi invited_by/actor_id
+// dari klaim JWT platform admin yang sedang login.
+func (r *AccountRepository) FindUserIDByProviderSub(ctx context.Context, providerSub string) (userID string, err error) {
+	err = r.db.QueryRow(ctx, `
+		SELECT user_id FROM user_auth_providers WHERE provider_sub = $1
+	`, providerSub).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.FindUserIDByProviderSub: %w", domain.ErrUserNotFound)
+		}
+		return "", fmt.Errorf("repository.FindUserIDByProviderSub: %w", err)
+	}
+	return userID, nil
+}
+
+// ActivationTarget adalah data yang dibutuhkan untuk memproses satu
+// permintaan aktivasi akun (S1-06): siapa user-nya, keycloak sub-nya, dan
+// ID baris platform_invitations untuk ditandai accepted setelah berhasil.
+type ActivationTarget struct {
+	InvitationID string
+	UserID       string
+	Email        string
+	DisplayName  string
+	KeycloakSub  string
+}
+
+// FindActivationTarget mencari invitation yang PENDING (belum accepted,
+// belum expired) berdasarkan hash token mentah dari email. Tidak ditemukan
+// -> domain.ErrInvitationNotFound (mencakup: token salah, sudah dipakai,
+// atau sudah lewat 72 jam -- lihat docs/API_CONTRACT.md INVALID_OR_EXPIRED_TOKEN,
+// satu kode error untuk ketiganya, sesuai kontrak yang sudah didokumentasikan).
+func (r *AccountRepository) FindActivationTarget(ctx context.Context, tokenHash string) (*ActivationTarget, error) {
+	t := &ActivationTarget{}
+	err := r.db.QueryRow(ctx, `
+		SELECT pi.id, u.id, u.email, u.display_name, uap.provider_sub
+		FROM platform_invitations pi
+		JOIN users u ON u.email = pi.email
+		JOIN user_auth_providers uap ON uap.user_id = u.id
+		WHERE pi.token_hash = $1
+		  AND pi.accepted_at IS NULL
+		  AND pi.expires_at > NOW()
+	`, tokenHash).Scan(&t.InvitationID, &t.UserID, &t.Email, &t.DisplayName, &t.KeycloakSub)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.FindActivationTarget: %w", domain.ErrInvitationNotFound)
+		}
+		return nil, fmt.Errorf("repository.FindActivationTarget: %w", err)
+	}
+	return t, nil
+}
+
+// MarkInvitationAccepted menandai token aktivasi sudah dipakai -- one-time
+// use, tidak bisa dipakai ulang meski belum kedaluwarsa (US-073 AC).
+func (r *AccountRepository) MarkInvitationAccepted(ctx context.Context, invitationID string) error {
+	if _, err := r.db.Exec(ctx, `
+		UPDATE platform_invitations SET accepted_at = NOW() WHERE id = $1
+	`, invitationID); err != nil {
+		return fmt.Errorf("repository.MarkInvitationAccepted: %w", err)
+	}
+	return nil
 }
