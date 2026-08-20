@@ -24,7 +24,7 @@ const groupAdminInvitationTTL = 72 * time.Hour
 // accountRepository -- interface didefinisikan di sisi consumer (service)
 // supaya unit test bisa pakai fake tanpa DB nyata, lihat docs/coding-conventions.md §3.9.
 type accountRepository interface {
-	CreateGroupAdminInvitation(ctx context.Context, p repository.CreateGroupAdminInvitationParams) (userID string, err error)
+	CreateGroupAdminInvitation(ctx context.Context, p *repository.CreateGroupAdminInvitationParams) (userID string, err error)
 }
 
 type AccountService struct {
@@ -89,7 +89,7 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAd
 
 	expiresAt := time.Now().Add(groupAdminInvitationTTL)
 
-	userID, err := s.repo.CreateGroupAdminInvitation(ctx, repository.CreateGroupAdminInvitationParams{
+	userID, err := s.repo.CreateGroupAdminInvitation(ctx, &repository.CreateGroupAdminInvitationParams{
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
 		KeycloakUserID:  kcUserID,

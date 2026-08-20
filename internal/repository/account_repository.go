@@ -44,7 +44,7 @@ type CreateGroupAdminInvitationParams struct {
 // platform_role='group_admin'), referensi Keycloak-nya, token aktivasi, dan
 // entry audit trail (US-073 AC: "seluruh aksi onboarding dicatat"). Kalau
 // email sudah ada, mengembalikan domain.ErrEmailAlreadyExists.
-func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p CreateGroupAdminInvitationParams) (userID string, err error) {
+func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *CreateGroupAdminInvitationParams) (userID string, err error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: begin tx: %w", err)

@@ -19,8 +19,8 @@ type fakeAccountRepository struct {
 	err      error
 }
 
-func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p repository.CreateGroupAdminInvitationParams) (string, error) {
-	f.captured = p
+func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p *repository.CreateGroupAdminInvitationParams) (string, error) {
+	f.captured = *p
 	if f.err != nil {
 		return "", f.err
 	}
