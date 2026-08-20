@@ -41,6 +41,26 @@ type Config struct {
 	KeycloakIssuer   string `env:"KEYCLOAK_ISSUER" envDefault:""` // e.g. http://localhost:8080/realms/PRODO
 	KeycloakAudience string `env:"KEYCLOAK_AUDIENCE" envDefault:"prodo-backend"`
 
+	// Keycloak Admin REST API (service account client_credentials) --
+	// dipakai internal/keycloak untuk provisioning user (S1-03). Client
+	// "prodo-backend-admin" di infra/keycloak/realm-PRODO.json, lihat
+	// docs/s1-h1-infra-runbook.md §Update.
+	KeycloakAdminClientID     string `env:"KEYCLOAK_ADMIN_CLIENT_ID" envDefault:""`
+	KeycloakAdminClientSecret string `env:"KEYCLOAK_ADMIN_CLIENT_SECRET" envDefault:""`
+
+	// SMTP (Mailpit di dev, S1-04) -- tanpa auth untuk Mailpit; SMTPUser/Pass
+	// kosong berarti kirim tanpa autentikasi.
+	SMTPHost string `env:"SMTP_HOST" envDefault:"localhost"`
+	SMTPPort int    `env:"SMTP_PORT" envDefault:"1025"`
+	SMTPFrom string `env:"SMTP_FROM" envDefault:"noreply@prodo.local"`
+	SMTPUser string `env:"SMTP_USER" envDefault:""`
+	SMTPPass string `env:"SMTP_PASS" envDefault:""`
+
+	// AppBaseURL -- origin frontend, dipakai untuk menyusun activation link
+	// di email (S1-04). Beda konsep dari CORSAllowOrigins (yang bisa berisi
+	// banyak origin dipisah koma untuk keperluan CORS).
+	AppBaseURL string `env:"APP_BASE_URL" envDefault:"http://localhost:5173"`
+
 	// MinIO (Object Storage)
 	MinIOEndpoint  string `env:"MINIO_ENDPOINT" envDefault:""`
 	MinIOAccessKey string `env:"MINIO_ACCESS_KEY" envDefault:""`
