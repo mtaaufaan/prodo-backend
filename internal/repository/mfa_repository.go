@@ -34,3 +34,26 @@ func (r *MFARepository) SaveTOTPSecret(ctx context.Context, userID, totpSecret s
 	}
 	return nil
 }
+
+// GetTOTPSecret mendekripsi dan mengembalikan totp_secret user (S1-07).
+func (r *MFARepository) GetTOTPSecret(ctx context.Context, userID string) (string, error) {
+	var secret string
+	err := r.db.QueryRow(ctx, `
+		SELECT pgp_sym_decrypt(decode(totp_secret, 'base64'), $2)
+		FROM user_mfa_configs WHERE user_id = $1
+	`, userID, r.encryptionKey).Scan(&secret)
+	if err != nil {
+		return "", fmt.Errorf("repository.GetTOTPSecret: %w", err)
+	}
+	return secret, nil
+}
+
+// EnableMFA menandai MFA aktif setelah OTP pertama berhasil diverifikasi.
+func (r *MFARepository) EnableMFA(ctx context.Context, userID string) error {
+	if _, err := r.db.Exec(ctx, `
+		UPDATE user_mfa_configs SET is_enabled = TRUE, updated_at = NOW() WHERE user_id = $1
+	`, userID); err != nil {
+		return fmt.Errorf("repository.EnableMFA: %w", err)
+	}
+	return nil
+}

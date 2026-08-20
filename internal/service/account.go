@@ -26,6 +26,8 @@ const groupAdminInvitationTTL = 72 * time.Hour
 type accountRepository interface {
 	CreateGroupAdminInvitation(ctx context.Context, p *repository.CreateGroupAdminInvitationParams) (userID string, err error)
 	FindUserIDByProviderSub(ctx context.Context, providerSub string) (userID string, err error)
+	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
+	RegenerateInvitationToken(ctx context.Context, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error
 }
 
 type AccountService struct {
@@ -128,6 +130,41 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAd
 		UserID:          userID,
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
+		ActivationToken: rawToken,
+		ExpiresAt:       expiresAt,
+	}, nil
+}
+
+// ResendActivation meng-invalidate token aktivasi lama dan menerbitkan yang
+// baru (S1-08) -- dipakai Platform Admin saat Group Admin belum sempat
+// mengaktifkan akun sebelum link lama kedaluwarsa/hilang. Tidak menyentuh
+// Keycloak sama sekali (user Keycloak-nya sudah ada sejak S1-03 invite-time).
+func (s *AccountService) ResendActivation(ctx context.Context, targetUserID, actorUserID string) (*GroupAdminInvitation, error) {
+	contact, err := s.repo.FindUserContactByID(ctx, targetUserID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ResendActivation: %w", err)
+	}
+
+	rawToken, tokenHash, err := generateActivationToken()
+	if err != nil {
+		return nil, fmt.Errorf("service.ResendActivation: %w", err)
+	}
+	expiresAt := time.Now().Add(groupAdminInvitationTTL)
+
+	if err := s.repo.RegenerateInvitationToken(ctx, contact.Email, tokenHash, expiresAt, actorUserID); err != nil {
+		return nil, fmt.Errorf("service.ResendActivation: %w", err)
+	}
+
+	s.logger.Info("token aktivasi Group Admin diterbitkan ulang",
+		zap.String("user_id", targetUserID),
+		zap.String("email", contact.Email),
+		zap.Time("expires_at", expiresAt),
+	)
+
+	return &GroupAdminInvitation{
+		UserID:          targetUserID,
+		Email:           contact.Email,
+		DisplayName:     contact.DisplayName,
 		ActivationToken: rawToken,
 		ExpiresAt:       expiresAt,
 	}, nil
