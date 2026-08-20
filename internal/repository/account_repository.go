@@ -153,12 +153,165 @@ func (r *AccountRepository) FindActivationTarget(ctx context.Context, tokenHash 
 }
 
 // MarkInvitationAccepted menandai token aktivasi sudah dipakai -- one-time
-// use, tidak bisa dipakai ulang meski belum kedaluwarsa (US-073 AC).
-func (r *AccountRepository) MarkInvitationAccepted(ctx context.Context, invitationID string) error {
-	if _, err := r.db.Exec(ctx, `
+// use, tidak bisa dipakai ulang meski belum kedaluwarsa (US-073 AC) -- dan
+// mencatat audit trail langkah ini (US-073 AC: "seluruh aksi onboarding
+// dicatat"), actor = user itu sendiri (self-service, belum aktif).
+func (r *AccountRepository) MarkInvitationAccepted(ctx context.Context, invitationID, userID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.MarkInvitationAccepted: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if _, err := tx.Exec(ctx, `
 		UPDATE platform_invitations SET accepted_at = NOW() WHERE id = $1
 	`, invitationID); err != nil {
+		return fmt.Errorf("repository.MarkInvitationAccepted: update: %w", err)
+	}
+
+	if err := logAudit(ctx, tx, userID, "group_admin", "user.password_set", "user", userID); err != nil {
 		return fmt.Errorf("repository.MarkInvitationAccepted: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.MarkInvitationAccepted: commit tx: %w", err)
+	}
+	return nil
+}
+
+// MFAVerificationTarget adalah data yang dibutuhkan untuk memverifikasi OTP
+// pertama (S1-07) -- token aktivasi sudah accepted di S1-06 (langkah
+// password), jadi lookup di sini TIDAK mensyaratkan accepted_at IS NULL
+// lagi, melainkan justru sebaliknya (IS NOT NULL, harus sudah lewat S1-06)
+// dan MFA belum enabled (belum lewat S1-07).
+type MFAVerificationTarget struct {
+	UserID      string
+	KeycloakSub string
+}
+
+// FindMFAVerificationTarget mencari target verifikasi OTP dari hash token
+// yang sama dipakai di S1-06 -- token ini sudah "dipakai" (accepted) untuk
+// langkah password, tapi tetap jadi referensi identitas yang sah untuk
+// melanjutkan ke langkah MFA (satu alur aktivasi berkelanjutan).
+func (r *AccountRepository) FindMFAVerificationTarget(ctx context.Context, tokenHash string) (*MFAVerificationTarget, error) {
+	t := &MFAVerificationTarget{}
+	err := r.db.QueryRow(ctx, `
+		SELECT u.id, uap.provider_sub
+		FROM platform_invitations pi
+		JOIN users u ON u.email = pi.email
+		JOIN user_auth_providers uap ON uap.user_id = u.id
+		JOIN user_mfa_configs m ON m.user_id = u.id
+		WHERE pi.token_hash = $1
+		  AND pi.accepted_at IS NOT NULL
+		  AND m.is_enabled = FALSE
+	`, tokenHash).Scan(&t.UserID, &t.KeycloakSub)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.FindMFAVerificationTarget: %w", domain.ErrInvitationNotFound)
+		}
+		return nil, fmt.Errorf("repository.FindMFAVerificationTarget: %w", err)
+	}
+	return t, nil
+}
+
+// ActivateUser menandai akun aktif sepenuhnya setelah MFA terverifikasi
+// (S1-07, langkah terakhir onboarding US-073) + audit trail.
+func (r *AccountRepository) ActivateUser(ctx context.Context, userID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.ActivateUser: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE users SET is_active = TRUE, updated_at = NOW() WHERE id = $1
+	`, userID); err != nil {
+		return fmt.Errorf("repository.ActivateUser: update: %w", err)
+	}
+
+	if err := logAudit(ctx, tx, userID, "group_admin", "user.activated", "user", userID); err != nil {
+		return fmt.Errorf("repository.ActivateUser: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.ActivateUser: commit tx: %w", err)
+	}
+	return nil
+}
+
+// UserContact adalah info minimal untuk mengirim ulang email aktivasi (S1-08).
+type UserContact struct {
+	Email       string
+	DisplayName string
+}
+
+// FindUserContactByID mencari email+display_name dari users.id -- dipakai
+// S1-08 (resend activation) untuk tahu ke mana email baru dikirim.
+func (r *AccountRepository) FindUserContactByID(ctx context.Context, userID string) (*UserContact, error) {
+	c := &UserContact{}
+	err := r.db.QueryRow(ctx, `
+		SELECT email, display_name FROM users WHERE id = $1
+	`, userID).Scan(&c.Email, &c.DisplayName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.FindUserContactByID: %w", domain.ErrUserNotFound)
+		}
+		return nil, fmt.Errorf("repository.FindUserContactByID: %w", err)
+	}
+	return c, nil
+}
+
+// RegenerateInvitationToken meng-invalidate token lama dan menggantinya
+// dengan yang baru (S1-08) -- UPDATE in-place, bukan INSERT baru, karena
+// idx_platform_invitations_pending (partial unique index WHERE accepted_at
+// IS NULL) hanya mengizinkan SATU invitation pending per email. Kalau tidak
+// ada baris pending untuk email ini (sudah diaktivasi, atau tidak pernah
+// diundang) -> domain.ErrInvitationNotFound.
+func (r *AccountRepository) RegenerateInvitationToken(ctx context.Context, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.RegenerateInvitationToken: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE platform_invitations
+		SET token_hash = $2, expires_at = $3, created_at = NOW()
+		WHERE email = $1 AND accepted_at IS NULL
+	`, email, newTokenHash, newExpiresAt)
+	if err != nil {
+		return fmt.Errorf("repository.RegenerateInvitationToken: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.RegenerateInvitationToken: %w", domain.ErrInvitationNotFound)
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.activation_resent", "user", actorUserID); err != nil {
+		return fmt.Errorf("repository.RegenerateInvitationToken: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.RegenerateInvitationToken: commit tx: %w", err)
+	}
+	return nil
+}
+
+// execer adalah subset pgxpool.Pool/pgx.Tx yang cukup untuk logAudit --
+// supaya audit log bisa ditulis baik standalone maupun dalam transaksi
+// pemanggil (atomicity dengan aksi utamanya).
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// logAudit menulis satu baris audit_logs (US-073 AC: seluruh aksi onboarding
+// dicatat). metadata kosong untuk entry sesederhana ini -- entity_id dipakai
+// sebagai referensi utama.
+func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, entityType, entityID string) error {
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		VALUES ($1, $2, $3, $4, $5)
+	`, actorID, actorRole, action, entityType, entityID); err != nil {
+		return fmt.Errorf("logAudit: %w", err)
 	}
 	return nil
 }

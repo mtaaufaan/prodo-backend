@@ -130,7 +130,9 @@ func run() error {
 
 	v1 := app.Group("/api/v1")
 	v1.Post("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Create)
+	v1.Post("/platform/group-admins/:id/resend-activation", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ResendActivation)
 	v1.Post("/auth/activate", authHandler.Activate)
+	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
 
 	serverErr := make(chan error, 1)
 	go func() {

@@ -16,6 +16,11 @@ type fakeActivationRepository struct {
 	findErr          error
 	markAcceptedErr  error
 	markedInvitation string
+
+	mfaTarget     *repository.MFAVerificationTarget
+	findMFAErr    error
+	activateErr   error
+	activatedUser string
 }
 
 func (f *fakeActivationRepository) FindActivationTarget(_ context.Context, _ string) (*repository.ActivationTarget, error) {
@@ -25,9 +30,21 @@ func (f *fakeActivationRepository) FindActivationTarget(_ context.Context, _ str
 	return f.target, nil
 }
 
-func (f *fakeActivationRepository) MarkInvitationAccepted(_ context.Context, invitationID string) error {
+func (f *fakeActivationRepository) MarkInvitationAccepted(_ context.Context, invitationID, _ string) error {
 	f.markedInvitation = invitationID
 	return f.markAcceptedErr
+}
+
+func (f *fakeActivationRepository) FindMFAVerificationTarget(_ context.Context, _ string) (*repository.MFAVerificationTarget, error) {
+	if f.findMFAErr != nil {
+		return nil, f.findMFAErr
+	}
+	return f.mfaTarget, nil
+}
+
+func (f *fakeActivationRepository) ActivateUser(_ context.Context, userID string) error {
+	f.activatedUser = userID
+	return f.activateErr
 }
 
 func TestActivationService_SetPasswordAndInitMFA_Success(t *testing.T) {
@@ -59,6 +76,56 @@ func TestActivationService_SetPasswordAndInitMFA_TokenNotFound(t *testing.T) {
 	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	_, err := svc.SetPasswordAndInitMFA(context.Background(), "bad-token", "Str0ng!Passw0rd")
+	if !errors.Is(err, domain.ErrInvitationNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvitationNotFound", err)
+	}
+}
+
+func TestActivationService_VerifyMFAAndActivate_Success(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	repo := &fakeActivationRepository{mfaTarget: &repository.MFAVerificationTarget{
+		UserID:      "user-1",
+		KeycloakSub: "kc-sub-1",
+	}}
+	mfaRepo := &fakeMFARepository{savedSecret: secret}
+	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(mfaRepo), zap.NewNop())
+
+	code := currentTOTPCode(t, secret)
+	err := svc.VerifyMFAAndActivate(context.Background(), "raw-token", code)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.activatedUser != "user-1" {
+		t.Errorf("activatedUser = %q, want user-1", repo.activatedUser)
+	}
+	if !mfaRepo.enabled {
+		t.Error("MFA seharusnya enabled setelah verifikasi berhasil")
+	}
+}
+
+func TestActivationService_VerifyMFAAndActivate_WrongOTP(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	repo := &fakeActivationRepository{mfaTarget: &repository.MFAVerificationTarget{UserID: "user-1", KeycloakSub: "kc-sub-1"}}
+	mfaRepo := &fakeMFARepository{savedSecret: secret}
+	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(mfaRepo), zap.NewNop())
+
+	err := svc.VerifyMFAAndActivate(context.Background(), "raw-token", "000000")
+	if !errors.Is(err, domain.ErrInvalidOTP) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
+	}
+	if repo.activatedUser != "" {
+		t.Error("akun tidak boleh diaktifkan kalau OTP salah")
+	}
+	if mfaRepo.enabled {
+		t.Error("MFA tidak boleh enabled kalau OTP salah")
+	}
+}
+
+func TestActivationService_VerifyMFAAndActivate_TokenNotFound(t *testing.T) {
+	repo := &fakeActivationRepository{findMFAErr: domain.ErrInvitationNotFound}
+	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), zap.NewNop())
+
+	err := svc.VerifyMFAAndActivate(context.Background(), "bad-token", "123456")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvitationNotFound", err)
 	}

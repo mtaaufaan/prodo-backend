@@ -39,6 +39,11 @@ type AdminClient interface {
 	// menghapus requiredAction UPDATE_PASSWORD, menyisakan CONFIGURE_TOTP
 	// -- dipanggil S1-06 setelah token aktivasi tervalidasi.
 	SetPassword(ctx context.Context, keycloakUserID, newPassword string) error
+
+	// EnableUser mengaktifkan user (enabled=true) dan mengosongkan
+	// requiredActions -- dipanggil S1-07 setelah OTP pertama terverifikasi,
+	// menandai onboarding selesai sepenuhnya.
+	EnableUser(ctx context.Context, keycloakUserID string) error
 }
 
 type httpAdminClient struct {
@@ -209,6 +214,27 @@ func (c *httpAdminClient) SetPassword(ctx context.Context, keycloakUserID, newPa
 		return fmt.Errorf("keycloak.SetPassword: update requiredActions: %w", err)
 	}
 
+	return nil
+}
+
+func (c *httpAdminClient) EnableUser(ctx context.Context, keycloakUserID string) error {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return fmt.Errorf("keycloak.EnableUser: %w", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"enabled":         true,
+		"requiredActions": []string{},
+	})
+	if err != nil {
+		return fmt.Errorf("keycloak.EnableUser: encode payload: %w", err)
+	}
+	if err := c.doJSON(ctx, tok, http.MethodPut,
+		fmt.Sprintf("%s/admin/realms/%s/users/%s", c.baseURL, c.realm, keycloakUserID),
+		payload, http.StatusNoContent); err != nil {
+		return fmt.Errorf("keycloak.EnableUser: %w", err)
+	}
 	return nil
 }
 
