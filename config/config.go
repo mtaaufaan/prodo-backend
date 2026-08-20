@@ -41,6 +41,13 @@ type Config struct {
 	KeycloakIssuer   string `env:"KEYCLOAK_ISSUER" envDefault:""` // e.g. http://localhost:8080/realms/PRODO
 	KeycloakAudience string `env:"KEYCLOAK_AUDIENCE" envDefault:"prodo-backend"`
 
+	// Keycloak Admin REST API (service account client_credentials) --
+	// dipakai internal/keycloak untuk provisioning user (S1-03). Client
+	// "prodo-backend-admin" di infra/keycloak/realm-PRODO.json, lihat
+	// docs/s1-h1-infra-runbook.md §Update.
+	KeycloakAdminClientID     string `env:"KEYCLOAK_ADMIN_CLIENT_ID" envDefault:""`
+	KeycloakAdminClientSecret string `env:"KEYCLOAK_ADMIN_CLIENT_SECRET" envDefault:""`
+
 	// MinIO (Object Storage)
 	MinIOEndpoint  string `env:"MINIO_ENDPOINT" envDefault:""`
 	MinIOAccessKey string `env:"MINIO_ACCESS_KEY" envDefault:""`
