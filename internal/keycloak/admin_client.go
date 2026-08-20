@@ -213,8 +213,8 @@ func (c *httpAdminClient) SetPassword(ctx context.Context, keycloakUserID, newPa
 }
 
 // doJSON adalah helper request PUT/POST JSON umum dengan Authorization Bearer.
-func (c *httpAdminClient) doJSON(ctx context.Context, token, method, url string, body []byte, wantStatus int) error {
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+func (c *httpAdminClient) doJSON(ctx context.Context, token, method, targetURL string, body []byte, wantStatus int) error {
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
