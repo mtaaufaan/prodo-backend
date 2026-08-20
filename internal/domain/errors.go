@@ -22,4 +22,7 @@ var (
 	// kompleksitas (US-073 AC: 12+ karakter, huruf besar, kecil, angka,
 	// karakter spesial).
 	ErrWeakPassword = errors.New("password does not meet complexity requirements")
+
+	// ErrInvalidOTP dikembalikan saat kode OTP TOTP tidak cocok (S1-07).
+	ErrInvalidOTP = errors.New("invalid otp code")
 )

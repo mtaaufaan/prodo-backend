@@ -17,6 +17,12 @@ type fakeAccountRepository struct {
 	captured repository.CreateGroupAdminInvitationParams
 	returnID string
 	err      error
+
+	contact          *repository.UserContact
+	contactErr       error
+	regenErr         error
+	regeneratedEmail string
+	regeneratedActor string
 }
 
 func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p *repository.CreateGroupAdminInvitationParams) (string, error) {
@@ -29,6 +35,19 @@ func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p 
 
 func (f *fakeAccountRepository) FindUserIDByProviderSub(_ context.Context, _ string) (string, error) {
 	return f.returnID, f.err
+}
+
+func (f *fakeAccountRepository) FindUserContactByID(_ context.Context, _ string) (*repository.UserContact, error) {
+	if f.contactErr != nil {
+		return nil, f.contactErr
+	}
+	return f.contact, nil
+}
+
+func (f *fakeAccountRepository) RegenerateInvitationToken(_ context.Context, email, _ string, _ time.Time, actorUserID string) error {
+	f.regeneratedEmail = email
+	f.regeneratedActor = actorUserID
+	return f.regenErr
 }
 
 type fakeKeycloakClient struct {
@@ -44,6 +63,10 @@ func (f *fakeKeycloakClient) CreateDisabledUser(_ context.Context, _, _ string) 
 }
 
 func (f *fakeKeycloakClient) SetPassword(_ context.Context, _, _ string) error {
+	return f.err
+}
+
+func (f *fakeKeycloakClient) EnableUser(_ context.Context, _ string) error {
 	return f.err
 }
 
@@ -117,5 +140,53 @@ func TestAccountService_CreateGroupAdmin_RepoFailureAfterKeycloakCreate(t *testi
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestAccountService_ResendActivation_Success(t *testing.T) {
+	repo := &fakeAccountRepository{contact: &repository.UserContact{
+		Email:       "ga@example.com",
+		DisplayName: "Group Admin",
+	}}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	result, err := svc.ResendActivation(context.Background(), "user-1", "platform-admin-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Email != "ga@example.com" {
+		t.Errorf("Email = %q, want ga@example.com", result.Email)
+	}
+	if result.ActivationToken == "" {
+		t.Error("ActivationToken kosong")
+	}
+	if repo.regeneratedEmail != "ga@example.com" {
+		t.Errorf("regeneratedEmail = %q, want ga@example.com", repo.regeneratedEmail)
+	}
+	if repo.regeneratedActor != "platform-admin-1" {
+		t.Errorf("regeneratedActor = %q, want platform-admin-1", repo.regeneratedActor)
+	}
+}
+
+func TestAccountService_ResendActivation_NoUserFound(t *testing.T) {
+	repo := &fakeAccountRepository{contactErr: domain.ErrUserNotFound}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	_, err := svc.ResendActivation(context.Background(), "missing-user", "platform-admin-1")
+	if !errors.Is(err, domain.ErrUserNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrUserNotFound", err)
+	}
+}
+
+func TestAccountService_ResendActivation_NoPendingInvitation(t *testing.T) {
+	repo := &fakeAccountRepository{
+		contact:  &repository.UserContact{Email: "ga@example.com", DisplayName: "GA"},
+		regenErr: domain.ErrInvitationNotFound,
+	}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	_, err := svc.ResendActivation(context.Background(), "user-1", "platform-admin-1")
+	if !errors.Is(err, domain.ErrInvitationNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvitationNotFound", err)
 	}
 }

@@ -11,12 +11,22 @@ import (
 type fakeMFARepository struct {
 	savedUserID string
 	savedSecret string
+	enabled     bool
 	err         error
 }
 
 func (f *fakeMFARepository) SaveTOTPSecret(_ context.Context, userID, secret string) error {
 	f.savedUserID = userID
 	f.savedSecret = secret
+	return f.err
+}
+
+func (f *fakeMFARepository) GetTOTPSecret(_ context.Context, _ string) (string, error) {
+	return f.savedSecret, f.err
+}
+
+func (f *fakeMFARepository) EnableMFA(_ context.Context, _ string) error {
+	f.enabled = true
 	return f.err
 }
 
