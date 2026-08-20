@@ -48,6 +48,19 @@ type Config struct {
 	KeycloakAdminClientID     string `env:"KEYCLOAK_ADMIN_CLIENT_ID" envDefault:""`
 	KeycloakAdminClientSecret string `env:"KEYCLOAK_ADMIN_CLIENT_SECRET" envDefault:""`
 
+	// SMTP (Mailpit di dev, S1-04) -- tanpa auth untuk Mailpit; SMTPUser/Pass
+	// kosong berarti kirim tanpa autentikasi.
+	SMTPHost string `env:"SMTP_HOST" envDefault:"localhost"`
+	SMTPPort int    `env:"SMTP_PORT" envDefault:"1025"`
+	SMTPFrom string `env:"SMTP_FROM" envDefault:"noreply@prodo.local"`
+	SMTPUser string `env:"SMTP_USER" envDefault:""`
+	SMTPPass string `env:"SMTP_PASS" envDefault:""`
+
+	// AppBaseURL -- origin frontend, dipakai untuk menyusun activation link
+	// di email (S1-04). Beda konsep dari CORSAllowOrigins (yang bisa berisi
+	// banyak origin dipisah koma untuk keperluan CORS).
+	AppBaseURL string `env:"APP_BASE_URL" envDefault:"http://localhost:5173"`
+
 	// MinIO (Object Storage)
 	MinIOEndpoint  string `env:"MINIO_ENDPOINT" envDefault:""`
 	MinIOAccessKey string `env:"MINIO_ACCESS_KEY" envDefault:""`
