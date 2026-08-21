@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -15,25 +16,28 @@ import (
 // authRepository -- interface didefinisikan di consumer, lihat §3.9.
 type authRepository interface {
 	FindUserForLogin(ctx context.Context, email string) (*repository.LoginUserRecord, error)
+	FindUserIDByProviderSub(ctx context.Context, providerSub string) (string, error)
+	FindUserByID(ctx context.Context, userID string) (*repository.LoginUserRecord, error)
+	CreateSSOUser(ctx context.Context, email, displayName, providerSub string) (*repository.LoginUserRecord, error)
 }
 
-// AuthService menangani login credential lokal (S1-14, US-001) lewat model
-// Keycloak-delegated: password diverifikasi Keycloak sendiri (Direct Access
-// Grant), backend hanya mengecek status akun (users.is_active) dan
-// meneruskan token yang diterbitkan Keycloak apa adanya -- tidak pernah
-// menyimpan atau membandingkan password sendiri.
+// AuthService menangani login (US-001) lewat model Keycloak-delegated yang
+// dikonfirmasi di S1-01/02: password/identitas diverifikasi Keycloak
+// sendiri, backend hanya mengecek status akun PRODO dan meneruskan token
+// yang diterbitkan Keycloak apa adanya -- tidak pernah menyimpan/
+// membandingkan password sendiri.
 type AuthService struct {
 	repo   authRepository
-	ropc   keycloak.ROPCClient
+	oidc   keycloak.OIDCClient
 	logger *zap.Logger
 }
 
-func NewAuthService(repo authRepository, ropc keycloak.ROPCClient, logger *zap.Logger) *AuthService {
-	return &AuthService{repo: repo, ropc: ropc, logger: logger}
+func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, logger *zap.Logger) *AuthService {
+	return &AuthService{repo: repo, oidc: oidc, logger: logger}
 }
 
-// LoginResult adalah hasil LoginLocal, dipetakan langsung ke response
-// POST /auth/login sukses (API_CONTRACT.md §2).
+// LoginResult adalah hasil LoginLocal/LoginSSO, dipetakan langsung ke
+// response POST /auth/login sukses (API_CONTRACT.md §2).
 type LoginResult struct {
 	AccessToken  string
 	RefreshToken string
@@ -62,7 +66,7 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password string) (*
 		return nil, fmt.Errorf("service.LoginLocal: %w", domain.ErrAccountInactive)
 	}
 
-	tok, err := s.ropc.PasswordGrant(ctx, email, password)
+	tok, err := s.oidc.PasswordGrant(ctx, email, password)
 	if err != nil {
 		if errors.Is(err, keycloak.ErrInvalidGrant) {
 			return nil, fmt.Errorf("service.LoginLocal: %w", domain.ErrInvalidCredentials)
@@ -79,4 +83,77 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password string) (*
 		ExpiresIn:    tok.ExpiresIn,
 		User:         user,
 	}, nil
+}
+
+// ssoClaims -- subset claim OIDC standar yang dibutuhkan untuk mapping ke
+// akun PRODO (S1-15). Bukan verifikasi ulang token (lihat catatan di
+// LoginSSO) -- cukup decode untuk membaca identitas.
+type ssoClaims struct {
+	jwt.RegisteredClaims
+	Email       string `json:"email"`
+	Name        string `json:"name"`
+	PrefUsrname string `json:"preferred_username"`
+}
+
+// LoginSSO menukar authorization code hasil redirect Keycloak menjadi
+// token, lalu memetakan identitas ke akun PRODO (S1-15, US-001): kalau
+// provider_sub sudah pernah login sebelumnya -> pakai akun existing, kalau
+// belum -> auto-create (member, langsung aktif). Klaim identitas (sub,
+// email, name) diambil dari ID token TANPA verifikasi signature ulang --
+// token ini didapat langsung dari token endpoint Keycloak lewat panggilan
+// server-to-server TLS (bukan dari input user), jadi levelnya sama dengan
+// access_token di LoginLocal yang juga diteruskan tanpa diperiksa isinya.
+// ponytail: kalau nanti authorization code dipertukarkan lewat jalur yang
+// tidak lagi server-to-server langsung, verifikasi JWKS wajib ditambahkan
+// balik (lihat internal/middleware/auth.go untuk pola JWKS yang sudah ada).
+func (s *AuthService) LoginSSO(ctx context.Context, code, redirectURI string) (*LoginResult, error) {
+	tok, err := s.oidc.ExchangeAuthorizationCode(ctx, code, redirectURI)
+	if err != nil {
+		if errors.Is(err, keycloak.ErrInvalidGrant) {
+			return nil, fmt.Errorf("service.LoginSSO: %w", domain.ErrInvalidCredentials)
+		}
+		return nil, fmt.Errorf("service.LoginSSO: %w", err)
+	}
+
+	claims := &ssoClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(tok.IDToken, claims); err != nil {
+		return nil, fmt.Errorf("service.LoginSSO: decode id_token: %w", err)
+	}
+	sub := claims.Subject
+	displayName := claims.Name
+	if displayName == "" {
+		displayName = claims.PrefUsrname
+	}
+
+	user, err := s.findOrProvisionSSOUser(ctx, sub, claims.Email, displayName)
+	if err != nil {
+		return nil, fmt.Errorf("service.LoginSSO: %w", err)
+	}
+
+	s.logger.Info("login SSO berhasil", zap.String("user_id", user.ID))
+
+	return &LoginResult{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		TokenType:    tok.TokenType,
+		ExpiresIn:    tok.ExpiresIn,
+		User:         user,
+	}, nil
+}
+
+func (s *AuthService) findOrProvisionSSOUser(ctx context.Context, providerSub, email, displayName string) (*repository.LoginUserRecord, error) {
+	userID, err := s.repo.FindUserIDByProviderSub(ctx, providerSub)
+	if err == nil {
+		return s.repo.FindUserByID(ctx, userID)
+	}
+	if !errors.Is(err, domain.ErrUserNotFound) {
+		return nil, err
+	}
+
+	user, err := s.repo.CreateSSOUser(ctx, email, displayName, providerSub)
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("akun SSO baru dibuat otomatis", zap.String("user_id", user.ID), zap.String("email", email))
+	return user, nil
 }
