@@ -105,10 +105,19 @@ func (c *httpOIDCClient) tokenRequest(ctx context.Context, form url.Values) (*To
 		return nil, fmt.Errorf("keycloak.tokenRequest: baca response: %w", err)
 	}
 
-	if resp.StatusCode == http.StatusBadRequest {
-		return nil, fmt.Errorf("keycloak.tokenRequest: %w", ErrInvalidGrant)
-	}
 	if resp.StatusCode != http.StatusOK {
+		// Keycloak tidak konsisten soal status code untuk invalid_grant --
+		// grant password (kredensial salah) balas HTTP 401, sementara
+		// authorization_code (kode salah/kedaluwarsa) balas HTTP 400.
+		// Cek field "error" di body, bukan cuma status code, supaya kedua
+		// grant tertangani sama (ditemukan lewat verifikasi live S1-18,
+		// bukan cuma unit test yang selalu mock HTTP 400).
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error == "invalid_grant" {
+			return nil, fmt.Errorf("keycloak.tokenRequest: %w", ErrInvalidGrant)
+		}
 		return nil, fmt.Errorf("keycloak.tokenRequest: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
