@@ -27,7 +27,16 @@ type Claims struct {
 	PlatformRole string `json:"prodo_platform_role"`
 }
 
-// JWTAuth memverifikasi Bearer token terhadap JWKS Keycloak (RS256) dan
+// SessionChecker -- interface didefinisikan di consumer (§3.9), diimplementasikan
+// service.SessionService. Dicek di SETIAP request terautentikasi (S1-28):
+// Redis blacklist dulu (cepat), baru sliding idle timeout di Postgres --
+// lihat docs/DATABASE_SCHEMA.md §5.3.
+type SessionChecker interface {
+	IsValidSession(ctx context.Context, jti string) (bool, error)
+}
+
+// JWTAuth memverifikasi Bearer token terhadap JWKS Keycloak (RS256),
+// mengecek sesi (S1-28: revoked/idle-timeout via SessionChecker), dan
 // menyimpan klaimnya di Fiber locals untuk dipakai handler/RequirePlatformAdmin
 // lewat ClaimsFromContext.
 //
@@ -41,7 +50,7 @@ type Claims struct {
 // masa berlaku sudah cukup untuk kepercayaan token di tahap ini (satu
 // issuer terpercaya, satu API). Tambah validasi audience ketat kalau nanti
 // ada API/audience lain yang perlu dibedakan.
-func JWTAuth(cfg *config.Config) (fiber.Handler, error) {
+func JWTAuth(cfg *config.Config, sessions SessionChecker) (fiber.Handler, error) {
 	jwksURL := fmt.Sprintf("%s/protocol/openid-connect/certs", cfg.KeycloakIssuer)
 	k, err := keyfunc.NewDefaultCtx(context.Background(), []string{jwksURL})
 	if err != nil {
@@ -68,6 +77,20 @@ func JWTAuth(cfg *config.Config) (fiber.Handler, error) {
 				return unauthorized(c, "TOKEN_EXPIRED", "Token sudah kedaluwarsa")
 			}
 			return unauthorized(c, "INVALID_CREDENTIALS", "Token tidak valid")
+		}
+
+		// S1-28: token secara kriptografis valid, tapi sesinya sendiri
+		// bisa sudah di-revoke (logout/force-logout) atau idle > 30 menit
+		// (sliding expiration) -- keduanya HARUS ditolak meski JWT-nya
+		// sendiri belum expired. Tidak ada baris sesi sama sekali (mis.
+		// token dari sebelum S1-27 ada) dianggap TIDAK valid juga --
+		// fail-closed, konsisten dengan model "setiap login membuat sesi".
+		valid, err := sessions.IsValidSession(c.Context(), claims.ID)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "gagal memverifikasi sesi")
+		}
+		if !valid {
+			return unauthorized(c, "TOKEN_EXPIRED", "Sesi sudah berakhir atau tidak aktif")
 		}
 
 		c.Locals(claimsLocalsKey, claims)

@@ -40,4 +40,9 @@ var (
 	// onboarding normal (S1-06/07 mewajibkan setup MFA sebelum is_active
 	// TRUE), jadi ini murni pengaman untuk state yang tidak konsisten.
 	ErrMFARequired = errors.New("mfa is required for this account but not configured")
+
+	// ErrSessionNotFound dikembalikan saat jti tidak ditemukan di
+	// user_sessions, atau ditemukan tapi milik user lain (S1-33) --
+	// disamakan supaya tidak membocorkan keberadaan sesi user lain.
+	ErrSessionNotFound = errors.New("session not found")
 )
