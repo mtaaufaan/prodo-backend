@@ -152,9 +152,14 @@ func run() error {
 	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
 	v1.Post("/auth/login", authHandler.Login)
 	v1.Get("/auth/sessions", jwtAuth, sessionHandler.List)
-	// ⚠️ S1-30 gap: dibatasi Platform-Admin-only, bukan "group_admin" sesuai
-	// wording sprint_backlog.md -- lihat komentar SessionHandler.ListForUser.
+	v1.Delete("/auth/sessions/:jti", jwtAuth, sessionHandler.Revoke)
+	v1.Delete("/auth/sessions", jwtAuth, sessionHandler.RevokeAll)
+	// ⚠️ S1-30/35 gap: dibatasi Platform-Admin-only, bukan "group_admin"/
+	// "Group Admin dalam organisasinya sendiri" sesuai wording
+	// sprint_backlog.md/API_CONTRACT.md -- lihat komentar
+	// SessionHandler.ListForUser/RevokeAllForUser.
 	v1.Get("/admin/users/:userId/sessions", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.ListForUser)
+	v1.Post("/admin/users/:userId/sessions/revoke-all", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.RevokeAllForUser)
 
 	serverErr := make(chan error, 1)
 	go func() {

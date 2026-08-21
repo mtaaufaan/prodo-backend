@@ -181,6 +181,17 @@ func (s *AccountService) ResendActivation(ctx context.Context, targetUserID, act
 	}, nil
 }
 
+// UserExists mengecek keberadaan users.id -- dipakai handler force-logout
+// (S1-35) untuk membalas 404 USER_NOT_FOUND sebelum memanggil SessionService,
+// karena RevokeAllSessions sendiri tidak membedakan "user tidak ada" dari
+// "user ada tapi tidak punya sesi aktif" (keduanya sama-sama 0 baris ter-revoke).
+func (s *AccountService) UserExists(ctx context.Context, userID string) error {
+	if _, err := s.repo.FindUserContactByID(ctx, userID); err != nil {
+		return fmt.Errorf("service.UserExists: %w", err)
+	}
+	return nil
+}
+
 // generateActivationToken menghasilkan token acak (256-bit) untuk dikirim
 // ke user lewat email, dan hash SHA-256-nya untuk disimpan di DB -- token
 // mentah tidak pernah disimpan (kalau DB bocor, token tidak bisa dipakai
