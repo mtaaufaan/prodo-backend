@@ -38,9 +38,14 @@ func NewActivationService(repo activationRepository, kc keycloak.AdminClient, mf
 
 // ActivationResult adalah hasil langkah pertama aktivasi -- dikembalikan ke
 // handler untuk direspons sebagai QR code setup MFA (bukan access token;
-// itu baru diterbitkan setelah OTP diverifikasi di S1-07).
+// itu baru diterbitkan setelah OTP diverifikasi di S1-07). TOTPSecret adalah
+// fallback "masukkan kunci manual" kalau authenticator app tidak bisa scan
+// QR (Set Password.dc.html).
 type ActivationResult struct {
 	QRCodePNGBase64 string
+	TOTPSecret      string
+	Email           string
+	DisplayName     string
 }
 
 // SetPasswordAndInitMFA memvalidasi token aktivasi, menyetel password baru
@@ -58,7 +63,7 @@ func (s *ActivationService) SetPasswordAndInitMFA(ctx context.Context, rawToken,
 		return nil, fmt.Errorf("service.SetPasswordAndInitMFA: %w", err)
 	}
 
-	qrPNG, err := s.mfa.SetupTOTP(ctx, target.UserID, target.Email)
+	setup, err := s.mfa.SetupTOTP(ctx, target.UserID, target.Email)
 	if err != nil {
 		return nil, fmt.Errorf("service.SetPasswordAndInitMFA: %w", err)
 	}
@@ -76,7 +81,19 @@ func (s *ActivationService) SetPasswordAndInitMFA(ctx context.Context, rawToken,
 		zap.String("email", target.Email),
 	)
 
-	return &ActivationResult{QRCodePNGBase64: qrPNG}, nil
+	return &ActivationResult{
+		QRCodePNGBase64: setup.QRCodePNGBase64,
+		TOTPSecret:      setup.TOTPSecret,
+		Email:           target.Email,
+		DisplayName:     target.DisplayName,
+	}, nil
+}
+
+// MFAActivationResult adalah hasil langkah terakhir aktivasi -- backup
+// codes cuma pernah dikembalikan SEKALI ini, tidak pernah bisa diambil ulang
+// (hanya hash-nya yang disimpan, lihat MFAService.VerifyAndEnable).
+type MFAActivationResult struct {
+	BackupCodes []string
 }
 
 // VerifyMFAAndActivate adalah langkah terakhir onboarding Group Admin
@@ -84,22 +101,22 @@ func (s *ActivationService) SetPasswordAndInitMFA(ctx context.Context, rawToken,
 // lalu mengaktifkan akun penuh -- users.is_active=TRUE, Keycloak enabled=true
 // + requiredActions dikosongkan. Kode salah -> domain.ErrInvalidOTP (tidak
 // mengubah state apapun, aman dicoba ulang).
-func (s *ActivationService) VerifyMFAAndActivate(ctx context.Context, rawToken, otpCode string) error {
+func (s *ActivationService) VerifyMFAAndActivate(ctx context.Context, rawToken, otpCode string) (*MFAActivationResult, error) {
 	target, err := s.repo.FindMFAVerificationTarget(ctx, hashActivationToken(rawToken))
 	if err != nil {
-		return fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
+		return nil, fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
 	}
 
-	ok, err := s.mfa.VerifyAndEnable(ctx, target.UserID, otpCode)
+	ok, backupCodes, err := s.mfa.VerifyAndEnable(ctx, target.UserID, otpCode)
 	if err != nil {
-		return fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
+		return nil, fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("service.VerifyMFAAndActivate: %w", domain.ErrInvalidOTP)
+		return nil, fmt.Errorf("service.VerifyMFAAndActivate: %w", domain.ErrInvalidOTP)
 	}
 
 	if err := s.repo.ActivateUser(ctx, target.UserID); err != nil {
-		return fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
+		return nil, fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
 	}
 
 	if err := s.keycloak.EnableUser(ctx, target.KeycloakSub); err != nil {
@@ -107,13 +124,13 @@ func (s *ActivationService) VerifyMFAAndActivate(ctx context.Context, rawToken, 
 			zap.String("user_id", target.UserID),
 			zap.Error(err),
 		)
-		return fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
+		return nil, fmt.Errorf("service.VerifyMFAAndActivate: %w", err)
 	}
 
 	s.logger.Info("akun Group Admin aktif sepenuhnya",
 		zap.String("user_id", target.UserID),
 	)
-	return nil
+	return &MFAActivationResult{BackupCodes: backupCodes}, nil
 }
 
 // hashActivationToken menghitung SHA-256 dari token mentah untuk dicocokkan
