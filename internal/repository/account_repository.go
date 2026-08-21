@@ -215,7 +215,7 @@ func (r *AccountRepository) MarkInvitationAccepted(ctx context.Context, invitati
 		return fmt.Errorf("repository.MarkInvitationAccepted: update: %w", err)
 	}
 
-	if err := logAudit(ctx, tx, userID, "group_admin", "user.password_set", "user", userID); err != nil {
+	if err := logAudit(ctx, tx, userID, "group_admin", "user.password_set", userID); err != nil {
 		return fmt.Errorf("repository.MarkInvitationAccepted: %w", err)
 	}
 
@@ -275,7 +275,7 @@ func (r *AccountRepository) ActivateUser(ctx context.Context, userID string) err
 		return fmt.Errorf("repository.ActivateUser: update: %w", err)
 	}
 
-	if err := logAudit(ctx, tx, userID, "group_admin", "user.activated", "user", userID); err != nil {
+	if err := logAudit(ctx, tx, userID, "group_admin", "user.activated", userID); err != nil {
 		return fmt.Errorf("repository.ActivateUser: %w", err)
 	}
 
@@ -318,6 +318,71 @@ func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) 
 			return nil, fmt.Errorf("repository.FindUserForLogin: %w", domain.ErrUserNotFound)
 		}
 		return nil, fmt.Errorf("repository.FindUserForLogin: %w", err)
+	}
+	return u, nil
+}
+
+// FindUserByID mencari user berdasarkan users.id -- dipakai LoginSSO (S1-15)
+// setelah provider_sub ditemukan di user_auth_providers.
+func (r *AccountRepository) FindUserByID(ctx context.Context, userID string) (*LoginUserRecord, error) {
+	u := &LoginUserRecord{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, email, display_name, platform_role, is_active, avatar_url
+		FROM users WHERE id = $1 AND deleted_at IS NULL
+	`, userID).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PlatformRole, &u.IsActive, &u.AvatarURL)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.FindUserByID: %w", domain.ErrUserNotFound)
+		}
+		return nil, fmt.Errorf("repository.FindUserByID: %w", err)
+	}
+	return u, nil
+}
+
+// CreateSSOUser membuat akun PRODO baru untuk user SSO yang login pertama
+// kali (S1-15, "auto-create akun jika user SSO pertama kali") -- langsung
+// aktif (is_active=TRUE, tidak lewat alur onboarding aktivasi US-073 yang
+// khusus untuk Group Admin) karena identitas sudah divouch oleh IdP.
+// platform_role default 'member'. sso_config_id sengaja NULL -- resolusi ke
+// sso_configs per-organisasi belum diimplementasikan (federation IdP
+// eksternal masih stub di S1-13, enabled:false), lihat docs/s1-kickoff.html
+// S1-15. Kalau email sudah dipakai user lain (mis. akun local existing) ->
+// domain.ErrEmailAlreadyExists, TIDAK auto-link -- keputusan desain
+// account-linking di-defer.
+func (r *AccountRepository) CreateSSOUser(ctx context.Context, email, displayName, providerSub string) (*LoginUserRecord, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("repository.CreateSSOUser: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	u := &LoginUserRecord{Email: email, DisplayName: displayName, PlatformRole: "member", IsActive: true}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO users (email, display_name, platform_role, is_active)
+		VALUES ($1, $2, 'member', TRUE)
+		RETURNING id
+	`, email, displayName).Scan(&u.ID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, fmt.Errorf("repository.CreateSSOUser: %w", domain.ErrEmailAlreadyExists)
+		}
+		return nil, fmt.Errorf("repository.CreateSSOUser: insert users: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO user_auth_providers (user_id, provider, provider_sub)
+		VALUES ($1, 'keycloak_oidc', $2)
+	`, u.ID, providerSub); err != nil {
+		return nil, fmt.Errorf("repository.CreateSSOUser: insert user_auth_providers: %w", err)
+	}
+
+	if err := logAudit(ctx, tx, u.ID, "member", "user.sso_provisioned", u.ID); err != nil {
+		return nil, fmt.Errorf("repository.CreateSSOUser: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("repository.CreateSSOUser: commit tx: %w", err)
 	}
 	return u, nil
 }
@@ -366,7 +431,7 @@ func (r *AccountRepository) RegenerateInvitationToken(ctx context.Context, targe
 	// entity_id = target Group Admin yang di-resend invitation-nya (yang
 	// "dimutasi", sesuai docs/DATABASE_SCHEMA.md §5.27) -- actor_id tetap
 	// Platform Admin yang melakukan aksi.
-	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.activation_resent", "user", targetUserID); err != nil {
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.activation_resent", targetUserID); err != nil {
 		return fmt.Errorf("repository.RegenerateInvitationToken: %w", err)
 	}
 
@@ -385,12 +450,13 @@ type execer interface {
 
 // logAudit menulis satu baris audit_logs (US-073 AC: seluruh aksi onboarding
 // dicatat). metadata kosong untuk entry sesederhana ini -- entity_id dipakai
-// sebagai referensi utama.
-func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, entityType, entityID string) error {
+// sebagai referensi utama. entity_type selalu 'user' -- seluruh pemanggil
+// saat ini mencatat aksi atas entitas user (lint unparam).
+func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, entityID string) error {
 	if _, err := exec.Exec(ctx, `
 		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, $2, $3, $4, $5)
-	`, actorID, actorRole, action, entityType, entityID); err != nil {
+		VALUES ($1, $2, $3, 'user', $4)
+	`, actorID, actorRole, action, entityID); err != nil {
 		return fmt.Errorf("logAudit: %w", err)
 	}
 	return nil
