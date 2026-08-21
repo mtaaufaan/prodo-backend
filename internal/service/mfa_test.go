@@ -9,10 +9,11 @@ import (
 )
 
 type fakeMFARepository struct {
-	savedUserID string
-	savedSecret string
-	enabled     bool
-	err         error
+	savedUserID      string
+	savedSecret      string
+	enabled          bool
+	err              error
+	savedBackupCodes []string
 }
 
 func (f *fakeMFARepository) SaveTOTPSecret(_ context.Context, userID, secret string) error {
@@ -34,22 +35,69 @@ func (f *fakeMFARepository) GetMFAStatus(_ context.Context, _ string) (isEnabled
 	return f.enabled, f.savedSecret, f.err
 }
 
+func (f *fakeMFARepository) SaveBackupCodes(_ context.Context, _ string, hashedCodes []string) error {
+	f.savedBackupCodes = hashedCodes
+	return f.err
+}
+
 func TestMFAService_SetupTOTP_Success(t *testing.T) {
 	repo := &fakeMFARepository{}
 	svc := NewMFAService(repo)
 
-	qrBase64, err := svc.SetupTOTP(context.Background(), "user-123", "ga@example.com")
+	result, err := svc.SetupTOTP(context.Background(), "user-123", "ga@example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if qrBase64 == "" {
+	if result.QRCodePNGBase64 == "" {
 		t.Fatal("QR base64 kosong")
+	}
+	if result.TOTPSecret == "" {
+		t.Fatal("TOTPSecret kosong")
 	}
 	if repo.savedUserID != "user-123" {
 		t.Errorf("savedUserID = %q, want user-123", repo.savedUserID)
 	}
 	if _, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(repo.savedSecret); err != nil {
 		t.Errorf("secret bukan base32 valid: %v", err)
+	}
+	if result.TOTPSecret != repo.savedSecret {
+		t.Errorf("TOTPSecret = %q, want sama dengan yang disimpan (%q)", result.TOTPSecret, repo.savedSecret)
+	}
+}
+
+func TestMFAService_VerifyAndEnable_GeneratesBackupCodes(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	repo := &fakeMFARepository{savedSecret: secret}
+	svc := NewMFAService(repo)
+
+	code := currentTOTPCode(t, secret)
+	ok, backupCodes, err := svc.VerifyAndEnable(context.Background(), "user-1", code)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("harusnya ok=true untuk OTP valid")
+	}
+	if len(backupCodes) != backupCodeCount {
+		t.Fatalf("len(backupCodes) = %d, want %d", len(backupCodes), backupCodeCount)
+	}
+	seen := map[string]bool{}
+	for _, c := range backupCodes {
+		if len(c) != 9 || c[4] != '-' {
+			t.Errorf("format kode cadangan salah: %q, want XXXX-XXXX", c)
+		}
+		if seen[c] {
+			t.Errorf("kode cadangan duplikat: %q", c)
+		}
+		seen[c] = true
+	}
+	if len(repo.savedBackupCodes) != backupCodeCount {
+		t.Fatalf("repo.savedBackupCodes len = %d, want %d (harus disimpan ter-hash)", len(repo.savedBackupCodes), backupCodeCount)
+	}
+	for i, hashed := range repo.savedBackupCodes {
+		if hashed == backupCodes[i] {
+			t.Error("kode cadangan tersimpan plaintext, harusnya sudah di-hash")
+		}
 	}
 }
 

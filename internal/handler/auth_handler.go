@@ -56,8 +56,11 @@ func (h *AuthHandler) Activate(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(fiber.Map{
-		"message":     "Password berhasil disetel. Lanjutkan setup MFA.",
-		"totp_qr_url": "data:image/png;base64," + result.QRCodePNGBase64,
+		"message":      "Password berhasil disetel. Lanjutkan setup MFA.",
+		"totp_qr_url":  "data:image/png;base64," + result.QRCodePNGBase64,
+		"totp_secret":  result.TOTPSecret,
+		"email":        result.Email,
+		"display_name": result.DisplayName,
 	}))
 }
 
@@ -80,7 +83,7 @@ func (h *AuthHandler) VerifyMFA(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "otp_code harus 6 digit angka", nil))
 	}
 
-	err := h.activation.VerifyMFAAndActivate(c.Context(), req.Token, req.OTPCode)
+	result, err := h.activation.VerifyMFAAndActivate(c.Context(), req.Token, req.OTPCode)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvitationNotFound):
@@ -96,8 +99,9 @@ func (h *AuthHandler) VerifyMFA(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(fiber.Map{
-		"message":     "Akun berhasil diaktifkan.",
-		"mfa_enabled": true,
+		"message":      "Akun berhasil diaktifkan.",
+		"mfa_enabled":  true,
+		"backup_codes": result.BackupCodes,
 	}))
 }
 
