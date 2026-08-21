@@ -127,7 +127,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format email tidak valid", nil))
 	}
 
-	result, err := h.auth.Login(c.Context(), req.Email, req.Password, req.MFACode)
+	result, err := h.auth.Login(c.Context(), req.Email, req.Password, req.MFACode, c.Get("User-Agent"), c.IP())
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidCredentials):

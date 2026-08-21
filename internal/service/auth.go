@@ -28,14 +28,15 @@ type authRepository interface {
 // yang diterbitkan Keycloak apa adanya -- tidak pernah menyimpan/
 // membandingkan password sendiri.
 type AuthService struct {
-	repo   authRepository
-	oidc   keycloak.OIDCClient
-	mfa    *MFAService
-	logger *zap.Logger
+	repo     authRepository
+	oidc     keycloak.OIDCClient
+	mfa      *MFAService
+	sessions *SessionService
+	logger   *zap.Logger
 }
 
-func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, mfa *MFAService, logger *zap.Logger) *AuthService {
-	return &AuthService{repo: repo, oidc: oidc, mfa: mfa, logger: logger}
+func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, mfa *MFAService, sessions *SessionService, logger *zap.Logger) *AuthService {
+	return &AuthService{repo: repo, oidc: oidc, mfa: mfa, sessions: sessions, logger: logger}
 }
 
 // LoginResult adalah hasil LoginLocal/LoginSSO, dipetakan langsung ke
@@ -111,10 +112,12 @@ func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin
 }
 
 // Login adalah orkestrasi penuh POST /auth/login (S1-18, US-001): verifikasi
-// credential lokal, lalu MFA kalau berlaku, lalu catat audit trail (S1-20).
-// Dipanggil handler -- bukan LoginLocal langsung -- supaya handler tetap
-// tipis (docs/coding-conventions.md).
-func (s *AuthService) Login(ctx context.Context, email, password, otpCode string) (*LoginResult, error) {
+// credential lokal, lalu MFA kalau berlaku, lalu catat audit trail (S1-20)
+// dan sesi (S1-27). Dipanggil handler -- bukan LoginLocal langsung --
+// supaya handler tetap tipis (docs/coding-conventions.md). userAgent/ip
+// dari header request, dipakai buat catatan device_info sesi (S1-27) --
+// bukan bagian dari kredensial, jadi lolos meski kosong (dev/test client).
+func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userAgent, ip string) (*LoginResult, error) {
 	result, err := s.LoginLocal(ctx, email, password)
 	if err != nil {
 		return nil, err
@@ -127,6 +130,12 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode string
 
 	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole); err != nil {
 		s.logger.Error("login berhasil tapi gagal mencatat audit trail",
+			zap.String("user_id", result.User.ID), zap.Error(err))
+		return nil, fmt.Errorf("service.Login: %w", err)
+	}
+
+	if err := s.sessions.RecordSession(ctx, result.User.ID, result.AccessToken, userAgent, ip); err != nil {
+		s.logger.Error("login berhasil tapi gagal mencatat sesi -- fitur multi-device/remote-logout tidak akan melihat sesi ini",
 			zap.String("user_id", result.User.ID), zap.Error(err))
 		return nil, fmt.Errorf("service.Login: %w", err)
 	}
