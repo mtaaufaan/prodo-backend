@@ -132,6 +132,7 @@ func run() error {
 	authHandler := handler.NewAuthHandler(activationSvc, logger)
 
 	v1 := app.Group("/api/v1")
+	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
 	v1.Post("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Create)
 	v1.Post("/platform/group-admins/:id/resend-activation", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ResendActivation)
 	v1.Post("/auth/activate", authHandler.Activate)

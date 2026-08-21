@@ -28,6 +28,7 @@ type accountRepository interface {
 	FindUserIDByProviderSub(ctx context.Context, providerSub string) (userID string, err error)
 	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
 	RegenerateInvitationToken(ctx context.Context, targetUserID, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error
+	ListGroupAdmins(ctx context.Context, limit, offset int) ([]repository.GroupAdminSummary, int, error)
 }
 
 type AccountService struct {
@@ -62,6 +63,16 @@ type GroupAdminInvitation struct {
 	DisplayName     string
 	ActivationToken string
 	ExpiresAt       time.Time
+}
+
+// ListGroupAdmins mengembalikan daftar Group Admin untuk panel Platform
+// Admin (S1-12).
+func (s *AccountService) ListGroupAdmins(ctx context.Context, limit, offset int) ([]repository.GroupAdminSummary, int, error) {
+	summaries, total, err := s.repo.ListGroupAdmins(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("service.ListGroupAdmins: %w", err)
+	}
+	return summaries, total, nil
 }
 
 // ResolveActorUserID mencari users.id internal dari Keycloak subject (klaim

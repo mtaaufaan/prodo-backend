@@ -24,6 +24,7 @@ type fakeAccountRepository struct {
 	regeneratedEmail  string
 	regeneratedActor  string
 	regeneratedTarget string
+	groupAdmins       []repository.GroupAdminSummary
 }
 
 func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p *repository.CreateGroupAdminInvitationParams) (string, error) {
@@ -50,6 +51,10 @@ func (f *fakeAccountRepository) RegenerateInvitationToken(_ context.Context, tar
 	f.regeneratedEmail = email
 	f.regeneratedActor = actorUserID
 	return f.regenErr
+}
+
+func (f *fakeAccountRepository) ListGroupAdmins(_ context.Context, _, _ int) ([]repository.GroupAdminSummary, int, error) {
+	return f.groupAdmins, len(f.groupAdmins), f.err
 }
 
 type fakeKeycloakClient struct {
@@ -193,5 +198,21 @@ func TestAccountService_ResendActivation_NoPendingInvitation(t *testing.T) {
 	_, err := svc.ResendActivation(context.Background(), "user-1", "platform-admin-1")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvitationNotFound", err)
+	}
+}
+
+func TestAccountService_ListGroupAdmins(t *testing.T) {
+	repo := &fakeAccountRepository{groupAdmins: []repository.GroupAdminSummary{
+		{ID: "user-1", Email: "ga1@example.com", DisplayName: "GA 1", IsActive: true},
+		{ID: "user-2", Email: "ga2@example.com", DisplayName: "GA 2", IsActive: false},
+	}}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	summaries, total, err := svc.ListGroupAdmins(context.Background(), 50, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 2 || len(summaries) != 2 {
+		t.Errorf("total=%d len=%d, want 2/2", total, len(summaries))
 	}
 }
