@@ -291,6 +291,37 @@ type UserContact struct {
 	DisplayName string
 }
 
+// LoginUserRecord adalah data users yang dibutuhkan untuk login (S1-14) --
+// cukup untuk mengecek status aktif dan menyusun field "user" pada respons
+// POST /auth/login (API_CONTRACT.md §2), tanpa perlu decode JWT/provider_sub.
+type LoginUserRecord struct {
+	ID           string
+	Email        string
+	DisplayName  string
+	PlatformRole string
+	IsActive     bool
+	AvatarURL    *string
+}
+
+// FindUserForLogin mencari user berdasarkan email untuk keperluan login
+// (S1-14). Tidak ditemukan -> domain.ErrUserNotFound (di-map ke
+// ErrInvalidCredentials oleh service, supaya tidak membocorkan keberadaan
+// email -- lihat domain.ErrInvalidCredentials).
+func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) (*LoginUserRecord, error) {
+	u := &LoginUserRecord{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, email, display_name, platform_role, is_active, avatar_url
+		FROM users WHERE email = $1 AND deleted_at IS NULL
+	`, email).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PlatformRole, &u.IsActive, &u.AvatarURL)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.FindUserForLogin: %w", domain.ErrUserNotFound)
+		}
+		return nil, fmt.Errorf("repository.FindUserForLogin: %w", err)
+	}
+	return u, nil
+}
+
 // FindUserContactByID mencari email+display_name dari users.id -- dipakai
 // S1-08 (resend activation) untuk tahu ke mana email baru dikirim.
 func (r *AccountRepository) FindUserContactByID(ctx context.Context, userID string) (*UserContact, error) {
