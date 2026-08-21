@@ -5,11 +5,14 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // SHA-1 wajib dipakai untuk TOTP RFC 6238, bukan untuk hashing password
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"math/big"
 	"net/url"
 	"time"
 
@@ -20,6 +23,11 @@ const (
 	totpSecretBytes = 20 // 160-bit, standar RFC 4226/6238
 	totpStepSeconds = 30
 	totpDigits      = 6
+
+	backupCodeCount = 10
+	// Tanpa 0/O/1/I/L -- gampang tertukar kalau kode disalin manual dari
+	// layar (Set Password.dc.html, langkah "Simpan kode cadangan").
+	backupCodeCharset = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 )
 
 // mfaRepository -- interface didefinisikan di consumer, lihat §3.9.
@@ -28,6 +36,7 @@ type mfaRepository interface {
 	GetTOTPSecret(ctx context.Context, userID string) (string, error)
 	EnableMFA(ctx context.Context, userID string) error
 	GetMFAStatus(ctx context.Context, userID string) (isEnabled bool, secret string, err error)
+	SaveBackupCodes(ctx context.Context, userID string, hashedCodes []string) error
 }
 
 // MFAService menghasilkan dan menyimpan secret TOTP + QR code untuk setup
@@ -41,45 +50,71 @@ func NewMFAService(repo mfaRepository) *MFAService {
 	return &MFAService{repo: repo}
 }
 
+// SetupResult adalah hasil pembuatan secret TOTP baru (S1-06) -- QR untuk
+// scan, dan secret mentah (base32) untuk fallback "masukkan kunci manual"
+// bagi authenticator app yang tidak bisa scan QR (Set Password.dc.html).
+type SetupResult struct {
+	QRCodePNGBase64 string
+	TOTPSecret      string
+}
+
 // SetupTOTP membuat secret TOTP baru, menyimpannya (terenkripsi, lewat
 // repo), dan mengembalikan QR code (PNG, base64) berisi otpauth:// URI
 // untuk dipindai aplikasi authenticator (Google Authenticator, Authy, dst).
-func (s *MFAService) SetupTOTP(ctx context.Context, userID, email string) (qrPNGBase64 string, err error) {
+func (s *MFAService) SetupTOTP(ctx context.Context, userID, email string) (*SetupResult, error) {
 	secret, err := generateTOTPSecret()
 	if err != nil {
-		return "", fmt.Errorf("service.SetupTOTP: %w", err)
+		return nil, fmt.Errorf("service.SetupTOTP: %w", err)
 	}
 
 	if err := s.repo.SaveTOTPSecret(ctx, userID, secret); err != nil {
-		return "", fmt.Errorf("service.SetupTOTP: %w", err)
+		return nil, fmt.Errorf("service.SetupTOTP: %w", err)
 	}
 
 	uri := buildOTPAuthURI(email, secret)
 	png, err := qrcode.Encode(uri, qrcode.Medium, 256)
 	if err != nil {
-		return "", fmt.Errorf("service.SetupTOTP: encode QR: %w", err)
+		return nil, fmt.Errorf("service.SetupTOTP: encode QR: %w", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(png), nil
+	return &SetupResult{
+		QRCodePNGBase64: base64.StdEncoding.EncodeToString(png),
+		TOTPSecret:      secret,
+	}, nil
 }
 
 // VerifyAndEnable mencocokkan otpCode terhadap secret TOTP tersimpan
 // (S1-07). Toleransi clock-skew ±1 step (30 detik) sesuai praktik umum TOTP.
-// Kalau cocok, is_enabled diset TRUE lewat repo.
-func (s *MFAService) VerifyAndEnable(ctx context.Context, userID, otpCode string) (ok bool, err error) {
+// Kalau cocok, is_enabled diset TRUE dan 10 kode cadangan diterbitkan
+// (ditampilkan SEKALI ke user di sini -- disimpan cuma hash-nya, lihat
+// GenerateBackupCodes).
+func (s *MFAService) VerifyAndEnable(ctx context.Context, userID, otpCode string) (ok bool, backupCodes []string, err error) {
 	secret, err := s.repo.GetTOTPSecret(ctx, userID)
 	if err != nil {
-		return false, fmt.Errorf("service.VerifyAndEnable: %w", err)
+		return false, nil, fmt.Errorf("service.VerifyAndEnable: %w", err)
 	}
 
 	if !verifyTOTP(secret, otpCode, time.Now()) {
-		return false, nil
+		return false, nil, nil
 	}
 
 	if err := s.repo.EnableMFA(ctx, userID); err != nil {
-		return false, fmt.Errorf("service.VerifyAndEnable: %w", err)
+		return false, nil, fmt.Errorf("service.VerifyAndEnable: %w", err)
 	}
-	return true, nil
+
+	codes, err := GenerateBackupCodes()
+	if err != nil {
+		return false, nil, fmt.Errorf("service.VerifyAndEnable: %w", err)
+	}
+	hashed := make([]string, len(codes))
+	for i, c := range codes {
+		hashed[i] = hashBackupCode(c)
+	}
+	if err := s.repo.SaveBackupCodes(ctx, userID, hashed); err != nil {
+		return false, nil, fmt.Errorf("service.VerifyAndEnable: %w", err)
+	}
+
+	return true, codes, nil
 }
 
 // VerifyLoginOTP memverifikasi OTP saat login (S1-17) -- BEDA dari
@@ -150,6 +185,47 @@ func generateTOTPSecret() (string, error) {
 		return "", fmt.Errorf("generateTOTPSecret: %w", err)
 	}
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b), nil
+}
+
+// GenerateBackupCodes membuat 10 kode cadangan sekali-pakai format
+// "XXXX-XXXX" (8 karakter acak crypto/rand + hyphen di tengah) untuk
+// pemulihan MFA kalau perangkat authenticator hilang. Dikembalikan sekali
+// dalam bentuk plaintext -- caller wajib hash sebelum disimpan (lihat
+// hashBackupCode), sama seperti password: tidak pernah didekripsi lagi,
+// cuma dibandingkan saat dipakai.
+func GenerateBackupCodes() ([]string, error) {
+	codes := make([]string, backupCodeCount)
+	for i := range codes {
+		code, err := generateBackupCode()
+		if err != nil {
+			return nil, fmt.Errorf("GenerateBackupCodes: %w", err)
+		}
+		codes[i] = code
+	}
+	return codes, nil
+}
+
+func generateBackupCode() (string, error) {
+	b := make([]byte, 8)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(backupCodeCharset))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = backupCodeCharset[n.Int64()]
+	}
+	return string(b[:4]) + "-" + string(b[4:]), nil
+}
+
+// hashBackupCode menghitung SHA-256 dari satu kode cadangan -- disimpan di
+// user_mfa_configs.backup_codes, bukan plaintext. Kode ini fungsinya seperti
+// password sekali-pakai: cukup dibandingkan (constant-time) saat dipakai,
+// tidak pernah perlu ditampilkan ulang, jadi hash satu-arah lebih tepat
+// daripada enkripsi reversibel (beda dengan totp_secret yang memang perlu
+// dibaca ulang untuk verifikasi TOTP).
+func hashBackupCode(code string) string {
+	sum := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(sum[:])
 }
 
 // buildOTPAuthURI menyusun otpauth://totp/PRODO:{email}?secret=...&issuer=PRODO

@@ -91,7 +91,7 @@ func TestActivationService_VerifyMFAAndActivate_Success(t *testing.T) {
 	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(mfaRepo), zap.NewNop())
 
 	code := currentTOTPCode(t, secret)
-	err := svc.VerifyMFAAndActivate(context.Background(), "raw-token", code)
+	result, err := svc.VerifyMFAAndActivate(context.Background(), "raw-token", code)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,6 +101,9 @@ func TestActivationService_VerifyMFAAndActivate_Success(t *testing.T) {
 	if !mfaRepo.enabled {
 		t.Error("MFA seharusnya enabled setelah verifikasi berhasil")
 	}
+	if len(result.BackupCodes) != backupCodeCount {
+		t.Errorf("len(BackupCodes) = %d, want %d", len(result.BackupCodes), backupCodeCount)
+	}
 }
 
 func TestActivationService_VerifyMFAAndActivate_WrongOTP(t *testing.T) {
@@ -109,7 +112,7 @@ func TestActivationService_VerifyMFAAndActivate_WrongOTP(t *testing.T) {
 	mfaRepo := &fakeMFARepository{savedSecret: secret}
 	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(mfaRepo), zap.NewNop())
 
-	err := svc.VerifyMFAAndActivate(context.Background(), "raw-token", "000000")
+	_, err := svc.VerifyMFAAndActivate(context.Background(), "raw-token", "000000")
 	if !errors.Is(err, domain.ErrInvalidOTP) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
 	}
@@ -125,7 +128,7 @@ func TestActivationService_VerifyMFAAndActivate_TokenNotFound(t *testing.T) {
 	repo := &fakeActivationRepository{findMFAErr: domain.ErrInvitationNotFound}
 	svc := NewActivationService(repo, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
-	err := svc.VerifyMFAAndActivate(context.Background(), "bad-token", "123456")
+	_, err := svc.VerifyMFAAndActivate(context.Background(), "bad-token", "123456")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvitationNotFound", err)
 	}

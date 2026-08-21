@@ -68,6 +68,18 @@ func (r *MFARepository) EnableMFA(ctx context.Context, userID string) error {
 	return nil
 }
 
+// SaveBackupCodes menyimpan 10 hash kode cadangan (S1-07/S1-10) --
+// menggantikan seluruh isi kolom, dipanggil sekali tepat setelah MFA
+// diaktifkan pertama kali.
+func (r *MFARepository) SaveBackupCodes(ctx context.Context, userID string, hashedCodes []string) error {
+	if _, err := r.db.Exec(ctx, `
+		UPDATE user_mfa_configs SET backup_codes = $2, updated_at = NOW() WHERE user_id = $1
+	`, userID, hashedCodes); err != nil {
+		return fmt.Errorf("repository.SaveBackupCodes: %w", err)
+	}
+	return nil
+}
+
 // GetMFAStatus mengembalikan status MFA user untuk verifikasi saat login
 // (S1-17). Tidak ada baris sama sekali (belum pernah setup MFA) BUKAN
 // error -- isEnabled=false, secret="" dikembalikan, caller (MFAService)
