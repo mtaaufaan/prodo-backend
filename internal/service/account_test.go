@@ -18,11 +18,12 @@ type fakeAccountRepository struct {
 	returnID string
 	err      error
 
-	contact          *repository.UserContact
-	contactErr       error
-	regenErr         error
-	regeneratedEmail string
-	regeneratedActor string
+	contact           *repository.UserContact
+	contactErr        error
+	regenErr          error
+	regeneratedEmail  string
+	regeneratedActor  string
+	regeneratedTarget string
 }
 
 func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p *repository.CreateGroupAdminInvitationParams) (string, error) {
@@ -44,7 +45,8 @@ func (f *fakeAccountRepository) FindUserContactByID(_ context.Context, _ string)
 	return f.contact, nil
 }
 
-func (f *fakeAccountRepository) RegenerateInvitationToken(_ context.Context, email, _ string, _ time.Time, actorUserID string) error {
+func (f *fakeAccountRepository) RegenerateInvitationToken(_ context.Context, targetUserID, email, _ string, _ time.Time, actorUserID string) error {
+	f.regeneratedTarget = targetUserID
 	f.regeneratedEmail = email
 	f.regeneratedActor = actorUserID
 	return f.regenErr
@@ -159,6 +161,9 @@ func TestAccountService_ResendActivation_Success(t *testing.T) {
 	}
 	if result.ActivationToken == "" {
 		t.Error("ActivationToken kosong")
+	}
+	if repo.regeneratedTarget != "user-1" {
+		t.Errorf("regeneratedTarget = %q, want user-1 (bukan actor -- audit entity_id harus GA target, bukan Platform Admin)", repo.regeneratedTarget)
 	}
 	if repo.regeneratedEmail != "ga@example.com" {
 		t.Errorf("regeneratedEmail = %q, want ga@example.com", repo.regeneratedEmail)

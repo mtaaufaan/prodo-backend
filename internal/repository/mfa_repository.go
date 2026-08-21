@@ -16,8 +16,16 @@ type MFARepository struct {
 	encryptionKey string
 }
 
-func NewMFARepository(db *pgxpool.Pool, encryptionKey string) *MFARepository {
-	return &MFARepository{db: db, encryptionKey: encryptionKey}
+// NewMFARepository mengembalikan error kalau encryptionKey kosong --
+// pgp_sym_encrypt/decrypt DIAM-DIAM berhasil dengan passphrase kosong, jadi
+// tanpa pengecekan ini, MFA_ENCRYPTION_KEY yang lupa diisi tidak akan
+// ketahuan sampai insiden nyata (totp_secret "terenkripsi" pakai kunci
+// kosong). Fail fast di startup, konsisten dengan keycloak.NewAdminClient.
+func NewMFARepository(db *pgxpool.Pool, encryptionKey string) (*MFARepository, error) {
+	if encryptionKey == "" {
+		return nil, fmt.Errorf("repository.NewMFARepository: MFA_ENCRYPTION_KEY wajib diisi")
+	}
+	return &MFARepository{db: db, encryptionKey: encryptionKey}, nil
 }
 
 // SaveTOTPSecret menyimpan (upsert) secret TOTP baru untuk user, is_enabled
