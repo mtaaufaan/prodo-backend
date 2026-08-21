@@ -25,4 +25,19 @@ var (
 
 	// ErrInvalidOTP dikembalikan saat kode OTP TOTP tidak cocok (S1-07).
 	ErrInvalidOTP = errors.New("invalid otp code")
+
+	// ErrInvalidCredentials dikembalikan saat email tidak terdaftar atau
+	// password salah (S1-14). Kedua kasus sengaja disamakan -- tidak
+	// membocorkan apakah suatu email terdaftar di PRODO (user enumeration).
+	ErrInvalidCredentials = errors.New("invalid email or password")
+
+	// ErrAccountInactive dikembalikan saat users.is_active masih FALSE
+	// (belum menyelesaikan alur aktivasi US-073) (S1-14).
+	ErrAccountInactive = errors.New("account is not active")
+
+	// ErrMFARequired dikembalikan saat Group Admin login tapi belum punya
+	// MFA aktif (S1-17) -- seharusnya tidak pernah terjadi lewat alur
+	// onboarding normal (S1-06/07 mewajibkan setup MFA sebelum is_active
+	// TRUE), jadi ini murni pengaman untuk state yang tidak konsisten.
+	ErrMFARequired = errors.New("mfa is required for this account but not configured")
 )

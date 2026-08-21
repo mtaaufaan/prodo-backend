@@ -41,6 +41,11 @@ type Config struct {
 	KeycloakIssuer   string `env:"KEYCLOAK_ISSUER" envDefault:""` // e.g. http://localhost:8080/realms/PRODO
 	KeycloakAudience string `env:"KEYCLOAK_AUDIENCE" envDefault:"prodo-backend"`
 
+	// KeycloakWebClientID -- client public (tanpa secret) dipakai backend
+	// untuk Direct Access Grant (ROPC) atas nama form login web (S1-14).
+	// Bukan secret, aman default hardcode.
+	KeycloakWebClientID string `env:"KEYCLOAK_WEB_CLIENT_ID" envDefault:"prodo-web"`
+
 	// Keycloak Admin REST API (service account client_credentials) --
 	// dipakai internal/keycloak untuk provisioning user (S1-03). Client
 	// "prodo-backend-admin" di infra/keycloak/realm-PRODO.json, lihat

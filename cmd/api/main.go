@@ -117,6 +117,11 @@ func run() error {
 		return fmt.Errorf("setup JWT auth middleware: %w", err)
 	}
 
+	oidcClient, err := keycloak.NewOIDCClient(cfg.KeycloakIssuer, cfg.KeycloakWebClientID)
+	if err != nil {
+		return fmt.Errorf("setup Keycloak OIDC client: %w", err)
+	}
+
 	accountRepo := repository.NewAccountRepository(pool)
 	mfaRepo, err := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
 	if err != nil {
@@ -127,9 +132,10 @@ func run() error {
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
 	mfaSvc := service.NewMFAService(mfaRepo)
 	activationSvc := service.NewActivationService(accountRepo, kcAdmin, mfaSvc, logger)
+	authSvc := service.NewAuthService(accountRepo, oidcClient, mfaSvc, logger)
 
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
-	authHandler := handler.NewAuthHandler(activationSvc, logger)
+	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -137,6 +143,7 @@ func run() error {
 	v1.Post("/platform/group-admins/:id/resend-activation", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ResendActivation)
 	v1.Post("/auth/activate", authHandler.Activate)
 	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
+	v1.Post("/auth/login", authHandler.Login)
 
 	serverErr := make(chan error, 1)
 	go func() {
