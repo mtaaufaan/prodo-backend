@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,4 +66,26 @@ func (r *MFARepository) EnableMFA(ctx context.Context, userID string) error {
 		return fmt.Errorf("repository.EnableMFA: %w", err)
 	}
 	return nil
+}
+
+// GetMFAStatus mengembalikan status MFA user untuk verifikasi saat login
+// (S1-17). Tidak ada baris sama sekali (belum pernah setup MFA) BUKAN
+// error -- isEnabled=false, secret="" dikembalikan, caller (MFAService)
+// yang memutuskan kebijakan wajib/opsional per role.
+func (r *MFARepository) GetMFAStatus(ctx context.Context, userID string) (isEnabled bool, secret string, err error) {
+	var encSecret *string
+	err = r.db.QueryRow(ctx, `
+		SELECT is_enabled, pgp_sym_decrypt(decode(totp_secret, 'base64'), $2)
+		FROM user_mfa_configs WHERE user_id = $1
+	`, userID, r.encryptionKey).Scan(&isEnabled, &encSecret)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, "", nil
+		}
+		return false, "", fmt.Errorf("repository.GetMFAStatus: %w", err)
+	}
+	if encSecret != nil {
+		secret = *encSecret
+	}
+	return isEnabled, secret, nil
 }

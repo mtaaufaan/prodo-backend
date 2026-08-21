@@ -34,4 +34,10 @@ var (
 	// ErrAccountInactive dikembalikan saat users.is_active masih FALSE
 	// (belum menyelesaikan alur aktivasi US-073) (S1-14).
 	ErrAccountInactive = errors.New("account is not active")
+
+	// ErrMFARequired dikembalikan saat Group Admin login tapi belum punya
+	// MFA aktif (S1-17) -- seharusnya tidak pernah terjadi lewat alur
+	// onboarding normal (S1-06/07 mewajibkan setup MFA sebelum is_active
+	// TRUE), jadi ini murni pengaman untuk state yang tidak konsisten.
+	ErrMFARequired = errors.New("mfa is required for this account but not configured")
 )
