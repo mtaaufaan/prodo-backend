@@ -10,7 +10,7 @@ import (
 )
 
 type stubSessionRepository struct {
-	createErr error
+	createErr                 error
 	createdUserID, createdJTI string
 	createdDevice             repository.DeviceInfo
 	createdExpiresAt          time.Time
@@ -211,9 +211,9 @@ func TestSessionService_RevokeAllSessions_BlacklistsEach(t *testing.T) {
 
 func TestParseUserAgent(t *testing.T) {
 	cases := []struct {
-		ua              string
-		wantBrowser     string
-		wantOS          string
+		ua          string
+		wantBrowser string
+		wantOS      string
 	}{
 		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", "Chrome 125", "Windows"},
 		{"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15", "Safari 605", "macOS"},

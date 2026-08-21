@@ -39,10 +39,10 @@ func (f *fakeSessionRepository) RevokeAllSessions(_ context.Context, _, _ string
 
 type fakeCache struct{}
 
-func (f *fakeCache) Get(_ context.Context, _ string) (string, error)         { return "", cache.ErrNotFound }
+func (f *fakeCache) Get(_ context.Context, _ string) (string, error)           { return "", cache.ErrNotFound }
 func (f *fakeCache) Set(_ context.Context, _, _ string, _ time.Duration) error { return nil }
-func (f *fakeCache) Del(_ context.Context, _ string) error                  { return nil }
-func (f *fakeCache) Close() error                                           { return nil }
+func (f *fakeCache) Del(_ context.Context, _ string) error                     { return nil }
+func (f *fakeCache) Close() error                                              { return nil }
 
 func newTestSessionService() *SessionService {
 	return NewSessionService(&fakeSessionRepository{}, &fakeCache{})
