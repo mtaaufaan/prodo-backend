@@ -112,10 +112,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("setup Keycloak admin client: %w", err)
 	}
-	jwtAuth, err := middleware.JWTAuth(cfg)
-	if err != nil {
-		return fmt.Errorf("setup JWT auth middleware: %w", err)
-	}
 
 	oidcClient, err := keycloak.NewOIDCClient(cfg.KeycloakIssuer, cfg.KeycloakWebClientID)
 	if err != nil {
@@ -127,15 +123,26 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("setup MFA repository: %w", err)
 	}
+	sessionRepo := repository.NewSessionRepository(pool)
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
 	mfaSvc := service.NewMFAService(mfaRepo)
 	activationSvc := service.NewActivationService(accountRepo, kcAdmin, mfaSvc, logger)
-	authSvc := service.NewAuthService(accountRepo, oidcClient, mfaSvc, logger)
+	sessionSvc := service.NewSessionService(sessionRepo, rdb)
+	authSvc := service.NewAuthService(accountRepo, oidcClient, mfaSvc, sessionSvc, logger)
+
+	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
+	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
+	// di awal seperti sebelum S1-27/28.
+	jwtAuth, err := middleware.JWTAuth(cfg, sessionSvc)
+	if err != nil {
+		return fmt.Errorf("setup JWT auth middleware: %w", err)
+	}
 
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
+	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -144,6 +151,10 @@ func run() error {
 	v1.Post("/auth/activate", authHandler.Activate)
 	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
 	v1.Post("/auth/login", authHandler.Login)
+	v1.Get("/auth/sessions", jwtAuth, sessionHandler.List)
+	// ⚠️ S1-30 gap: dibatasi Platform-Admin-only, bukan "group_admin" sesuai
+	// wording sprint_backlog.md -- lihat komentar SessionHandler.ListForUser.
+	v1.Get("/admin/users/:userId/sessions", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.ListForUser)
 
 	serverErr := make(chan error, 1)
 	go func() {
