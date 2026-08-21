@@ -100,6 +100,52 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 	return userID, nil
 }
 
+// GroupAdminSummary adalah satu baris daftar Group Admin untuk panel
+// Platform Admin (S1-12).
+type GroupAdminSummary struct {
+	ID          string
+	Email       string
+	DisplayName string
+	IsActive    bool
+	CreatedAt   time.Time
+}
+
+// ListGroupAdmins mengembalikan seluruh user dengan platform_role='group_admin',
+// terbaru dulu, dengan pagination sederhana (docs/coding-conventions.md §7.1).
+func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset int) ([]GroupAdminSummary, int, error) {
+	var total int
+	if err := r.db.QueryRow(ctx, `
+		SELECT count(*) FROM users WHERE platform_role = 'group_admin'
+	`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: count: %w", err)
+	}
+
+	rows, err := r.db.Query(ctx, `
+		SELECT id, email, display_name, is_active, created_at
+		FROM users
+		WHERE platform_role = 'group_admin'
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []GroupAdminSummary
+	for rows.Next() {
+		var s GroupAdminSummary
+		if err := rows.Scan(&s.ID, &s.Email, &s.DisplayName, &s.IsActive, &s.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("repository.ListGroupAdmins: scan: %w", err)
+		}
+		result = append(result, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: rows: %w", err)
+	}
+	return result, total, nil
+}
+
 // FindUserIDByProviderSub resolve Keycloak subject (JWT "sub" claim) jadi
 // users.id internal PRODO -- dipakai handler untuk mengisi invited_by/actor_id
 // dari klaim JWT platform admin yang sedang login.

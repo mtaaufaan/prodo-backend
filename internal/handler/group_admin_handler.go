@@ -88,6 +88,55 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 	}))
 }
 
+// List menangani GET /platform/group-admins -- daftar Group Admin untuk
+// panel Platform Admin (S1-12). Pagination page/per_page sesuai
+// docs/coding-conventions.md §7.1 (default 1/50, max per_page 200).
+func (h *GroupAdminHandler) List(c *fiber.Ctx) error {
+	page := c.QueryInt("page", 1)
+	if page < 1 {
+		page = 1
+	}
+	perPage := c.QueryInt("per_page", 50)
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+
+	summaries, total, err := h.accounts.ListGroupAdmins(c.Context(), perPage, (page-1)*perPage)
+	if err != nil {
+		h.logger.Error("gagal mengambil daftar Group Admin", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar Group Admin", nil))
+	}
+
+	data := make([]fiber.Map, len(summaries))
+	for i, s := range summaries {
+		status := "pending"
+		if s.IsActive {
+			status = "active"
+		}
+		data[i] = fiber.Map{
+			"id":           s.ID,
+			"email":        s.Email,
+			"display_name": s.DisplayName,
+			"status":       status,
+			"created_at":   s.CreatedAt.UTC().Format(time.RFC3339),
+		}
+	}
+
+	totalPages := (total + perPage - 1) / perPage
+	return c.JSON(fiber.Map{
+		"data": data,
+		"meta": fiber.Map{
+			"page":        page,
+			"per_page":    perPage,
+			"total":       total,
+			"total_pages": totalPages,
+		},
+	})
+}
+
 // ResendActivation menangani POST /platform/group-admins/:id/resend-activation
 // -- S1-08. Meng-invalidate token lama, menerbitkan yang baru, kirim ulang
 // email. Dipasang di belakang middleware yang sama dengan Create.
