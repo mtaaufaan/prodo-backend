@@ -27,7 +27,7 @@ type accountRepository interface {
 	CreateGroupAdminInvitation(ctx context.Context, p *repository.CreateGroupAdminInvitationParams) (userID string, err error)
 	FindUserIDByProviderSub(ctx context.Context, providerSub string) (userID string, err error)
 	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
-	RegenerateInvitationToken(ctx context.Context, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error
+	RegenerateInvitationToken(ctx context.Context, targetUserID, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error
 }
 
 type AccountService struct {
@@ -151,7 +151,7 @@ func (s *AccountService) ResendActivation(ctx context.Context, targetUserID, act
 	}
 	expiresAt := time.Now().Add(groupAdminInvitationTTL)
 
-	if err := s.repo.RegenerateInvitationToken(ctx, contact.Email, tokenHash, expiresAt, actorUserID); err != nil {
+	if err := s.repo.RegenerateInvitationToken(ctx, targetUserID, contact.Email, tokenHash, expiresAt, actorUserID); err != nil {
 		return nil, fmt.Errorf("service.ResendActivation: %w", err)
 	}
 

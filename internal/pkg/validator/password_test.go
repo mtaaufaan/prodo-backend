@@ -14,6 +14,7 @@ func TestValidatePasswordComplexity(t *testing.T) {
 		{"no lower", "STR0NG!PASSW0RD", false},
 		{"no digit", "Strong!Password", false},
 		{"no special", "Str0ngPassw0rd12", false},
+		{"multibyte under 12 runes but 12+ bytes", "Sé1!Sé1!Sé1", false}, // 11 rune, 14 byte
 	}
 
 	for _, tc := range cases {

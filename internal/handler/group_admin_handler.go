@@ -12,6 +12,7 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
+	"github.com/mtaaufaan/prodo-backend/internal/pkg/validator"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
@@ -37,7 +38,7 @@ type createGroupAdminRequest struct {
 func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 	claims, ok := middleware.ClaimsFromContext(c)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("UNAUTHORIZED", "Token tidak ditemukan", nil))
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
 	}
 
 	var req createGroupAdminRequest
@@ -48,6 +49,9 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	if req.Email == "" || req.DisplayName == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email dan display_name wajib diisi", nil))
+	}
+	if !validator.IsValidEmail(req.Email) {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format email tidak valid", nil))
 	}
 
 	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
@@ -90,7 +94,7 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 func (h *GroupAdminHandler) ResendActivation(c *fiber.Ctx) error {
 	claims, ok := middleware.ClaimsFromContext(c)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("UNAUTHORIZED", "Token tidak ditemukan", nil))
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
 	}
 
 	targetUserID := c.Params("id")
