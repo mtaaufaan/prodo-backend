@@ -322,6 +322,31 @@ func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) 
 	return u, nil
 }
 
+// RecordLogin mencatat login berhasil (S1-20, US-001): memperbarui
+// users.last_login_at dan menulis audit_logs (action 'user.login').
+// Dipanggil setelah password (dan MFA, kalau berlaku) lolos verifikasi --
+// bukan untuk percobaan gagal (rate-limiting percobaan gagal bukan scope
+// audit trail, lihat security-compliance.md).
+func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRole string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.RecordLogin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if _, err := tx.Exec(ctx, `UPDATE users SET last_login_at = NOW() WHERE id = $1`, userID); err != nil {
+		return fmt.Errorf("repository.RecordLogin: update last_login_at: %w", err)
+	}
+	if err := logAudit(ctx, tx, userID, platformRole, "user.login", userID); err != nil {
+		return fmt.Errorf("repository.RecordLogin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.RecordLogin: commit tx: %w", err)
+	}
+	return nil
+}
+
 // FindUserByID mencari user berdasarkan users.id -- dipakai LoginSSO (S1-15)
 // setelah provider_sub ditemukan di user_auth_providers.
 func (r *AccountRepository) FindUserByID(ctx context.Context, userID string) (*LoginUserRecord, error) {

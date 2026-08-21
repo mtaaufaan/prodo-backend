@@ -39,6 +39,14 @@ type fakeAuthRepository struct {
 
 	createdUser *repository.LoginUserRecord
 	createErr   error
+
+	recordedLoginUserID string
+	recordLoginErr      error
+}
+
+func (f *fakeAuthRepository) RecordLogin(_ context.Context, userID, _ string) error {
+	f.recordedLoginUserID = userID
+	return f.recordLoginErr
 }
 
 func (f *fakeAuthRepository) FindUserForLogin(_ context.Context, _ string) (*repository.LoginUserRecord, error) {
@@ -94,7 +102,7 @@ func TestAuthService_LoginLocal_Success(t *testing.T) {
 		ID: "user-1", Email: "ga@example.com", DisplayName: "GA", PlatformRole: "group_admin", IsActive: true,
 	}}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", RefreshToken: "rt", TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, zap.NewNop())
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	result, err := svc.LoginLocal(context.Background(), "ga@example.com", "Str0ng!Passw0rd")
 	if err != nil {
@@ -107,7 +115,7 @@ func TestAuthService_LoginLocal_Success(t *testing.T) {
 
 func TestAuthService_LoginLocal_EmailNotFound(t *testing.T) {
 	repo := &fakeAuthRepository{findErr: domain.ErrUserNotFound}
-	svc := NewAuthService(repo, &fakeOIDCClient{}, zap.NewNop())
+	svc := NewAuthService(repo, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	_, err := svc.LoginLocal(context.Background(), "unknown@example.com", "whatever")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
@@ -117,7 +125,7 @@ func TestAuthService_LoginLocal_EmailNotFound(t *testing.T) {
 
 func TestAuthService_LoginLocal_AccountInactive(t *testing.T) {
 	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{ID: "user-1", IsActive: false}}
-	svc := NewAuthService(repo, &fakeOIDCClient{}, zap.NewNop())
+	svc := NewAuthService(repo, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	_, err := svc.LoginLocal(context.Background(), "pending@example.com", "whatever")
 	if !errors.Is(err, domain.ErrAccountInactive) {
@@ -128,7 +136,7 @@ func TestAuthService_LoginLocal_AccountInactive(t *testing.T) {
 func TestAuthService_LoginLocal_WrongPassword(t *testing.T) {
 	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{ID: "user-1", IsActive: true}}
 	oidc := &fakeOIDCClient{err: keycloak.ErrInvalidGrant}
-	svc := NewAuthService(repo, oidc, zap.NewNop())
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	_, err := svc.LoginLocal(context.Background(), "ga@example.com", "wrong-password")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
@@ -143,7 +151,7 @@ func TestAuthService_LoginSSO_ExistingUser(t *testing.T) {
 		usersByID:           map[string]*repository.LoginUserRecord{"user-1": {ID: "user-1", Email: "member@example.com", PlatformRole: "member", IsActive: true}},
 	}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", IDToken: idToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, zap.NewNop())
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	result, err := svc.LoginSSO(context.Background(), "auth-code", "http://localhost:5173/auth/callback")
 	if err != nil {
@@ -161,7 +169,7 @@ func TestAuthService_LoginSSO_FirstTimeAutoCreate(t *testing.T) {
 	idToken := jwtNewUnsigned(t, "kc-sub-new", "newmember@example.com", "New Member")
 	repo := &fakeAuthRepository{providerSubToUserID: map[string]string{}}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", IDToken: idToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, zap.NewNop())
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	result, err := svc.LoginSSO(context.Background(), "auth-code", "http://localhost:5173/auth/callback")
 	if err != nil {
@@ -179,7 +187,7 @@ func TestAuthService_LoginSSO_EmailCollision(t *testing.T) {
 	idToken := jwtNewUnsigned(t, "kc-sub-new", "taken@example.com", "New Member")
 	repo := &fakeAuthRepository{providerSubToUserID: map[string]string{}, createErr: domain.ErrEmailAlreadyExists}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", IDToken: idToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, zap.NewNop())
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	_, err := svc.LoginSSO(context.Background(), "auth-code", "http://localhost:5173/auth/callback")
 	if !errors.Is(err, domain.ErrEmailAlreadyExists) {
@@ -190,10 +198,85 @@ func TestAuthService_LoginSSO_EmailCollision(t *testing.T) {
 func TestAuthService_LoginSSO_InvalidCode(t *testing.T) {
 	repo := &fakeAuthRepository{}
 	oidc := &fakeOIDCClient{err: keycloak.ErrInvalidGrant}
-	svc := NewAuthService(repo, oidc, zap.NewNop())
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), zap.NewNop())
 
 	_, err := svc.LoginSSO(context.Background(), "expired-code", "http://localhost:5173/auth/callback")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidCredentials", err)
+	}
+}
+
+func TestAuthService_VerifyMFA_ValidOTP(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), zap.NewNop())
+
+	err := svc.VerifyMFA(context.Background(), "user-1", true, currentTOTPCode(t, secret))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), zap.NewNop())
+
+	err := svc.VerifyMFA(context.Background(), "user-1", true, "000000")
+	if !errors.Is(err, domain.ErrInvalidOTP) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
+	}
+}
+
+func TestAuthService_VerifyMFA_GroupAdminWithoutMFA_Blocked(t *testing.T) {
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: false}), zap.NewNop())
+
+	err := svc.VerifyMFA(context.Background(), "user-1", true, "")
+	if !errors.Is(err, domain.ErrMFARequired) {
+		t.Errorf("err = %v, want wrapped domain.ErrMFARequired", err)
+	}
+}
+
+func TestAuthService_VerifyMFA_MemberWithoutMFA_Passes(t *testing.T) {
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: false}), zap.NewNop())
+
+	err := svc.VerifyMFA(context.Background(), "user-1", false, "")
+	if err != nil {
+		t.Errorf("member tanpa MFA harusnya lolos (opsional): %v", err)
+	}
+}
+
+func TestAuthService_Login_Success_RecordsAudit(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{
+		ID: "user-1", Email: "ga@example.com", PlatformRole: "group_admin", IsActive: true,
+	}}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", TokenType: "Bearer", ExpiresIn: 3600}}
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), zap.NewNop())
+
+	result, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", currentTOTPCode(t, secret))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.AccessToken != "at" {
+		t.Errorf("result = %+v, unexpected", result)
+	}
+	if repo.recordedLoginUserID != "user-1" {
+		t.Error("login sukses harusnya tercatat lewat RecordLogin")
+	}
+}
+
+func TestAuthService_Login_WrongOTP_NoAuditRecorded(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{
+		ID: "user-1", Email: "ga@example.com", PlatformRole: "group_admin", IsActive: true,
+	}}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", TokenType: "Bearer", ExpiresIn: 3600}}
+	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), zap.NewNop())
+
+	_, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", "000000")
+	if !errors.Is(err, domain.ErrInvalidOTP) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
+	}
+	if repo.recordedLoginUserID != "" {
+		t.Error("login gagal (OTP salah) tidak boleh tercatat sebagai login berhasil")
 	}
 }

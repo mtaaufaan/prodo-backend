@@ -27,6 +27,7 @@ type mfaRepository interface {
 	SaveTOTPSecret(ctx context.Context, userID, totpSecret string) error
 	GetTOTPSecret(ctx context.Context, userID string) (string, error)
 	EnableMFA(ctx context.Context, userID string) error
+	GetMFAStatus(ctx context.Context, userID string) (isEnabled bool, secret string, err error)
 }
 
 // MFAService menghasilkan dan menyimpan secret TOTP + QR code untuk setup
@@ -79,6 +80,23 @@ func (s *MFAService) VerifyAndEnable(ctx context.Context, userID, otpCode string
 		return false, fmt.Errorf("service.VerifyAndEnable: %w", err)
 	}
 	return true, nil
+}
+
+// VerifyLoginOTP memverifikasi OTP saat login (S1-17) -- BEDA dari
+// VerifyAndEnable (S1-07): tidak pernah mengubah is_enabled, dan tidak
+// menganggap "belum pernah setup MFA" sebagai error. mfaEnabled=false
+// berarti user belum pernah setup MFA sama sekali -- otpValid tidak
+// relevan (selalu false), AuthService.VerifyMFA yang memutuskan kebijakan
+// wajib (GA) vs opsional (member) berdasarkan mfaEnabled.
+func (s *MFAService) VerifyLoginOTP(ctx context.Context, userID, otpCode string) (mfaEnabled, otpValid bool, err error) {
+	enabled, secret, err := s.repo.GetMFAStatus(ctx, userID)
+	if err != nil {
+		return false, false, fmt.Errorf("service.VerifyLoginOTP: %w", err)
+	}
+	if !enabled {
+		return false, false, nil
+	}
+	return true, verifyTOTP(secret, otpCode, time.Now()), nil
 }
 
 // verifyTOTP mengimplementasikan RFC 6238 (TOTP) di atas RFC 4226 (HOTP)

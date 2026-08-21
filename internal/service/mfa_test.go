@@ -30,6 +30,10 @@ func (f *fakeMFARepository) EnableMFA(_ context.Context, _ string) error {
 	return f.err
 }
 
+func (f *fakeMFARepository) GetMFAStatus(_ context.Context, _ string) (isEnabled bool, secret string, err error) {
+	return f.enabled, f.savedSecret, f.err
+}
+
 func TestMFAService_SetupTOTP_Success(t *testing.T) {
 	repo := &fakeMFARepository{}
 	svc := NewMFAService(repo)

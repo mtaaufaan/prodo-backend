@@ -19,6 +19,7 @@ type authRepository interface {
 	FindUserIDByProviderSub(ctx context.Context, providerSub string) (string, error)
 	FindUserByID(ctx context.Context, userID string) (*repository.LoginUserRecord, error)
 	CreateSSOUser(ctx context.Context, email, displayName, providerSub string) (*repository.LoginUserRecord, error)
+	RecordLogin(ctx context.Context, userID, platformRole string) error
 }
 
 // AuthService menangani login (US-001) lewat model Keycloak-delegated yang
@@ -29,11 +30,12 @@ type authRepository interface {
 type AuthService struct {
 	repo   authRepository
 	oidc   keycloak.OIDCClient
+	mfa    *MFAService
 	logger *zap.Logger
 }
 
-func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, logger *zap.Logger) *AuthService {
-	return &AuthService{repo: repo, oidc: oidc, logger: logger}
+func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, mfa *MFAService, logger *zap.Logger) *AuthService {
+	return &AuthService{repo: repo, oidc: oidc, mfa: mfa, logger: logger}
 }
 
 // LoginResult adalah hasil LoginLocal/LoginSSO, dipetakan langsung ke
@@ -83,6 +85,53 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password string) (*
 		ExpiresIn:    tok.ExpiresIn,
 		User:         user,
 	}, nil
+}
+
+// VerifyMFA memverifikasi OTP saat login (S1-17, US-001). Kebijakan: Group
+// Admin WAJIB punya MFA aktif (kalau belum -> domain.ErrMFARequired --
+// seharusnya tidak pernah terjadi lewat alur onboarding normal, S1-06/07
+// sudah mewajibkan setup MFA sebelum akun aktif; ini murni pengaman).
+// Member yang belum setup MFA -> lolos tanpa OTP (opsional). Kalau MFA
+// aktif dan kode salah -> domain.ErrInvalidOTP.
+func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin bool, otpCode string) error {
+	enabled, valid, err := s.mfa.VerifyLoginOTP(ctx, userID, otpCode)
+	if err != nil {
+		return fmt.Errorf("service.VerifyMFA: %w", err)
+	}
+	if !enabled {
+		if isGroupAdmin {
+			return fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFARequired)
+		}
+		return nil
+	}
+	if !valid {
+		return fmt.Errorf("service.VerifyMFA: %w", domain.ErrInvalidOTP)
+	}
+	return nil
+}
+
+// Login adalah orkestrasi penuh POST /auth/login (S1-18, US-001): verifikasi
+// credential lokal, lalu MFA kalau berlaku, lalu catat audit trail (S1-20).
+// Dipanggil handler -- bukan LoginLocal langsung -- supaya handler tetap
+// tipis (docs/coding-conventions.md).
+func (s *AuthService) Login(ctx context.Context, email, password, otpCode string) (*LoginResult, error) {
+	result, err := s.LoginLocal(ctx, email, password)
+	if err != nil {
+		return nil, err
+	}
+
+	isGroupAdmin := result.User.PlatformRole == string(domain.PlatformRoleGroupAdmin)
+	if err := s.VerifyMFA(ctx, result.User.ID, isGroupAdmin, otpCode); err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole); err != nil {
+		s.logger.Error("login berhasil tapi gagal mencatat audit trail",
+			zap.String("user_id", result.User.ID), zap.Error(err))
+		return nil, fmt.Errorf("service.Login: %w", err)
+	}
+
+	return result, nil
 }
 
 // ssoClaims -- subset claim OIDC standar yang dibutuhkan untuk mapping ke
