@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
@@ -16,15 +17,28 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
+// stubExecutor -- db.Executor palsu untuk test yang benar-benar memanggil
+// exec.Exec() (mis. withSavepoint di CreateBulkInvitations) -- nil akan
+// panic karena db.Executor adalah interface, bukan pointer yang aman
+// dipanggil saat nil.
+type stubExecutor struct{}
+
+func (stubExecutor) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (stubExecutor) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (stubExecutor) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
+
 type recordedInvitation struct {
 	email, workspaceID, role, invitedByUserID, tokenHash string
 	expiresAt                                            time.Time
 }
 
 type stubInvitationRepo struct {
-	createErr error
-	created   []recordedInvitation
-	nextID    int
+	createErr     error
+	failCreateFor string // kalau diisi, CreateInvitation gagal HANYA untuk email ini
+	created       []recordedInvitation
+	nextID        int
 
 	findPendingResult *repository.InvitationTarget
 	findPendingErr    error
@@ -36,11 +50,17 @@ type stubInvitationRepo struct {
 
 	resendResult *repository.ResendTarget
 	resendErr    error
+
+	listPendingResult []repository.PendingInvitation
+	listPendingErr    error
 }
 
 func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error) {
 	if r.createErr != nil {
 		return "", r.createErr
+	}
+	if r.failCreateFor != "" && email == r.failCreateFor {
+		return "", domain.ErrInvitationAlreadyPending
 	}
 	r.nextID++
 	r.created = append(r.created, recordedInvitation{email, workspaceID, role, invitedByUserID, tokenHash, expiresAt})
@@ -65,6 +85,10 @@ func (r *stubInvitationRepo) Resend(_ context.Context, _ db.Executor, _, _, _ st
 
 func (r *stubInvitationRepo) GetWorkspaceName(_ context.Context, _ db.Executor, _ string) (string, error) {
 	return "Test Workspace", nil
+}
+
+func (r *stubInvitationRepo) ListPending(_ context.Context, _ db.Executor, _ string) ([]repository.PendingInvitation, error) {
+	return r.listPendingResult, r.listPendingErr
 }
 
 type sentInvitationEmail struct {
@@ -197,7 +221,7 @@ func TestInvitationService_CreateBulkInvitations_ValidAndDuplicate(t *testing.T)
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
 
 	emails := []string{"a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com", "a@x.com"} // a@x.com duplikat
-	result, err := svc.CreateBulkInvitations(context.Background(), nil, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -215,7 +239,7 @@ func TestInvitationService_CreateBulkInvitations_InvalidFormat_ErrorPerRow(t *te
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
 
 	emails := []string{"a@x.com", "bukan-email", "c@x.com"}
-	result, err := svc.CreateBulkInvitations(context.Background(), nil, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -227,13 +251,37 @@ func TestInvitationService_CreateBulkInvitations_InvalidFormat_ErrorPerRow(t *te
 	}
 }
 
+// TestInvitationService_CreateBulkInvitations_OneEmailFails_OthersStillSucceed
+// menguji withSavepoint: satu email gagal (mis. sudah pending) TIDAK
+// boleh menggagalkan email lain dalam batch yang sama -- bug nyata yang
+// ketahuan lewat live testing sebelum savepoint ditambahkan (satu baris
+// gagal bikin transaksi Postgres aborted, COMMIT di akhir gagal untuk
+// SEMUA email termasuk yang valid).
+func TestInvitationService_CreateBulkInvitations_OneEmailFails_OthersStillSucceed(t *testing.T) {
+	repo := &stubInvitationRepo{failCreateFor: "sudah-pending@x.com"}
+	emailer := &stubInvitationEmailer{}
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+
+	emails := []string{"sudah-pending@x.com", "valid@x.com"}
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Created) != 1 || result.Created[0].Email != "valid@x.com" {
+		t.Errorf("Created = %+v, want satu entri valid@x.com", result.Created)
+	}
+	if msg, ok := result.Errors["sudah-pending@x.com"]; !ok || msg == "" {
+		t.Errorf("Errors[sudah-pending@x.com] harusnya berisi pesan error, dapat %q (ok=%v)", msg, ok)
+	}
+}
+
 func TestInvitationService_CreateBulkInvitations_ExistingUser_AddedDirectly(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
 	assigner := &stubWorkspaceAssigner{}
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, assigner)
 
-	result, err := svc.CreateBulkInvitations(context.Background(), nil, []string{"sudah-terdaftar@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-terdaftar@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -324,6 +372,21 @@ func TestInvitationService_ResendInvitation_Success(t *testing.T) {
 	}
 	if len(emailer.sent) != 1 || emailer.sent[0].to != "budi@example.com" {
 		t.Errorf("email terkirim = %+v, want satu ke budi@example.com", emailer.sent)
+	}
+}
+
+func TestInvitationService_ListPendingInvitations_ReturnsList(t *testing.T) {
+	repo := &stubInvitationRepo{listPendingResult: []repository.PendingInvitation{
+		{ID: "inv-1", Email: "a@x.com", Role: "editor", ExpiresAt: time.Now().Add(72 * time.Hour)},
+	}}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+
+	invitations, err := svc.ListPendingInvitations(context.Background(), nil, "ws-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(invitations) != 1 || invitations[0].Email != "a@x.com" {
+		t.Errorf("invitations = %+v, want satu entri a@x.com", invitations)
 	}
 }
 

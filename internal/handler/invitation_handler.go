@@ -169,6 +169,38 @@ func (h *InvitationHandler) AcceptInvitation(c *fiber.Ctx) error {
 	}))
 }
 
+// ListPendingInvitations menangani GET /workspaces/:wsId/invitations --
+// prasyarat minimal S2-28 (daftar undangan pending di FE), belum pernah
+// dijadwalkan sebagai task backend terpisah -- lihat
+// implementation_gaps.md IG-09.
+func (h *InvitationHandler) ListPendingInvitations(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ListPendingInvitations dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	invitations, err := h.invitations.ListPendingInvitations(c.Context(), exec, workspaceID)
+	if err != nil {
+		h.logger.Error("gagal ambil daftar undangan pending", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar undangan", nil))
+	}
+
+	data := make([]fiber.Map, len(invitations))
+	for i := range invitations {
+		inv := &invitations[i]
+		data[i] = fiber.Map{
+			"id":         inv.ID,
+			"email":      inv.Email,
+			"role":       inv.Role,
+			"expires_at": inv.ExpiresAt,
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{"pending_invitations": data}))
+}
+
 // CancelInvitation menangani DELETE /workspaces/:wsId/invitations/:invId (S2-21).
 func (h *InvitationHandler) CancelInvitation(c *fiber.Ctx) error {
 	actorUserID, _, ok := middleware.ActorFromContext(c)
