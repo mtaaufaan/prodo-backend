@@ -34,6 +34,7 @@ type invitationRepository interface {
 	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error
 	Resend(ctx context.Context, exec db.Executor, workspaceID, invitationID, newTokenHash string, newExpiresAt time.Time) (*repository.ResendTarget, error)
 	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+	ListPending(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.PendingInvitation, error)
 }
 
 // invitationEmailSender -- interface didefinisikan di consumer,
@@ -142,7 +143,7 @@ func (s *InvitationService) CreateBulkInvitations(
 	result := &BulkInvitationResult{Errors: map[string]string{}}
 	seen := make(map[string]bool, len(emails))
 
-	for _, email := range emails {
+	for i, email := range emails {
 		if seen[email] {
 			continue
 		}
@@ -153,17 +154,35 @@ func (s *InvitationService) CreateBulkInvitations(
 			continue
 		}
 
+		// savepoint per email -- WAJIB: satu email gagal (mis. unique_
+		// violation "sudah pending") membuat SELURUH transaksi Postgres
+		// berstatus aborted sampai ada ROLLBACK, bukan cuma baris itu yang
+		// gagal. Tanpa savepoint, satu email bermasalah bikin COMMIT di
+		// akhir request gagal untuk email lain yang sebenarnya valid --
+		// ketahuan lewat live testing (re-invite email yang masih pending
+		// -> 500 "Gagal menyimpan perubahan", bukan error per-baris).
+		savepoint := fmt.Sprintf("sp_bulk_inv_%d", i)
+
 		existingUserID, err := s.users.FindUserIDByEmail(ctx, email)
 		switch {
 		case err == nil:
 			// S2-23: email sudah terdaftar -- tambah langsung, tanpa undangan/email.
-			if _, err := s.assigner.AssignRole(ctx, exec, workspaceID, existingUserID, role, &invitedByUserID, invitedByUserID, actorRole); err != nil {
+			err := withSavepoint(ctx, exec, savepoint, func() error {
+				_, err := s.assigner.AssignRole(ctx, exec, workspaceID, existingUserID, role, &invitedByUserID, invitedByUserID, actorRole)
+				return err
+			})
+			if err != nil {
 				result.Errors[email] = err.Error()
 				continue
 			}
 			result.AddedDirectly = append(result.AddedDirectly, email)
 		case errors.Is(err, pgx.ErrNoRows):
-			inv, err := s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName)
+			var inv *Invitation
+			err := withSavepoint(ctx, exec, savepoint, func() error {
+				var err error
+				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName)
+				return err
+			})
 			if err != nil {
 				result.Errors[email] = err.Error()
 				continue
@@ -177,6 +196,27 @@ func (s *InvitationService) CreateBulkInvitations(
 	return result, nil
 }
 
+// withSavepoint membungkus fn dalam SAVEPOINT Postgres -- rollback ke
+// savepoint (bukan seluruh transaksi) kalau fn gagal, supaya caller bisa
+// melanjutkan operasi lain dalam transaksi yang sama. name harus konstanta/
+// dari sumber tepercaya (index loop), BUKAN dari input user -- tidak
+// diparameterisasi via placeholder karena SAVEPOINT tidak mendukung itu.
+func withSavepoint(ctx context.Context, exec db.Executor, name string, fn func() error) error {
+	if _, err := exec.Exec(ctx, "SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("savepoint: %w", err)
+	}
+	if err := fn(); err != nil {
+		if _, rbErr := exec.Exec(ctx, "ROLLBACK TO SAVEPOINT "+name); rbErr != nil {
+			return fmt.Errorf("%w (rollback to savepoint juga gagal: %v)", err, rbErr)
+		}
+		return err
+	}
+	if _, err := exec.Exec(ctx, "RELEASE SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("release savepoint: %w", err)
+	}
+	return nil
+}
+
 // GetWorkspaceName -- passthrough tipis ke repo, dipakai handler untuk isi
 // email undangan (S2-19/22). Penempatan sementara di sini karena belum ada
 // WorkspaceService (menyusul S3-08 dst) -- pindahkan ke sana begitu ada.
@@ -186,6 +226,16 @@ func (s *InvitationService) GetWorkspaceName(ctx context.Context, exec db.Execut
 		return "", fmt.Errorf("service.GetWorkspaceName: %w", err)
 	}
 	return name, nil
+}
+
+// ListPendingInvitations -- passthrough tipis ke repo (S2-28 prasyarat,
+// lihat implementation_gaps.md IG-09).
+func (s *InvitationService) ListPendingInvitations(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.PendingInvitation, error) {
+	invitations, err := s.repo.ListPending(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListPendingInvitations: %w", err)
+	}
+	return invitations, nil
 }
 
 // AcceptedInvitation -- hasil AcceptInvitation.

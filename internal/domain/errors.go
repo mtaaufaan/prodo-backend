@@ -14,6 +14,12 @@ var (
 	// ditemukan, sudah dipakai, atau sudah kedaluwarsa (US-073 AC).
 	ErrInvitationNotFound = errors.New("activation token not found, used, or expired")
 
+	// ErrInvitationAlreadyPending dikembalikan saat mengundang email yang
+	// sudah punya undangan pending di workspace yang sama (S2-16/17,
+	// constraint uq_invitation_pending) -- re-invite baru boleh setelah
+	// undangan lama expired/accepted/cancelled.
+	ErrInvitationAlreadyPending = errors.New("invitation already pending for this email in this workspace")
+
 	// ErrUserNotFound dikembalikan saat lookup user (misal by Keycloak
 	// provider_sub) tidak menemukan baris.
 	ErrUserNotFound = errors.New("user not found")
