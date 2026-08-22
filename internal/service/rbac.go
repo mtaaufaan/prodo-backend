@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -26,11 +27,18 @@ func NewRBACService(repo workspaceMemberRepository, c cache.Cache) *RBACService 
 	return &RBACService{repo: repo, cache: c}
 }
 
-// roleCacheKey -- dibaca RequireRole middleware (S2-09) untuk hindari query
-// DB di setiap request, sama pola dengan session:revoked:<jti> (S1-32).
+// roleCacheKey -- dibaca RequireRole middleware (S2-09) lewat GetMemberRole
+// untuk hindari query DB di setiap request, sama pola dengan
+// session:revoked:<jti> (S1-32).
 func roleCacheKey(userID, workspaceID string) string {
 	return "role:" + userID + ":" + workspaceID
 }
+
+// roleCacheTTL -- jaring pengaman kalau invalidate di AssignRole terlewat
+// (mis. proses crash tepat setelah commit, sebelum Del terpanggil); role
+// jarang berubah jadi TTL longgar tidak masalah -- perubahan role NORMAL
+// tetap langsung ter-invalidate lewat AssignRole, TTL ini bukan jalur utama.
+const roleCacheTTL = 5 * time.Minute
 
 // RoleChangeResult -- hasil AssignRole.
 type RoleChangeResult struct {
@@ -75,16 +83,31 @@ func (s *RBACService) AssignRole(ctx context.Context, workspaceID, userID, role 
 }
 
 // GetMemberRole mengembalikan role user di workspace, atau "" kalau user
-// bukan member workspace tersebut (dipakai handler S2-04 untuk cek
-// otorisasi "AW only" -- lihat komentar WorkspaceHandler.UpdateMemberRole
-// soal gap scoping Group Admin).
+// bukan member workspace tersebut. Dipakai untuk cek otorisasi (handler
+// S2-04, middleware RequireRole S2-09) -- lihat komentar
+// WorkspaceHandler.UpdateMemberRole soal gap scoping Group Admin. Cache
+// Redis dulu (read-through, di-populate di sini kalau miss), baru DB kalau
+// cache kosong. Hasil "bukan member" (role "") SENGAJA tidak di-cache --
+// kasus itu jarang di jalur hot-path dibanding member sungguhan, dan
+// menghindari perlu invalidate cache negatif saat user baru diundang.
 func (s *RBACService) GetMemberRole(ctx context.Context, workspaceID, userID string) (string, error) {
+	key := roleCacheKey(userID, workspaceID)
+	if cached, err := s.cache.Get(ctx, key); err == nil {
+		return cached, nil
+	} else if !errors.Is(err, cache.ErrNotFound) {
+		return "", fmt.Errorf("service.GetMemberRole: cek cache: %w", err)
+	}
+
 	role, err := s.repo.GetRole(ctx, workspaceID, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil
 		}
 		return "", fmt.Errorf("service.GetMemberRole: %w", err)
+	}
+
+	if err := s.cache.Set(ctx, key, role, roleCacheTTL); err != nil {
+		return "", fmt.Errorf("service.GetMemberRole: set cache: %w", err)
 	}
 	return role, nil
 }
