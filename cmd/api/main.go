@@ -124,6 +124,7 @@ func run() error {
 		return fmt.Errorf("setup MFA repository: %w", err)
 	}
 	sessionRepo := repository.NewSessionRepository(pool)
+	workspaceMemberRepo := repository.NewWorkspaceMemberRepository(pool)
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -131,6 +132,7 @@ func run() error {
 	activationSvc := service.NewActivationService(accountRepo, kcAdmin, mfaSvc, logger)
 	sessionSvc := service.NewSessionService(sessionRepo, rdb)
 	authSvc := service.NewAuthService(accountRepo, oidcClient, mfaSvc, sessionSvc, logger)
+	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -143,6 +145,7 @@ func run() error {
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
+	workspaceHandler := handler.NewWorkspaceHandler(accountSvc, rbacSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -160,6 +163,10 @@ func run() error {
 	// SessionHandler.ListForUser/RevokeAllForUser.
 	v1.Get("/admin/users/:userId/sessions", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.ListForUser)
 	v1.Post("/admin/users/:userId/sessions/revoke-all", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.RevokeAllForUser)
+	// ⚠️ S2-04 gap: otorisasi "GA atau AW only" cuma sebagian -- lihat
+	// komentar WorkspaceHandler.UpdateMemberRole (sama gap dengan S1-30/35,
+	// IG-01: scoping Group Admin butuh data organisasi yang belum lengkap).
+	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, workspaceHandler.UpdateMemberRole)
 
 	serverErr := make(chan error, 1)
 	go func() {
