@@ -52,7 +52,11 @@ func run() error {
 	defer logger.Sync() //nolint:errcheck // flush error on shutdown is not actionable
 
 	ctx := context.Background()
-	pool, err := db.NewPool(ctx, cfg)
+	// AppDatabaseURL (prodo_app_user, S2-10) -- BUKAN DatabaseURL (prodo
+	// superuser, hanya untuk migrate CLI/seed). Superuser selalu bypass
+	// RLS apapun policy-nya, jadi runtime app WAJIB connect sebagai role
+	// non-superuser supaya RLS_DESIGN.md benar-benar berlaku.
+	pool, err := db.NewPool(ctx, cfg.AppDatabaseURL, cfg)
 	if err != nil {
 		return fmt.Errorf("konek ke database: %w", err)
 	}
@@ -124,7 +128,7 @@ func run() error {
 		return fmt.Errorf("setup MFA repository: %w", err)
 	}
 	sessionRepo := repository.NewSessionRepository(pool)
-	workspaceMemberRepo := repository.NewWorkspaceMemberRepository(pool)
+	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -166,11 +170,16 @@ func run() error {
 	// ⚠️ S2-04/09 gap: otorisasi "GA atau AW only" cuma sebagian -- lihat
 	// komentar middleware.RequireRole (sama gap dengan S1-30/35, IG-01:
 	// scoping Group Admin butuh data organisasi yang belum lengkap).
-	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
+	// dbCtx (S2-10/11): membuka transaksi request-scoped + suntik session
+	// variable RLS SEBELUM RequireRole (yang query workspace_members, kini
+	// ber-RLS) berjalan. Cuma dipasang di route /workspaces/... untuk
+	// sekarang -- lihat komentar middleware.DBContextMiddleware.
+	dbCtx := middleware.DBContextMiddleware(pool, accountSvc)
+	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
 	// ⚠️ S2-07/08 prasyarat, dimajukan dari S3-14 (implementation_gaps.md
 	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
 	// workspace boleh lihat daftar member workspace mereka sendiri.
-	v1.Get("/workspaces/:wsId/members", jwtAuth, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.ListMembers)
+	v1.Get("/workspaces/:wsId/members", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.ListMembers)
 
 	serverErr := make(chan error, 1)
 	go func() {

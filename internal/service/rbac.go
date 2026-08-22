@@ -9,14 +9,17 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mtaaufaan/prodo-backend/internal/cache"
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
 // workspaceMemberRepository -- interface didefinisikan di consumer, §3.9.
+// exec (db.Executor, S2-10/11) adalah transaksi request-scoped yang sudah
+// membawa session variable RLS -- lihat WorkspaceMemberRepository.
 type workspaceMemberRepository interface {
-	GetRole(ctx context.Context, workspaceID, userID string) (string, error)
-	AssignRole(ctx context.Context, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
-	ListMembers(ctx context.Context, workspaceID string) ([]repository.Member, error)
+	GetRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
+	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
+	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -51,16 +54,20 @@ type RoleChangeResult struct {
 // AssignRole menetapkan role user di workspace -- INSERT kalau belum
 // member, UPDATE kalau sudah (S2-03), sekaligus mencatat audit trail
 // (S2-06) dan mengirim in-app notification ke target (S2-05) dalam SATU
-// transaksi DB (lihat WorkspaceMemberRepository.AssignRole -- awalnya
-// tiga query terpisah, gagal di tengah jalan meninggalkan state
-// setengah-jadi, ketahuan saat verifikasi live). Cache Redis
-// role:<user>:<workspace> di-invalidate SETELAH transaksi commit
-// (cache bukan bagian transaksi DB, tapi harus nunggu commit sukses
-// dulu baru boleh dianggap "role lama sudah tidak valid").
+// transaksi DB (exec, transaksi request-scoped dari
+// middleware.DBContextMiddleware, S2-10/11 -- awalnya repo yang buka
+// transaksi lokal sendiri, gagal di tengah jalan meninggalkan state
+// setengah-jadi, ketahuan saat verifikasi live; sekarang dijamin transaksi
+// luar yang sama dipakai RequireRole untuk cek otorisasi). Cache Redis
+// role:<user>:<workspace> di-invalidate di sini, SEBELUM transaksi luar
+// commit (middleware yang commit, setelah handler selesai) -- kalau
+// commit itu gagal (jarang, mis. koneksi putus), cache cuma jadi miss
+// sesaat dan self-heal ke nilai lama yang benar di GetMemberRole
+// berikutnya, bukan korupsi data.
 // actorID/actorRole adalah user yang MELAKUKAN perubahan, beda dari
 // userID (target yang role-nya berubah).
-func (s *RBACService) AssignRole(ctx context.Context, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error) {
-	previousRole, err := s.repo.GetRole(ctx, workspaceID, userID)
+func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error) {
+	previousRole, err := s.repo.GetRole(ctx, exec, workspaceID, userID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("service.AssignRole: cek role lama: %w", err)
 	}
@@ -73,7 +80,7 @@ func (s *RBACService) AssignRole(ctx context.Context, workspaceID, userID, role 
 	title := "Role Anda diperbarui"
 	body := fmt.Sprintf("Role Anda di workspace ini diubah menjadi %s.", role)
 
-	if err := s.repo.AssignRole(ctx, workspaceID, userID, role, invitedBy, actorID, actorRole, before, after, title, body); err != nil {
+	if err := s.repo.AssignRole(ctx, exec, workspaceID, userID, role, invitedBy, actorID, actorRole, before, after, title, body); err != nil {
 		return nil, fmt.Errorf("service.AssignRole: %w", err)
 	}
 
@@ -92,7 +99,7 @@ func (s *RBACService) AssignRole(ctx context.Context, workspaceID, userID, role 
 // cache kosong. Hasil "bukan member" (role "") SENGAJA tidak di-cache --
 // kasus itu jarang di jalur hot-path dibanding member sungguhan, dan
 // menghindari perlu invalidate cache negatif saat user baru diundang.
-func (s *RBACService) GetMemberRole(ctx context.Context, workspaceID, userID string) (string, error) {
+func (s *RBACService) GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error) {
 	key := roleCacheKey(userID, workspaceID)
 	if cached, err := s.cache.Get(ctx, key); err == nil {
 		return cached, nil
@@ -100,7 +107,7 @@ func (s *RBACService) GetMemberRole(ctx context.Context, workspaceID, userID str
 		return "", fmt.Errorf("service.GetMemberRole: cek cache: %w", err)
 	}
 
-	role, err := s.repo.GetRole(ctx, workspaceID, userID)
+	role, err := s.repo.GetRole(ctx, exec, workspaceID, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil
@@ -117,8 +124,8 @@ func (s *RBACService) GetMemberRole(ctx context.Context, workspaceID, userID str
 // ListMembers mengembalikan seluruh member workspace (S2-07/08 prasyarat --
 // lihat komentar WorkspaceMemberRepository.ListMembers soal scope
 // project_scoped_members yang belum dibangun).
-func (s *RBACService) ListMembers(ctx context.Context, workspaceID string) ([]repository.Member, error) {
-	members, err := s.repo.ListMembers(ctx, workspaceID)
+func (s *RBACService) ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error) {
+	members, err := s.repo.ListMembers(ctx, exec, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListMembers: %w", err)
 	}

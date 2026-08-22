@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
@@ -27,12 +28,12 @@ type stubWorkspaceMemberRepository struct {
 	listMembersErr    error
 }
 
-func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _, _ string) (string, error) {
+func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
 	f.getRoleCalls++
 	return f.getRoleResult, f.getRoleErr
 }
 
-func (f *stubWorkspaceMemberRepository) AssignRole(_ context.Context, _, _, role string, invitedBy *string, _, _ string, before, after map[string]string, notifTitle, notifBody string) error {
+func (f *stubWorkspaceMemberRepository) AssignRole(_ context.Context, _ db.Executor, _, _, role string, invitedBy *string, _, _ string, before, after map[string]string, notifTitle, notifBody string) error {
 	f.assignedRole = role
 	f.assignedInvitedBy = invitedBy
 	f.assignedBefore = before
@@ -42,7 +43,7 @@ func (f *stubWorkspaceMemberRepository) AssignRole(_ context.Context, _, _, role
 	return f.assignErr
 }
 
-func (f *stubWorkspaceMemberRepository) ListMembers(_ context.Context, _ string) ([]repository.Member, error) {
+func (f *stubWorkspaceMemberRepository) ListMembers(_ context.Context, _ db.Executor, _ string) ([]repository.Member, error) {
 	return f.listMembersResult, f.listMembersErr
 }
 
@@ -52,7 +53,7 @@ func TestRBACService_AssignRole_NewMember_NoPreviousRole(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleErr: pgx.ErrNoRows}
 	svc := NewRBACService(repo, newStubCache())
 
-	result, err := svc.AssignRole(context.Background(), "ws-1", "user-1", "editor", strPtr("inviter-1"), "actor-1", "admin_workspace")
+	result, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", strPtr("inviter-1"), "actor-1", "admin_workspace")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestRBACService_AssignRole_ExistingMember_RoleChanged(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "viewer"}
 	svc := NewRBACService(repo, newStubCache())
 
-	result, err := svc.AssignRole(context.Background(), "ws-1", "user-1", "project_manager", nil, "actor-1", "admin_workspace")
+	result, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "project_manager", nil, "actor-1", "admin_workspace")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestRBACService_AssignRole_InvalidatesCache(t *testing.T) {
 	c.store[roleCacheKey("user-1", "ws-1")] = "viewer"
 
 	svc := NewRBACService(repo, c)
-	if _, err := svc.AssignRole(context.Background(), "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace"); err != nil {
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -114,7 +115,7 @@ func TestRBACService_AssignRole_GetRoleRealError_PropagatesAndSkipsWrite(t *test
 	repo := &stubWorkspaceMemberRepository{getRoleErr: errors.New("connection refused")}
 	svc := NewRBACService(repo, newStubCache())
 
-	_, err := svc.AssignRole(context.Background(), "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace")
+	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace")
 	if err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
@@ -127,7 +128,7 @@ func TestRBACService_GetMemberRole_NotAMember_ReturnsEmpty(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleErr: pgx.ErrNoRows}
 	svc := NewRBACService(repo, newStubCache())
 
-	role, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1")
+	role, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestRBACService_GetMemberRole_ReturnsRole(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace"}
 	svc := NewRBACService(repo, newStubCache())
 
-	role, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1")
+	role, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestRBACService_GetMemberRole_CacheMiss_PopulatesCache(t *testing.T) {
 	c := newStubCache()
 	svc := NewRBACService(repo, c)
 
-	if _, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1"); err != nil {
+	if _, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if repo.getRoleCalls != 1 {
@@ -171,7 +172,7 @@ func TestRBACService_GetMemberRole_CacheHit_SkipsRepo(t *testing.T) {
 	c.store[roleCacheKey("user-1", "ws-1")] = "admin_workspace"
 	svc := NewRBACService(repo, c)
 
-	role, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1")
+	role, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestRBACService_GetMemberRole_NotAMember_DoesNotCache(t *testing.T) {
 	c := newStubCache()
 	svc := NewRBACService(repo, c)
 
-	if _, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1"); err != nil {
+	if _, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, ok := c.store[roleCacheKey("user-1", "ws-1")]; ok {
@@ -203,7 +204,7 @@ func TestRBACService_ListMembers_ReturnsMembers(t *testing.T) {
 	}}
 	svc := NewRBACService(repo, newStubCache())
 
-	members, err := svc.ListMembers(context.Background(), "ws-1")
+	members, err := svc.ListMembers(context.Background(), nil, "ws-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

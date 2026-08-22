@@ -8,8 +8,8 @@ import (
 )
 
 func TestNewPool_InvalidURL(t *testing.T) {
-	cfg := &config.Config{DatabaseURL: "not-a-valid-url"}
-	if _, err := NewPool(context.Background(), cfg); err == nil {
-		t.Fatal("expected error for invalid DATABASE_URL, got nil")
+	cfg := &config.Config{}
+	if _, err := NewPool(context.Background(), "not-a-valid-url", cfg); err == nil {
+		t.Fatal("expected error for invalid connection string, got nil")
 	}
 }
