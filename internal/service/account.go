@@ -192,6 +192,16 @@ func (s *AccountService) UserExists(ctx context.Context, userID string) error {
 	return nil
 }
 
+// GetDisplayName -- dipakai handler undangan workspace (S2-19/22) untuk
+// isi email "X mengundang Anda..." dengan nama tampilan actor, bukan UUID.
+func (s *AccountService) GetDisplayName(ctx context.Context, userID string) (string, error) {
+	contact, err := s.repo.FindUserContactByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("service.GetDisplayName: %w", err)
+	}
+	return contact.DisplayName, nil
+}
+
 // generateActivationToken menghasilkan token acak (256-bit) untuk dikirim
 // ke user lewat email, dan hash SHA-256-nya untuk disimpan di DB -- token
 // mentah tidak pernah disimpan (kalau DB bocor, token tidak bisa dipakai
