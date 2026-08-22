@@ -428,6 +428,19 @@ func (r *AccountRepository) FindUserContactByID(ctx context.Context, userID stri
 	return c, nil
 }
 
+// FindUserIDByEmail -- dipakai S2-23 (invitation shortcut): kalau email
+// yang diundang sudah terdaftar, AW menambahkannya langsung ke workspace
+// alih-alih membuat undangan token baru. pgx.ErrNoRows (tidak di-wrap)
+// kalau belum terdaftar -- caller cek via errors.Is, pola sama dengan
+// WorkspaceMemberRepository.GetRole.
+func (r *AccountRepository) FindUserIDByEmail(ctx context.Context, email string) (string, error) {
+	var id string
+	if err := r.db.QueryRow(ctx, `SELECT id FROM users WHERE email = $1`, email).Scan(&id); err != nil {
+		return "", fmt.Errorf("repository.FindUserIDByEmail: %w", err)
+	}
+	return id, nil
+}
+
 // RegenerateInvitationToken meng-invalidate token lama dan menggantinya
 // dengan yang baru (S1-08) -- UPDATE in-place, bukan INSERT baru, karena
 // idx_platform_invitations_pending (partial unique index WHERE accepted_at

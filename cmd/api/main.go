@@ -129,6 +129,7 @@ func run() error {
 	}
 	sessionRepo := repository.NewSessionRepository(pool)
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
+	invitationRepo := repository.NewInvitationRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -137,6 +138,7 @@ func run() error {
 	sessionSvc := service.NewSessionService(sessionRepo, rdb)
 	authSvc := service.NewAuthService(accountRepo, oidcClient, mfaSvc, sessionSvc, logger)
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
+	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -150,6 +152,7 @@ func run() error {
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, logger)
+	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -180,6 +183,12 @@ func run() error {
 	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
 	// workspace boleh lihat daftar member workspace mereka sendiri.
 	v1.Get("/workspaces/:wsId/members", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.ListMembers)
+	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
+	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
+	v1.Post("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CreateInvitations)
+	v1.Post("/auth/invitations/accept", invitationHandler.AcceptInvitation)
+	v1.Delete("/workspaces/:wsId/invitations/:invId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CancelInvitation)
+	v1.Post("/workspaces/:wsId/invitations/:invId/resend", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.ResendInvitation)
 
 	serverErr := make(chan error, 1)
 	go func() {
