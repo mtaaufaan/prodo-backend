@@ -8,6 +8,10 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 )
 
 type stubUserResolver struct {
@@ -24,8 +28,26 @@ type stubWorkspaceRoleChecker struct {
 	err  error
 }
 
-func (s *stubWorkspaceRoleChecker) GetMemberRole(_ context.Context, _, _ string) (string, error) {
+func (s *stubWorkspaceRoleChecker) GetMemberRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
 	return s.role, s.err
+}
+
+// stubExecutor -- db.Executor palsu, cukup untuk lolos type assertion di
+// DBTxFromContext (RequireRole sendiri tidak pernah benar-benar
+// menjalankan query lewatnya di test ini -- itu tugas stubWorkspaceRoleChecker).
+type stubExecutor struct{}
+
+func (stubExecutor) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (stubExecutor) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (stubExecutor) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
+
+func withDBTx() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		c.Locals(dbTxLocalsKey, db.Executor(stubExecutor{}))
+		return c.Next()
+	}
 }
 
 // withClaims menyuntik Claims ke locals sebelum RequireRole -- meniru apa
@@ -43,7 +65,7 @@ func withClaims(platformRole string) fiber.Handler {
 
 func newTestAppWithRequireRole(users UserResolver, checker WorkspaceRoleChecker, platformRole string, allowedRoles ...string) *fiber.App {
 	app := fiber.New()
-	app.Get("/workspaces/:wsId/x", withClaims(platformRole), RequireRole(users, checker, allowedRoles...), func(c *fiber.Ctx) error {
+	app.Get("/workspaces/:wsId/x", withClaims(platformRole), withDBTx(), RequireRole(users, checker, allowedRoles...), func(c *fiber.Ctx) error {
 		userID, role, ok := ActorFromContext(c)
 		if !ok {
 			return c.Status(fiber.StatusInternalServerError).SendString("actor not in context")
@@ -102,6 +124,22 @@ func TestRequireRole_NotAMember_Forbidden(t *testing.T) {
 	defer resp.Body.Close() //nolint:errcheck // close error on a read-only test response is not actionable
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Errorf("status = %d, want 403 (bukan member sama sekali)", resp.StatusCode)
+	}
+}
+
+func TestRequireRole_MissingDBTx_InternalError(t *testing.T) {
+	app := fiber.New()
+	app.Get("/workspaces/:wsId/x", withClaims("member"), RequireRole(&stubUserResolver{userID: "user-1"}, &stubWorkspaceRoleChecker{role: "editor"}, "admin_workspace"), func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/workspaces/ws-1/x", http.NoBody))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // close error on a read-only test response is not actionable
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 (DBContextMiddleware belum dipasang sebelum RequireRole)", resp.StatusCode)
 	}
 }
 

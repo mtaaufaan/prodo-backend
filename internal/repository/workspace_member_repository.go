@@ -8,23 +8,28 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 )
 
-type WorkspaceMemberRepository struct {
-	db *pgxpool.Pool
-}
+// WorkspaceMemberRepository tidak menyimpan *pgxpool.Pool -- setiap method
+// menerima db.Executor sebagai parameter (S2-10/11). Executor sebenarnya
+// adalah transaksi request-scoped dari middleware.DBContextMiddleware yang
+// sudah membawa session variable RLS (app.current_user_id/
+// app.current_platform_role); memakai pool langsung di sini akan membuat
+// SET LOCAL di middleware tidak pernah terpasang di koneksi yang benar-
+// benar dipakai query ini (lihat RLS_DESIGN.md §5.3).
+type WorkspaceMemberRepository struct{}
 
-func NewWorkspaceMemberRepository(db *pgxpool.Pool) *WorkspaceMemberRepository {
-	return &WorkspaceMemberRepository{db: db}
+func NewWorkspaceMemberRepository() *WorkspaceMemberRepository {
+	return &WorkspaceMemberRepository{}
 }
 
 // GetRole mengembalikan role user saat ini di workspace -- pgx.ErrNoRows
 // (tidak di-wrap ke domain error di sini, dicek via errors.Is oleh
 // caller) kalau user belum jadi member.
-func (r *WorkspaceMemberRepository) GetRole(ctx context.Context, workspaceID, userID string) (string, error) {
+func (r *WorkspaceMemberRepository) GetRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error) {
 	var role string
-	err := r.db.QueryRow(ctx, `
+	err := exec.QueryRow(ctx, `
 		SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2
 	`, workspaceID, userID).Scan(&role)
 	if err != nil {
@@ -34,27 +39,24 @@ func (r *WorkspaceMemberRepository) GetRole(ctx context.Context, workspaceID, us
 }
 
 // AssignRole menetapkan role user di workspace (S2-03), mencatat audit
-// trail (S2-06), dan mengirim in-app notification ke target (S2-05) --
-// SATU transaksi, semua-atau-tidak-sama-sekali. Awalnya tiga query
-// terpisah tanpa transaksi -- gagal di step notifikasi (mis. tabel belum
-// ada) tetap meninggalkan role_members ter-update walau response ke
-// client 500, ketahuan saat verifikasi live. before nil kalau target
-// sebelumnya belum jadi member (tidak ada "state sebelum" yang berarti).
+// trail (S2-06), dan mengirim in-app notification ke target (S2-05).
+// Atomicity SEKARANG dijamin oleh transaksi request-scoped yang dibawa
+// exec (middleware.DBContextMiddleware, S2-11), bukan transaksi lokal di
+// sini lagi -- sebelum S2-11 method ini membuka tx sendiri (lihat riwayat
+// git), tapi dengan exec yang sudah pasti berupa tx per-request, membuka
+// tx bersarang lagi tidak perlu (dan pgx tidak mendukung nested
+// transaction sungguhan). before nil kalau target sebelumnya belum jadi
+// member (tidak ada "state sebelum" yang berarti).
 func (r *WorkspaceMemberRepository) AssignRole(
 	ctx context.Context,
+	exec db.Executor,
 	workspaceID, userID, role string,
 	invitedBy *string,
 	actorID, actorRole string,
 	before, after map[string]string,
 	notifTitle, notifBody string,
 ) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("repository.AssignRole: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
-
-	if _, err := tx.Exec(ctx, `
+	if _, err := exec.Exec(ctx, `
 		INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
 		VALUES ($1, $2, $3::workspace_role, $4)
 		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role
@@ -63,6 +65,7 @@ func (r *WorkspaceMemberRepository) AssignRole(
 	}
 
 	var beforeJSON, afterJSON []byte
+	var err error
 	if before != nil {
 		if beforeJSON, err = json.Marshal(before); err != nil {
 			return fmt.Errorf("repository.AssignRole: marshal state_before: %w", err)
@@ -71,23 +74,20 @@ func (r *WorkspaceMemberRepository) AssignRole(
 	if afterJSON, err = json.Marshal(after); err != nil {
 		return fmt.Errorf("repository.AssignRole: marshal state_after: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := exec.Exec(ctx, `
 		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, state_before, state_after)
 		VALUES ($1, $2, 'member.role_changed', 'workspace_member', $3, $4, $5::jsonb, $6::jsonb)
 	`, actorID, actorRole, userID, workspaceID, beforeJSON, afterJSON); err != nil {
 		return fmt.Errorf("repository.AssignRole: audit: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
+	if _, err := exec.Exec(ctx, `
 		INSERT INTO notifications (user_id, actor_id, type, title, body)
 		VALUES ($1, $2, 'role_changed', $3, $4)
 	`, userID, actorID, notifTitle, notifBody); err != nil {
 		return fmt.Errorf("repository.AssignRole: notifikasi: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("repository.AssignRole: commit: %w", err)
-	}
 	return nil
 }
 
@@ -105,8 +105,8 @@ type Member struct {
 // project_scoped_members, tapi konsep project-scoped member butuh tabel
 // yang belum ada di S2; cuma workspace_members dulu, cukup untuk
 // RolePickerModal S2-07/08).
-func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, workspaceID string) ([]Member, error) {
-	rows, err := r.db.Query(ctx, `
+func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]Member, error) {
+	rows, err := exec.Query(ctx, `
 		SELECT wm.user_id, u.email, u.display_name, wm.role, wm.joined_at
 		FROM workspace_members wm
 		JOIN users u ON u.id = wm.user_id

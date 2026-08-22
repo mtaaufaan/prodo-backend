@@ -12,12 +12,16 @@ import (
 	"github.com/mtaaufaan/prodo-backend/config"
 )
 
-// NewPool membuat pgxpool.Pool dari DATABASE_URL, lalu ping untuk memastikan
-// koneksi benar-benar hidup sebelum dikembalikan ke caller.
-func NewPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+// NewPool membuat pgxpool.Pool dari connString, lalu ping untuk memastikan
+// koneksi benar-benar hidup sebelum dikembalikan ke caller. connString
+// terpisah dari cfg (bukan selalu cfg.DatabaseURL) karena runtime app pool
+// (S2-10) connect sebagai prodo_app_user -- role non-superuser yang benar-
+// benar kena RLS -- BUKAN sebagai prodo (superuser dari DATABASE_URL) yang
+// dipakai migrate CLI/seed dan selalu bypass RLS.
+func NewPool(ctx context.Context, connString string, cfg *config.Config) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
-		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
+		return nil, fmt.Errorf("parse database connection string: %w", err)
 	}
 
 	poolCfg.MaxConns = cfg.DBMaxConns
