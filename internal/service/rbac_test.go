@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
 type stubWorkspaceMemberRepository struct {
@@ -20,6 +22,9 @@ type stubWorkspaceMemberRepository struct {
 	assignedAfter      map[string]string
 	assignedNotifTitle string
 	assignedNotifBody  string
+
+	listMembersResult []repository.Member
+	listMembersErr    error
 }
 
 func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _, _ string) (string, error) {
@@ -35,6 +40,10 @@ func (f *stubWorkspaceMemberRepository) AssignRole(_ context.Context, _, _, role
 	f.assignedNotifTitle = notifTitle
 	f.assignedNotifBody = notifBody
 	return f.assignErr
+}
+
+func (f *stubWorkspaceMemberRepository) ListMembers(_ context.Context, _ string) ([]repository.Member, error) {
+	return f.listMembersResult, f.listMembersErr
 }
 
 func strPtr(s string) *string { return &s }
@@ -184,5 +193,21 @@ func TestRBACService_GetMemberRole_NotAMember_DoesNotCache(t *testing.T) {
 	}
 	if _, ok := c.store[roleCacheKey("user-1", "ws-1")]; ok {
 		t.Error("hasil 'bukan member' sengaja tidak di-cache, tapi ada di store")
+	}
+}
+
+func TestRBACService_ListMembers_ReturnsMembers(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{listMembersResult: []repository.Member{
+		{UserID: "user-1", Email: "a@x.com", DisplayName: "A", Role: "admin_workspace"},
+		{UserID: "user-2", Email: "b@x.com", DisplayName: "B", Role: "editor"},
+	}}
+	svc := NewRBACService(repo, newStubCache())
+
+	members, err := svc.ListMembers(context.Background(), "ws-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("len(members) = %d, want 2", len(members))
 	}
 }

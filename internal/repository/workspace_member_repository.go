@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -88,4 +89,45 @@ func (r *WorkspaceMemberRepository) AssignRole(
 		return fmt.Errorf("repository.AssignRole: commit: %w", err)
 	}
 	return nil
+}
+
+// Member -- satu baris hasil ListMembers.
+type Member struct {
+	UserID      string
+	Email       string
+	DisplayName string
+	Role        string
+	JoinedAt    time.Time
+}
+
+// ListMembers mengembalikan seluruh member LANGSUNG workspace (S2-07/08
+// prasyarat -- S3-14 asli minta dua array workspace_members+
+// project_scoped_members, tapi konsep project-scoped member butuh tabel
+// yang belum ada di S2; cuma workspace_members dulu, cukup untuk
+// RolePickerModal S2-07/08).
+func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, workspaceID string) ([]Member, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT wm.user_id, u.email, u.display_name, wm.role, wm.joined_at
+		FROM workspace_members wm
+		JOIN users u ON u.id = wm.user_id
+		WHERE wm.workspace_id = $1
+		ORDER BY wm.joined_at ASC
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListMembers: %w", err)
+	}
+	defer rows.Close()
+
+	var members []Member
+	for rows.Next() {
+		var m Member
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Role, &m.JoinedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
+		}
+		members = append(members, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListMembers: rows: %w", err)
+	}
+	return members, nil
 }
