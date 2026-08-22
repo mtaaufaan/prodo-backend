@@ -35,9 +35,9 @@ type Config struct {
 	// CLI/seed -- superuser selalu bypass RLS apapun policy-nya.
 	AppDatabaseURL string        `env:"APP_DATABASE_URL" envDefault:""`
 	DBMaxConns     int32         `env:"DB_MAX_CONNS" envDefault:"25"`
-	DBMinConns    int32         `env:"DB_MIN_CONNS" envDefault:"5"`
-	DBMaxConnLife time.Duration `env:"DB_MAX_CONN_LIFETIME" envDefault:"1h"`
-	DBMaxConnIdle time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"30m"`
+	DBMinConns     int32         `env:"DB_MIN_CONNS" envDefault:"5"`
+	DBMaxConnLife  time.Duration `env:"DB_MAX_CONN_LIFETIME" envDefault:"1h"`
+	DBMaxConnIdle  time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"30m"`
 
 	// Redis
 	RedisURL string `env:"REDIS_URL" envDefault:""`
