@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/gofiber/fiber/v2"
+
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 )
 
 // Locals key -- pola sama dengan claimsLocalsKey (auth.go).
@@ -33,15 +35,21 @@ type UserResolver interface {
 }
 
 // WorkspaceRoleChecker -- interface didefinisikan di consumer (§3.9),
-// diimplementasikan service.RBACService.
+// diimplementasikan service.RBACService. exec (db.Executor, S2-10/11)
+// adalah transaksi request-scoped dari DBContextMiddleware -- query
+// workspace_members di sini kena RLS, jadi WAJIB dipanggil dengan exec
+// yang session variable-nya sudah disuntik (bukan sembarang koneksi).
 type WorkspaceRoleChecker interface {
-	GetMemberRole(ctx context.Context, workspaceID, userID string) (string, error)
+	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 }
 
 // RequireRole meloloskan request HANYA kalau actor adalah Platform Admin
 // (bypass penuh, konsisten dengan RequirePlatformAdmin()) ATAU salah satu
 // dari `roles` di workspace target (S2-09, US-003). Route WAJIB punya
-// param :wsId -- middleware ini dipasang SETELAH JWTAuth.
+// param :wsId DAN sudah dipasangi DBContextMiddleware (S2-10/11) SEBELUM
+// middleware ini -- GetMemberRole query workspace_members yang sekarang
+// ber-RLS, tanpa session variable dari DBContextMiddleware query itu akan
+// selalu kosong (default RLS: tolak semua).
 //
 // ⚠️ Gap yang sama dengan WorkspaceHandler.UpdateMemberRole (S2-04) dan
 // SessionHandler (S1-30/35): Group Admin belum bisa lolos scoped ke
@@ -60,13 +68,20 @@ func RequireRole(users UserResolver, checker WorkspaceRoleChecker, roles ...stri
 			return unauthorized(c, "INVALID_CREDENTIALS", "Token tidak ditemukan")
 		}
 
-		actorUserID, err := users.ResolveActorUserID(c.Context(), claims.Subject)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "Gagal mengidentifikasi user"},
-			})
+		// actorUserID mungkin sudah diresolve DBContextMiddleware yang
+		// jalan lebih dulu -- pakai itu kalau ada, hindari query users
+		// dua kali per request.
+		actorUserID, ok := c.Locals(actorUserIDLocalsKey).(string)
+		if !ok {
+			resolved, err := users.ResolveActorUserID(c.Context(), claims.Subject)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "Gagal mengidentifikasi user"},
+				})
+			}
+			actorUserID = resolved
+			c.Locals(actorUserIDLocalsKey, actorUserID)
 		}
-		c.Locals(actorUserIDLocalsKey, actorUserID)
 
 		if claims.PlatformRole == "platform_admin" {
 			c.Locals(actorRoleLocalsKey, "platform_admin")
@@ -80,7 +95,14 @@ func RequireRole(users UserResolver, checker WorkspaceRoleChecker, roles ...stri
 			})
 		}
 
-		role, err := checker.GetMemberRole(c.Context(), workspaceID, actorUserID)
+		exec, ok := DBTxFromContext(c)
+		if !ok {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "RequireRole butuh DBContextMiddleware dipasang lebih dulu di route ini"},
+			})
+		}
+
+		role, err := checker.GetMemberRole(c.Context(), exec, workspaceID, actorUserID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "Gagal memproses permintaan"},

@@ -45,6 +45,11 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 		h.logger.Error("UpdateMemberRole dipanggil tanpa RequireRole -- actor belum diresolve")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("UpdateMemberRole dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
 
 	workspaceID := c.Params("wsId")
 	targetUserID := c.Params("userId")
@@ -58,7 +63,7 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 			[]response.FieldError{{Field: "role", Message: "harus salah satu dari admin_workspace, project_manager, editor, approver, viewer"}}))
 	}
 
-	result, err := h.rbac.AssignRole(c.Context(), workspaceID, targetUserID, req.Role, nil, actorUserID, actorRole)
+	result, err := h.rbac.AssignRole(c.Context(), exec, workspaceID, targetUserID, req.Role, nil, actorUserID, actorRole)
 	if err != nil {
 		h.logger.Error("gagal assign role", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengubah role", nil))
@@ -77,9 +82,14 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 // mengembalikan `workspace_members`; array `project_scoped_members` yang
 // diminta S3-14 asli menyusul S3 (konsepnya butuh tabel yang belum ada).
 func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ListMembers dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
 	workspaceID := c.Params("wsId")
 
-	members, err := h.rbac.ListMembers(c.Context(), workspaceID)
+	members, err := h.rbac.ListMembers(c.Context(), exec, workspaceID)
 	if err != nil {
 		h.logger.Error("gagal ambil daftar member", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar member", nil))

@@ -28,11 +28,16 @@ type Config struct {
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"30s"`
 
 	// Database (PostgreSQL via pgx)
-	DatabaseURL   string        `env:"DATABASE_URL" envDefault:""`
-	DBMaxConns    int32         `env:"DB_MAX_CONNS" envDefault:"25"`
-	DBMinConns    int32         `env:"DB_MIN_CONNS" envDefault:"5"`
-	DBMaxConnLife time.Duration `env:"DB_MAX_CONN_LIFETIME" envDefault:"1h"`
-	DBMaxConnIdle time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"30m"`
+	DatabaseURL string `env:"DATABASE_URL" envDefault:""`
+	// AppDatabaseURL -- koneksi runtime API server (S2-10, RLS_DESIGN.md
+	// §2). WAJIB connect sebagai prodo_app_user (non-superuser, kena RLS),
+	// BUKAN prodo (superuser dari DATABASE_URL) yang dipakai migrate
+	// CLI/seed -- superuser selalu bypass RLS apapun policy-nya.
+	AppDatabaseURL string        `env:"APP_DATABASE_URL" envDefault:""`
+	DBMaxConns     int32         `env:"DB_MAX_CONNS" envDefault:"25"`
+	DBMinConns     int32         `env:"DB_MIN_CONNS" envDefault:"5"`
+	DBMaxConnLife  time.Duration `env:"DB_MAX_CONN_LIFETIME" envDefault:"1h"`
+	DBMaxConnIdle  time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"30m"`
 
 	// Redis
 	RedisURL string `env:"REDIS_URL" envDefault:""`
@@ -131,6 +136,7 @@ func (c *Config) validate() error {
 		name  string
 	}{
 		{c.DatabaseURL, "DATABASE_URL (atau secret Vault /secret/prodo/db.url)"},
+		{c.AppDatabaseURL, "APP_DATABASE_URL (koneksi prodo_app_user, S2-10)"},
 		{c.RedisURL, "REDIS_URL (atau secret Vault /secret/prodo/redis.url)"},
 		{c.KeycloakIssuer, "KEYCLOAK_ISSUER (atau secret Vault /secret/prodo/keycloak.issuer)"},
 		{c.MinIOEndpoint, "MINIO_ENDPOINT (atau secret Vault /secret/prodo/minio.endpoint)"},
