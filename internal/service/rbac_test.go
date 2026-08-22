@@ -11,6 +11,7 @@ import (
 type stubWorkspaceMemberRepository struct {
 	getRoleResult string
 	getRoleErr    error
+	getRoleCalls  int
 
 	assignErr          error
 	assignedRole       string
@@ -22,6 +23,7 @@ type stubWorkspaceMemberRepository struct {
 }
 
 func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _, _ string) (string, error) {
+	f.getRoleCalls++
 	return f.getRoleResult, f.getRoleErr
 }
 
@@ -135,5 +137,52 @@ func TestRBACService_GetMemberRole_ReturnsRole(t *testing.T) {
 	}
 	if role != "admin_workspace" {
 		t.Errorf("role = %q, want admin_workspace", role)
+	}
+}
+
+func TestRBACService_GetMemberRole_CacheMiss_PopulatesCache(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"}
+	c := newStubCache()
+	svc := NewRBACService(repo, c)
+
+	if _, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.getRoleCalls != 1 {
+		t.Errorf("GetRole dipanggil %d kali, want 1 (cache miss pertama)", repo.getRoleCalls)
+	}
+	if cached := c.store[roleCacheKey("user-1", "ws-1")]; cached != "editor" {
+		t.Errorf("cache[%s] = %q, want editor -- GetMemberRole harusnya populate cache setelah miss", roleCacheKey("user-1", "ws-1"), cached)
+	}
+}
+
+func TestRBACService_GetMemberRole_CacheHit_SkipsRepo(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"} // kalau ke-panggil, akan mismatch dgn cache
+	c := newStubCache()
+	c.store[roleCacheKey("user-1", "ws-1")] = "admin_workspace"
+	svc := NewRBACService(repo, c)
+
+	role, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if role != "admin_workspace" {
+		t.Errorf("role = %q, want admin_workspace (dari cache, bukan repo)", role)
+	}
+	if repo.getRoleCalls != 0 {
+		t.Errorf("GetRole dipanggil %d kali, want 0 (harusnya cache hit, tidak query DB)", repo.getRoleCalls)
+	}
+}
+
+func TestRBACService_GetMemberRole_NotAMember_DoesNotCache(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleErr: pgx.ErrNoRows}
+	c := newStubCache()
+	svc := NewRBACService(repo, c)
+
+	if _, err := svc.GetMemberRole(context.Background(), "ws-1", "user-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := c.store[roleCacheKey("user-1", "ws-1")]; ok {
+		t.Error("hasil 'bukan member' sengaja tidak di-cache, tapi ada di store")
 	}
 }

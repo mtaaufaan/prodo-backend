@@ -20,13 +20,12 @@ var validWorkspaceRoles = map[string]bool{
 
 // WorkspaceHandler -- S2-04, US-002.
 type WorkspaceHandler struct {
-	accounts *service.AccountService
-	rbac     *service.RBACService
-	logger   *zap.Logger
+	rbac   *service.RBACService
+	logger *zap.Logger
 }
 
-func NewWorkspaceHandler(accounts *service.AccountService, rbac *service.RBACService, logger *zap.Logger) *WorkspaceHandler {
-	return &WorkspaceHandler{accounts: accounts, rbac: rbac, logger: logger}
+func NewWorkspaceHandler(rbac *service.RBACService, logger *zap.Logger) *WorkspaceHandler {
+	return &WorkspaceHandler{rbac: rbac, logger: logger}
 }
 
 type updateMemberRoleRequest struct {
@@ -34,42 +33,21 @@ type updateMemberRoleRequest struct {
 }
 
 // UpdateMemberRole menangani PUT /workspaces/:wsId/members/:userId/role
-// (S2-04). ⚠️ Otorisasi "GA atau AW only" per sprint_backlog.md cuma
-// SEBAGIAN diimplementasikan: Platform Admin (bypass penuh) dan Admin
-// Workspace (role admin_workspace DI WORKSPACE INI) sudah bekerja. Group
-// Admin BELUM bisa -- mengecek "apakah actor GA yang mengelola organisasi
-// pemilik workspace ini" butuh group_admin_assignments + traversal
-// organizations/groups yang belum ada (implementation_gaps.md IG-01, gap
-// yang sama dengan S1-30/S1-35). Middleware RequireRole() generik (S2-09)
-// juga belum dibangun -- otorisasi di sini masih inline, menyusul
-// di-refactor begitu itu ada.
+// (S2-04). Otorisasi ("Platform Admin atau Admin Workspace di workspace
+// ini" -- Group Admin belum bisa, implementation_gaps.md IG-01) sudah
+// ditegakkan middleware.RequireRole (S2-09) di routing, jadi handler ini
+// murni orkestrasi: validasi input + panggil RBACService.AssignRole.
+// actorUserID/actorRole diambil dari middleware.ActorFromContext (sudah
+// diresolve RequireRole, tidak perlu query ulang).
 func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
-	claims, ok := middleware.ClaimsFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+		h.logger.Error("UpdateMemberRole dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
 
 	workspaceID := c.Params("wsId")
 	targetUserID := c.Params("userId")
-
-	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
-	if err != nil {
-		h.logger.Error("JWT valid tapi user tidak ditemukan di tabel users", zap.String("keycloak_sub", claims.Subject), zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
-	}
-
-	actorRole := claims.PlatformRole
-	if actorRole != "platform_admin" {
-		workspaceRole, err := h.rbac.GetMemberRole(c.Context(), workspaceID, actorUserID)
-		if err != nil {
-			h.logger.Error("gagal cek role actor di workspace", zap.Error(err))
-			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses permintaan", nil))
-		}
-		if workspaceRole != "admin_workspace" {
-			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Hanya Admin Workspace atau Platform Admin yang dapat mengubah role member.", nil))
-		}
-		actorRole = workspaceRole
-	}
 
 	var req updateMemberRoleRequest
 	if err := c.BodyParser(&req); err != nil {
