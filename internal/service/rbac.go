@@ -9,12 +9,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mtaaufaan/prodo-backend/internal/cache"
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
 // workspaceMemberRepository -- interface didefinisikan di consumer, §3.9.
 type workspaceMemberRepository interface {
 	GetRole(ctx context.Context, workspaceID, userID string) (string, error)
 	AssignRole(ctx context.Context, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
+	ListMembers(ctx context.Context, workspaceID string) ([]repository.Member, error)
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -110,4 +112,15 @@ func (s *RBACService) GetMemberRole(ctx context.Context, workspaceID, userID str
 		return "", fmt.Errorf("service.GetMemberRole: set cache: %w", err)
 	}
 	return role, nil
+}
+
+// ListMembers mengembalikan seluruh member workspace (S2-07/08 prasyarat --
+// lihat komentar WorkspaceMemberRepository.ListMembers soal scope
+// project_scoped_members yang belum dibangun).
+func (s *RBACService) ListMembers(ctx context.Context, workspaceID string) ([]repository.Member, error) {
+	members, err := s.repo.ListMembers(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListMembers: %w", err)
+	}
+	return members, nil
 }
