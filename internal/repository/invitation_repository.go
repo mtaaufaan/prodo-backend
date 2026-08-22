@@ -17,13 +17,15 @@ import (
 )
 
 // classifyUniqueViolation menerjemahkan Postgres unique_violation (23505)
-// jadi domain.ErrEmailAlreadyExists -- pola sama dengan pengecekan inline
-// di account_repository.go, diekstrak di sini karena dipakai untuk kasus
-// yang beda tabel (users, race jarang antara invite dan accept).
-func classifyUniqueViolation(err error) error {
+// jadi target error yang lebih ramah -- dipakai untuk 2 constraint beda
+// tabel (users.email di AcceptInvitation, uq_invitation_pending di
+// CreateInvitation), pola sama dengan pengecekan inline di
+// account_repository.go tapi diparameterisasi supaya bisa dipakai untuk
+// keduanya.
+func classifyUniqueViolation(err, target error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return domain.ErrEmailAlreadyExists
+		return target
 	}
 	return err
 }
@@ -50,7 +52,7 @@ func (r *InvitationRepository) CreateInvitation(
 		RETURNING id
 	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt).Scan(&id)
 	if err != nil {
-		return "", fmt.Errorf("repository.CreateInvitation: %w", err)
+		return "", fmt.Errorf("repository.CreateInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
 
 	if err := insertInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, workspaceID); err != nil {
@@ -110,7 +112,7 @@ func (r *InvitationRepository) AcceptInvitation(
 		RETURNING id
 	`, email, displayName).Scan(&userID)
 	if err != nil {
-		return "", fmt.Errorf("repository.AcceptInvitation: insert users: %w", classifyUniqueViolation(err))
+		return "", fmt.Errorf("repository.AcceptInvitation: insert users: %w", classifyUniqueViolation(err, domain.ErrEmailAlreadyExists))
 	}
 
 	if _, err = exec.Exec(ctx, `
@@ -188,6 +190,45 @@ func (r *InvitationRepository) Resend(ctx context.Context, exec db.Executor, wor
 		return nil, fmt.Errorf("repository.Resend: %w", err)
 	}
 	return t, nil
+}
+
+// PendingInvitation -- satu baris hasil ListPending.
+type PendingInvitation struct {
+	ID        string
+	Email     string
+	Role      string
+	ExpiresAt time.Time
+}
+
+// ListPending mengembalikan seluruh undangan PENDING (belum accepted,
+// belum cancelled -- termasuk yang sudah lewat expires_at, biar AW tetap
+// bisa lihat lalu resend) di workspace ini. Prasyarat minimal S2-28
+// (daftar undangan pending di FE) yang belum pernah dijadwalkan sebagai
+// task backend terpisah -- lihat implementation_gaps.md IG-09.
+func (r *InvitationRepository) ListPending(ctx context.Context, exec db.Executor, workspaceID string) ([]PendingInvitation, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, email, role, expires_at
+		FROM user_invitations
+		WHERE workspace_id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL
+		ORDER BY created_at DESC
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListPending: %w", err)
+	}
+	defer rows.Close()
+
+	var invitations []PendingInvitation
+	for rows.Next() {
+		var inv PendingInvitation
+		if err := rows.Scan(&inv.ID, &inv.Email, &inv.Role, &inv.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("repository.ListPending: scan: %w", err)
+		}
+		invitations = append(invitations, inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListPending: rows: %w", err)
+	}
+	return invitations, nil
 }
 
 // GetWorkspaceName -- dipakai handler untuk isi email undangan (nama
