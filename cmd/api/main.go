@@ -167,6 +167,10 @@ func run() error {
 	// komentar middleware.RequireRole (sama gap dengan S1-30/35, IG-01:
 	// scoping Group Admin butuh data organisasi yang belum lengkap).
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
+	// ⚠️ S2-07/08 prasyarat, dimajukan dari S3-14 (implementation_gaps.md
+	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
+	// workspace boleh lihat daftar member workspace mereka sendiri.
+	v1.Get("/workspaces/:wsId/members", jwtAuth, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.ListMembers)
 
 	serverErr := make(chan error, 1)
 	go func() {

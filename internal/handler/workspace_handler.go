@@ -18,7 +18,7 @@ var validWorkspaceRoles = map[string]bool{
 	"viewer":          true,
 }
 
-// WorkspaceHandler -- S2-04, US-002.
+// WorkspaceHandler -- S2-04/07, US-002.
 type WorkspaceHandler struct {
 	rbac   *service.RBACService
 	logger *zap.Logger
@@ -70,4 +70,32 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 		"previous_role": result.PreviousRole,
 		"role":          result.NewRole,
 	}))
+}
+
+// ListMembers menangani GET /workspaces/:wsId/members (S2-07/08 prasyarat,
+// dimajukan dari S3-14 -- lihat implementation_gaps.md IG-09). Cuma
+// mengembalikan `workspace_members`; array `project_scoped_members` yang
+// diminta S3-14 asli menyusul S3 (konsepnya butuh tabel yang belum ada).
+func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
+	workspaceID := c.Params("wsId")
+
+	members, err := h.rbac.ListMembers(c.Context(), workspaceID)
+	if err != nil {
+		h.logger.Error("gagal ambil daftar member", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar member", nil))
+	}
+
+	data := make([]fiber.Map, len(members))
+	for i := range members {
+		m := &members[i]
+		data[i] = fiber.Map{
+			"user_id":      m.UserID,
+			"email":        m.Email,
+			"display_name": m.DisplayName,
+			"role":         m.Role,
+			"joined_at":    m.JoinedAt,
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{"workspace_members": data}))
 }
