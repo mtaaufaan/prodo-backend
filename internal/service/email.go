@@ -42,6 +42,42 @@ func (e *EmailService) SendActivationEmail(_ context.Context, to, displayName, a
 	return nil
 }
 
+// SendWorkspaceInvitationEmail mengirim email undangan bergabung ke
+// workspace (S2-17, US-006) -- berisi one-time link (TTL 72 jam), nama
+// workspace, dan role yang akan diberikan.
+func (e *EmailService) SendWorkspaceInvitationEmail(_ context.Context, to, workspaceName, inviterName, role, acceptLink string, expiresAt time.Time) error {
+	msg := buildWorkspaceInvitationEmailMessage(e.from, to, workspaceName, inviterName, role, acceptLink, expiresAt)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendWorkspaceInvitationEmail: %w", err)
+	}
+	return nil
+}
+
+// buildWorkspaceInvitationEmailMessage -- dipisah dari
+// SendWorkspaceInvitationEmail supaya bisa di-unit-test tanpa koneksi SMTP
+// nyata (pola sama dengan buildActivationEmailMessage).
+func buildWorkspaceInvitationEmailMessage(from, to, workspaceName, inviterName, role, acceptLink string, expiresAt time.Time) []byte {
+	subject := fmt.Sprintf("Undangan Bergabung ke Workspace %s - PRODO", workspaceName)
+	body := fmt.Sprintf(
+		"Halo,\r\n\r\n"+
+			"%s mengundang Anda untuk bergabung ke workspace \"%s\" di PRODO\r\n"+
+			"dengan role %s. Klik link berikut untuk menerima undangan dan\r\n"+
+			"menyetel password Anda:\r\n\r\n"+
+			"%s\r\n\r\n"+
+			"Link ini berlaku sampai %s (72 jam sejak dikirim) dan hanya bisa\r\n"+
+			"dipakai satu kali. Jika Anda tidak mengenal pengirimnya, abaikan email ini.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		inviterName, workspaceName, role, acceptLink, expiresAt.Format("2 January 2006 15:04 MST"),
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
 // buildActivationEmailMessage menyusun pesan RFC 5322 mentah (header +
 // body) -- dipisah dari SendActivationEmail supaya bisa di-unit-test tanpa
 // koneksi SMTP nyata.

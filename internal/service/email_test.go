@@ -31,3 +31,31 @@ func TestBuildActivationEmailMessage(t *testing.T) {
 		t.Error("email tidak boleh memuat password asli (US-073 AC), hanya link untuk menyetelnya")
 	}
 }
+
+func TestBuildWorkspaceInvitationEmailMessage(t *testing.T) {
+	expiresAt := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	msg := string(buildWorkspaceInvitationEmailMessage(
+		"noreply@prodo.local", "budi@example.com", "Tim Marketing", "Siti Aminah", "editor",
+		"http://localhost:5173/invitations/accept?token=xyz789", expiresAt,
+	))
+
+	checks := []string{
+		"From: noreply@prodo.local",
+		"To: budi@example.com",
+		"Subject: Undangan Bergabung ke Workspace Tim Marketing - PRODO",
+		"Siti Aminah mengundang",
+		"workspace \"Tim Marketing\"",
+		"role editor",
+		"http://localhost:5173/invitations/accept?token=xyz789",
+		"27 August 2026",
+	}
+	for _, want := range checks {
+		if !strings.Contains(msg, want) {
+			t.Errorf("pesan email tidak mengandung %q\n---\n%s", want, msg)
+		}
+	}
+
+	if strings.Contains(strings.ToLower(msg), "password") && !strings.Contains(msg, "menyetel password") {
+		t.Error("email tidak boleh memuat password asli, hanya link untuk menyetelnya")
+	}
+}
