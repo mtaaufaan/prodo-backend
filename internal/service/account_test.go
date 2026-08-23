@@ -60,6 +60,10 @@ func (f *fakeAccountRepository) ListGroupAdmins(_ context.Context, _, _ int) ([]
 type fakeKeycloakClient struct {
 	userID string
 	err    error
+
+	attributesErr        error
+	lastAttributesUserID string
+	lastAttributes       map[string][]string
 }
 
 func (f *fakeKeycloakClient) CreateDisabledUser(_ context.Context, _, _ string) (string, error) {
@@ -75,6 +79,12 @@ func (f *fakeKeycloakClient) SetPassword(_ context.Context, _, _ string) error {
 
 func (f *fakeKeycloakClient) EnableUser(_ context.Context, _ string) error {
 	return f.err
+}
+
+func (f *fakeKeycloakClient) SetUserAttributes(_ context.Context, keycloakUserID string, attributes map[string][]string) error {
+	f.lastAttributesUserID = keycloakUserID
+	f.lastAttributes = attributes
+	return f.attributesErr
 }
 
 func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {

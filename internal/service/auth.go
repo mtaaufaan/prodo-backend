@@ -20,6 +20,9 @@ type authRepository interface {
 	FindUserByID(ctx context.Context, userID string) (*repository.LoginUserRecord, error)
 	CreateSSOUser(ctx context.Context, email, displayName, providerSub string) (*repository.LoginUserRecord, error)
 	RecordLogin(ctx context.Context, userID, platformRole string) error
+
+	// ListOrgIDsForGroupAdmin -- S3-38, dasar klaim JWT prodo_org_ids.
+	ListOrgIDsForGroupAdmin(ctx context.Context, userID string) ([]string, error)
 }
 
 // AuthService menangani login (US-001) lewat model Keycloak-delegated yang
@@ -30,13 +33,14 @@ type authRepository interface {
 type AuthService struct {
 	repo     authRepository
 	oidc     keycloak.OIDCClient
+	keycloak keycloak.AdminClient
 	mfa      *MFAService
 	sessions *SessionService
 	logger   *zap.Logger
 }
 
-func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, mfa *MFAService, sessions *SessionService, logger *zap.Logger) *AuthService {
-	return &AuthService{repo: repo, oidc: oidc, mfa: mfa, sessions: sessions, logger: logger}
+func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, kc keycloak.AdminClient, mfa *MFAService, sessions *SessionService, logger *zap.Logger) *AuthService {
+	return &AuthService{repo: repo, oidc: oidc, keycloak: kc, mfa: mfa, sessions: sessions, logger: logger}
 }
 
 // LoginResult adalah hasil LoginLocal/LoginSSO, dipetakan langsung ke
@@ -69,6 +73,18 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password string) (*
 		return nil, fmt.Errorf("service.LoginLocal: %w", domain.ErrAccountInactive)
 	}
 
+	// S3-38 (implementation_gaps.md IG-14): sinkron attribute Keycloak
+	// SEBELUM menukar credential ke token -- attribute yang diubah SESUDAH
+	// token diterbitkan tidak akan tercermin di token itu (perlu terbit
+	// ulang). Kegagalan sinkron TIDAK memblokir login: token yang
+	// dihasilkan cuma bawa klaim basi (persis kondisi sebelum S3-38 ada),
+	// bukan gagal total -- login tetap harus jalan meski Admin REST API
+	// Keycloak sedang bermasalah.
+	if err := s.syncKeycloakClaims(ctx, user); err != nil {
+		s.logger.Error("gagal sinkron attribute Keycloak sebelum login -- token mungkin bawa role/org basi",
+			zap.String("user_id", user.ID), zap.Error(err))
+	}
+
 	tok, err := s.oidc.PasswordGrant(ctx, email, password)
 	if err != nil {
 		if errors.Is(err, keycloak.ErrInvalidGrant) {
@@ -86,6 +102,29 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password string) (*
 		ExpiresIn:    tok.ExpiresIn,
 		User:         user,
 	}, nil
+}
+
+// syncKeycloakClaims menyetel attribute Keycloak user yang jadi sumber
+// protocol mapper custom (S3-37/38, implementation_gaps.md IG-14) supaya
+// klaim JWT prodo_platform_role/prodo_org_ids selalu mencerminkan state
+// Postgres terkini pada saat token diterbitkan. prodo_org_ids cuma dihitung
+// untuk Group Admin -- role lain tidak butuh, dan grup_admin_assignments
+// cuma relevan untuk GA.
+func (s *AuthService) syncKeycloakClaims(ctx context.Context, user *repository.LoginUserRecord) error {
+	attrs := map[string][]string{"prodo_platform_role": {user.PlatformRole}}
+
+	if user.PlatformRole == string(domain.PlatformRoleGroupAdmin) {
+		orgIDs, err := s.repo.ListOrgIDsForGroupAdmin(ctx, user.ID)
+		if err != nil {
+			return fmt.Errorf("service.syncKeycloakClaims: resolve org_ids GA: %w", err)
+		}
+		attrs["prodo_org_ids"] = orgIDs
+	}
+
+	if err := s.keycloak.SetUserAttributes(ctx, user.KeycloakUserID, attrs); err != nil {
+		return fmt.Errorf("service.syncKeycloakClaims: %w", err)
+	}
+	return nil
 }
 
 // VerifyMFA memverifikasi OTP saat login (S1-17, US-001). Kebijakan: Group
