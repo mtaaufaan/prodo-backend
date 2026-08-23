@@ -76,4 +76,8 @@ var (
 	// ErrWorkspaceNotFound dikembalikan saat workspaces.id tidak ditemukan
 	// (S3-10/11/12).
 	ErrWorkspaceNotFound = errors.New("workspace not found")
+
+	// ErrMemberNotFound dikembalikan saat target bukan member workspace
+	// (S3-15) -- tidak ada baris workspace_members yang cocok.
+	ErrMemberNotFound = errors.New("workspace member not found")
 )

@@ -184,6 +184,9 @@ func run() error {
 	// sekarang -- lihat komentar middleware.DBContextMiddleware.
 	dbCtx := middleware.DBContextMiddleware(pool, accountSvc)
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
+	// S3-15, US-009. Param :userId (bukan :account_id seperti wording asli
+	// task, konsisten koreksi S2-01/04). Otorisasi sama seperti UpdateMemberRole.
+	v1.Delete("/workspaces/:wsId/members/:userId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.RemoveMember)
 	// S3-10/11, US-008. RequireRole admin_workspace -- AW mengelola
 	// workspace-nya sendiri, PA/GA-of-org bypass (konsisten RLS
 	// workspaces_update, S3-42).
