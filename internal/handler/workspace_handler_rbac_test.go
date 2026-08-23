@@ -85,6 +85,10 @@ func (stubMemberRepo) GetWorkspaceOrgID(context.Context, db.Executor, string) (s
 	return "", nil
 }
 
+func (stubMemberRepo) RemoveMember(context.Context, db.Executor, string, string, string, string) error {
+	return nil
+}
+
 type noopCache struct{}
 
 func (noopCache) Get(context.Context, string) (string, error)              { return "", cache.ErrNotFound }

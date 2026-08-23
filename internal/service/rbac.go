@@ -21,6 +21,7 @@ type workspaceMemberRepository interface {
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+	RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -141,4 +142,19 @@ func (s *RBACService) ListMembers(ctx context.Context, exec db.Executor, workspa
 		return nil, fmt.Errorf("service.ListMembers: %w", err)
 	}
 	return members, nil
+}
+
+// RemoveMember mengeluarkan member dari workspace (S3-15). Cache
+// role:<user>:<workspace> WAJIB di-invalidate sama seperti AssignRole --
+// tanpa ini, request selanjutnya dari user yang baru dikeluarkan tetap
+// lolos RequireRole (S2-09) selama sisa TTL walau baris workspace_members-
+// nya sudah tidak ada.
+func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error {
+	if err := s.repo.RemoveMember(ctx, exec, workspaceID, userID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.RemoveMember: %w", err)
+	}
+	if err := s.cache.Del(ctx, roleCacheKey(userID, workspaceID)); err != nil {
+		return fmt.Errorf("service.RemoveMember: invalidate cache: %w", err)
+	}
+	return nil
 }
