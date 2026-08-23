@@ -51,4 +51,19 @@ var (
 	// user_sessions, atau ditemukan tapi milik user lain (S1-33) --
 	// disamakan supaya tidak membocorkan keberadaan sesi user lain.
 	ErrSessionNotFound = errors.New("session not found")
+
+	// ErrForbidden dikembalikan service layer saat actor tidak berhak atas
+	// resource target (mis. Group Admin bukan pengelola grup organisasi
+	// yang dituju, S3-02/03/04) -- beda dari middleware.RequireRole yang
+	// menolak di edge berdasar klaim, ini scoping berbasis DATA yang cuma
+	// bisa diketahui setelah query.
+	ErrForbidden = errors.New("actor is not authorized for this resource")
+
+	// ErrOrganizationNotFound dikembalikan saat organizations.id tidak
+	// ditemukan (S3-03/04).
+	ErrOrganizationNotFound = errors.New("organization not found")
+
+	// ErrSlugAlreadyExists dikembalikan saat organizations.slug bentrok
+	// UNIQUE constraint (S3-02/03).
+	ErrSlugAlreadyExists = errors.New("organization slug already exists")
 )
