@@ -136,6 +136,57 @@ func (h *OrganizationHandler) Deactivate(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": orgID, "deactivated": true}))
 }
 
+// Reactivate menangani PUT /organizations/:id/reactivate -- kebalikan
+// Deactivate, prasyarat S3-07 (lihat OrganizationRepository.Reactivate).
+func (h *OrganizationHandler) Reactivate(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Reactivate dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Reactivate dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	if err := h.orgs.ReactivateOrganization(c.Context(), exec, orgID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal mengaktifkan kembali organisasi")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": orgID, "deactivated": false}))
+}
+
+// List menangani GET /organizations -- prasyarat S3-07 (FE, sama pola
+// IG-09). Scoping sepenuhnya lewat RLS (OrganizationService.ListOrganizations).
+func (h *OrganizationHandler) List(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.List dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+
+	orgs, err := h.orgs.ListOrganizations(c.Context(), exec)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil daftar organisasi")
+	}
+
+	data := make([]fiber.Map, len(orgs))
+	for i := range orgs {
+		o := &orgs[i]
+		data[i] = fiber.Map{
+			"id":             o.ID,
+			"group_id":       o.GroupID,
+			"name":           o.Name,
+			"slug":           o.Slug,
+			"deactivated_at": o.DeactivatedAt,
+			"created_at":     o.CreatedAt,
+		}
+	}
+	return c.JSON(response.Success(data))
+}
+
 // Delete menangani DELETE /organizations/:id (S3-05).
 func (h *OrganizationHandler) Delete(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)

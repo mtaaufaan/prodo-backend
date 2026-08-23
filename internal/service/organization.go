@@ -20,8 +20,10 @@ type organizationRepository interface {
 	Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error)
 	Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
+	Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Delete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	GetSummary(ctx context.Context, exec db.Executor, orgID string) (*repository.Summary, error)
+	List(ctx context.Context, exec db.Executor) ([]repository.Organization, error)
 }
 
 // OrganizationService -- S3-02/03/04/05/06, US-007. Otorisasi Platform Admin
@@ -117,6 +119,32 @@ func (s *OrganizationService) DeactivateOrganization(ctx context.Context, exec d
 		return fmt.Errorf("service.DeactivateOrganization: %w", err)
 	}
 	return nil
+}
+
+// ReactivateOrganization membatalkan deactivate (kebalikan DeactivateOrganization).
+func (s *OrganizationService) ReactivateOrganization(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
+	if orgID == "" {
+		return fmt.Errorf("service.ReactivateOrganization: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.Reactivate(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.ReactivateOrganization: %w", err)
+	}
+	return nil
+}
+
+// ListOrganizations mengembalikan organisasi yang terlihat oleh actor --
+// scoping sepenuhnya lewat RLS (lihat repository.List), tidak ada
+// pengecekan tambahan di sini.
+func (s *OrganizationService) ListOrganizations(ctx context.Context, exec db.Executor) ([]repository.Organization, error) {
+	orgs, err := s.repo.List(ctx, exec)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListOrganizations: %w", err)
+	}
+	return orgs, nil
 }
 
 // DeleteOrganization menghapus organisasi permanen (S3-05) -- ditolak kalau
