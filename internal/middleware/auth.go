@@ -21,10 +21,22 @@ const claimsLocalsKey = "prodo_claims"
 // prodo_platform_role datang dari protocol mapper custom di
 // infra/keycloak/realm-PRODO.json (attribute Keycloak user, bukan role
 // Keycloak native) -- lihat docs/DATABASE_SCHEMA.md §5.1 users.platform_role.
+//
+// ProdoOrgID/ProdoGroupID/ProdoOrgIDs (S3-38, implementation_gaps.md IG-01)
+// datang dari mapper yang sama (S3-37, sudah ada di realm-PRODO.json sejak
+// sebelum S3 dimulai -- lihat IG-14). ProdoOrgIDs di-unmarshal langsung
+// sebagai JSON array: mapper-nya "multivalued"+"jsonType.label: JSON", BUKAN
+// string comma-separated seperti contoh di RLS_DESIGN.md §4.2 (dokumen itu
+// perlu dikoreksi, lihat IG-14). Cuma diisi (via AuthService.LoginLocal,
+// service.AccountRepository.ListOrgIDsForGroupAdmin) untuk user dengan
+// platform_role "group_admin" -- user lain selalu dapat slice kosong/nil.
 type Claims struct {
 	jwt.RegisteredClaims
-	Email        string `json:"email"`
-	PlatformRole string `json:"prodo_platform_role"`
+	Email        string   `json:"email"`
+	PlatformRole string   `json:"prodo_platform_role"`
+	ProdoOrgID   string   `json:"prodo_org_id"`
+	ProdoGroupID string   `json:"prodo_group_id"`
+	ProdoOrgIDs  []string `json:"prodo_org_ids"`
 }
 
 // SessionChecker -- interface didefinisikan di consumer (§3.9), diimplementasikan

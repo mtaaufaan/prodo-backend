@@ -295,24 +295,36 @@ type UserContact struct {
 // cukup untuk mengecek status aktif dan menyusun field "user" pada respons
 // POST /auth/login (API_CONTRACT.md §2), tanpa perlu decode JWT/provider_sub.
 type LoginUserRecord struct {
-	ID           string
-	Email        string
-	DisplayName  string
-	PlatformRole string
-	IsActive     bool
-	AvatarURL    *string
+	ID             string
+	Email          string
+	DisplayName    string
+	PlatformRole   string
+	IsActive       bool
+	AvatarURL      *string
+	KeycloakUserID string
 }
 
 // FindUserForLogin mencari user berdasarkan email untuk keperluan login
 // (S1-14). Tidak ditemukan -> domain.ErrUserNotFound (di-map ke
 // ErrInvalidCredentials oleh service, supaya tidak membocorkan keberadaan
 // email -- lihat domain.ErrInvalidCredentials).
+//
+// JOIN user_auth_providers (S3-38) untuk KeycloakUserID -- dipakai
+// AuthService.LoginLocal mensinkron attribute Keycloak (prodo_platform_role/
+// prodo_org_ids) sebelum menukar credential ke token, lihat IG-14.
+// ORDER BY created_at + LIMIT 1 murni jaga-jaga: user_auth_providers TIDAK
+// unique per user_id (skema §5.2 mengizinkan >1 provider), tapi alur
+// aplikasi saat ini selalu cuma insert satu baris per user.
 func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) (*LoginUserRecord, error) {
 	u := &LoginUserRecord{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, email, display_name, platform_role, is_active, avatar_url
-		FROM users WHERE email = $1 AND deleted_at IS NULL
-	`, email).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PlatformRole, &u.IsActive, &u.AvatarURL)
+		SELECT u.id, u.email, u.display_name, u.platform_role, u.is_active, u.avatar_url, uap.provider_sub
+		FROM users u
+		JOIN user_auth_providers uap ON uap.user_id = u.id
+		WHERE u.email = $1 AND u.deleted_at IS NULL
+		ORDER BY uap.created_at
+		LIMIT 1
+	`, email).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PlatformRole, &u.IsActive, &u.AvatarURL, &u.KeycloakUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.FindUserForLogin: %w", domain.ErrUserNotFound)
@@ -320,6 +332,36 @@ func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) 
 		return nil, fmt.Errorf("repository.FindUserForLogin: %w", err)
 	}
 	return u, nil
+}
+
+// ListOrgIDsForGroupAdmin mengembalikan seluruh organizations.id dalam grup
+// yang dikelola userID (S3-38, implementation_gaps.md IG-01) -- dasar klaim
+// JWT prodo_org_ids. Slice kosong (bukan error) untuk GA yang belum
+// di-assign ke grup manapun.
+func (r *AccountRepository) ListOrgIDsForGroupAdmin(ctx context.Context, userID string) ([]string, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT o.id
+		FROM group_admin_assignments gaa
+		JOIN organizations o ON o.group_id = gaa.group_id
+		WHERE gaa.user_id = $1
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListOrgIDsForGroupAdmin: %w", err)
+	}
+	defer rows.Close()
+
+	orgIDs := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("repository.ListOrgIDsForGroupAdmin: scan: %w", err)
+		}
+		orgIDs = append(orgIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListOrgIDsForGroupAdmin: %w", err)
+	}
+	return orgIDs, nil
 }
 
 // RecordLogin mencatat login berhasil (S1-20, US-001): memperbarui
