@@ -19,6 +19,8 @@ type organizationRepository interface {
 	GetGroupID(ctx context.Context, exec db.Executor, orgID string) (string, error)
 	Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error)
 	Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error
+	UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error
+	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Delete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
@@ -112,6 +114,40 @@ func (s *OrganizationService) UpdateOrganization(ctx context.Context, exec db.Ex
 
 	if err := s.repo.Update(ctx, exec, orgID, name, slug, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.UpdateOrganization: %w", err)
+	}
+	return nil
+}
+
+// validOrgLanguages -- org_language enum (S3-29), DATABASE_SCHEMA.md.
+var validOrgLanguages = map[string]bool{"id": true, "en": true}
+
+// UpdateSettings mengubah default_language organisasi (S3-30, US-010).
+func (s *OrganizationService) UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error {
+	if orgID == "" || !validOrgLanguages[defaultLanguage] {
+		return fmt.Errorf("service.UpdateSettings: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.UpdateSettings(ctx, exec, orgID, defaultLanguage, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.UpdateSettings: %w", err)
+	}
+	return nil
+}
+
+// UpdateStorageQuota mengubah kuota storage organisasi (S3-34, US-011) --
+// divalidasi tidak melebihi storage_max_bytes di repository.
+func (s *OrganizationService) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error {
+	if orgID == "" || quotaBytes < 0 {
+		return fmt.Errorf("service.UpdateStorageQuota: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.UpdateStorageQuota(ctx, exec, orgID, quotaBytes, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.UpdateStorageQuota: %w", err)
 	}
 	return nil
 }

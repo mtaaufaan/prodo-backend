@@ -67,6 +67,11 @@ var (
 	// UNIQUE constraint (S3-02/03).
 	ErrSlugAlreadyExists = errors.New("organization slug already exists")
 
+	// ErrStorageQuotaExceedsMax dikembalikan PUT /organizations/:id/storage-quota
+	// (S3-34) saat kuota yang diminta melebihi storage_max_bytes (batas
+	// dari Platform Admin).
+	ErrStorageQuotaExceedsMax = errors.New("storage quota exceeds max allowed")
+
 	// ErrOrganizationHasWorkspaces dikembalikan DELETE /organizations/:id
 	// (S3-05) saat masih ada workspace aktif (archived_at IS NULL) di
 	// organisasi tsb -- US-007 AC: "hanya bisa dihapus jika semua workspace

@@ -25,14 +25,18 @@ func NewOrganizationRepository() *OrganizationRepository {
 }
 
 // Organization -- subset kolom DATABASE_SCHEMA.md §5.7 yang dipakai response
-// S3-02/03/04.
+// S3-02/03/04, ditambah default_language/storage_quota_bytes/
+// storage_max_bytes (S3-29/32).
 type Organization struct {
-	ID            string
-	GroupID       string
-	Name          string
-	Slug          string
-	DeactivatedAt *time.Time
-	CreatedAt     time.Time
+	ID                string
+	GroupID           string
+	Name              string
+	Slug              string
+	DefaultLanguage   string
+	StorageQuotaBytes int64
+	StorageMaxBytes   int64
+	DeactivatedAt     *time.Time
+	CreatedAt         time.Time
 }
 
 // IsGroupAdminOfGroup mengecek apakah userID adalah salah satu GA yang
@@ -105,6 +109,56 @@ func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, o
 	return nil
 }
 
+// UpdateSettings mengubah default_language organisasi (S3-30, US-010).
+func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE organizations SET default_language = $2::org_language, updated_at = NOW()
+		WHERE id = $1
+	`, orgID, defaultLanguage)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateSettings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.UpdateSettings: %w", domain.ErrOrganizationNotFound)
+	}
+
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.settings_updated", orgID); err != nil {
+		return fmt.Errorf("repository.UpdateSettings: audit: %w", err)
+	}
+	return nil
+}
+
+// UpdateStorageQuota mengubah storage_quota_bytes organisasi (S3-34,
+// US-011) -- divalidasi TIDAK melebihi storage_max_bytes (batas dari
+// Platform Admin, glossary.md "Storage Quota"). CHECK constraint
+// ck_org_storage_quota_within_max di DB adalah jaring pengaman kedua;
+// validasi di sini yang memberi pesan error jelas (bukan constraint
+// violation mentah).
+func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error {
+	var maxBytes int64
+	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrOrganizationNotFound)
+		}
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
+	}
+	if quotaBytes > maxBytes {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrStorageQuotaExceedsMax)
+	}
+
+	if _, err := exec.Exec(ctx, `
+		UPDATE organizations SET storage_quota_bytes = $2, updated_at = NOW()
+		WHERE id = $1
+	`, orgID, quotaBytes); err != nil {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
+	}
+
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.storage_quota_updated", orgID); err != nil {
+		return fmt.Errorf("repository.UpdateStorageQuota: audit: %w", err)
+	}
+	return nil
+}
+
 // Deactivate menyetel deactivated_at (US-007 AC: akses member diblokir,
 // data tetap tersimpan -- soft, bukan DELETE). Idempotent secara struktur
 // (mengizinkan re-deactivate) TIDAK divalidasi di sini -- service yang
@@ -159,7 +213,7 @@ func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executo
 // DBContextMiddleware -- query di sini polos SELECT *.
 func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]Organization, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, group_id, name, slug, deactivated_at, created_at
+		SELECT id, group_id, name, slug, default_language, storage_quota_bytes, storage_max_bytes, deactivated_at, created_at
 		FROM organizations
 		ORDER BY name
 	`)
@@ -171,7 +225,7 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]
 	orgs := make([]Organization, 0)
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.DeactivatedAt, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.DeactivatedAt, &o.CreatedAt); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		orgs = append(orgs, o)
