@@ -66,4 +66,10 @@ var (
 	// ErrSlugAlreadyExists dikembalikan saat organizations.slug bentrok
 	// UNIQUE constraint (S3-02/03).
 	ErrSlugAlreadyExists = errors.New("organization slug already exists")
+
+	// ErrOrganizationHasWorkspaces dikembalikan DELETE /organizations/:id
+	// (S3-05) saat masih ada workspace aktif (archived_at IS NULL) di
+	// organisasi tsb -- US-007 AC: "hanya bisa dihapus jika semua workspace
+	// sudah dihapus/dipindahkan".
+	ErrOrganizationHasWorkspaces = errors.New("organization still has active workspaces")
 )

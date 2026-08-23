@@ -338,13 +338,17 @@ func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) 
 // yang dikelola userID (S3-38, implementation_gaps.md IG-01) -- dasar klaim
 // JWT prodo_org_ids. Slice kosong (bukan error) untuk GA yang belum
 // di-assign ke grup manapun.
+// Dipanggil AuthService.syncKeycloakClaims SETIAP login, SEBELUM ada
+// transaksi request-scoped/session variable RLS apapun -- query lewat
+// function SQL SECURITY DEFINER prodo_group_admin_org_ids (migrasi
+// 20260827110000), BUKAN JOIN langsung ke organizations dari sini.
+// organizations kena FORCE ROW LEVEL SECURITY sejak S3-42; JOIN langsung
+// dari pool prodo_app_user polos (tanpa app.current_user_id) akan diam-diam
+// difilter RLS jadi 0 baris -- bootstrap ayam-telur (butuh org GA untuk isi
+// klaim yang JUSTRU dipakai RLS organizations). Lihat implementation_gaps.md
+// IG-14 (temuan lanjutan, ditemukan lewat live-test S3-40/41).
 func (r *AccountRepository) ListOrgIDsForGroupAdmin(ctx context.Context, userID string) ([]string, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT o.id
-		FROM group_admin_assignments gaa
-		JOIN organizations o ON o.group_id = gaa.group_id
-		WHERE gaa.user_id = $1
-	`, userID)
+	rows, err := r.db.Query(ctx, `SELECT * FROM prodo_group_admin_org_ids($1)`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListOrgIDsForGroupAdmin: %w", err)
 	}

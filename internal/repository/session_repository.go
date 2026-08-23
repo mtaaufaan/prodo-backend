@@ -24,6 +24,28 @@ func NewSessionRepository(db *pgxpool.Pool) *SessionRepository {
 	return &SessionRepository{db: db}
 }
 
+// IsUserInOrg mengecek apakah userID adalah member SALAH SATU workspace
+// dalam orgID (S3-40, implementation_gaps.md IG-01) -- dasar otorisasi
+// Group Admin ter-scope di endpoint sesi admin (S1-30/35). Tidak ada kolom
+// org_id langsung di `users`; keanggotaan org diturunkan lewat rantai
+// workspace_members -> workspaces.org_id, sama pola dengan
+// middleware.RequireGroupAdminInOrg (S3-39) yang memanggil ini per org di
+// claims.ProdoOrgIDs GA.
+// Query lewat function SQL SECURITY DEFINER prodo_user_in_org (migrasi
+// 20260827120000), BUKAN JOIN langsung ke workspace_members/workspaces dari
+// sini. Route ini (SessionHandler.ListForUser/RevokeAllForUser) SENGAJA
+// tidak pakai DBContextMiddleware (SessionRepository pool langsung, bukan
+// db.Executor) -- begitu workspace_members/workspaces kena RLS (S3-42),
+// JOIN langsung tanpa session variable RLS akan diam-diam kena filter (0
+// baris) meski secara logis benar. Lihat implementation_gaps.md IG-14.
+func (r *SessionRepository) IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error) {
+	var exists bool
+	if err := r.db.QueryRow(ctx, `SELECT prodo_user_in_org($1, $2)`, userID, orgID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("repository.IsUserInOrg: %w", err)
+	}
+	return exists, nil
+}
+
 // DeviceInfo -- lihat docs/DATABASE_SCHEMA.md §5.3. Browser/OS sudah
 // diparse dari User-Agent SEKALI saat login (bukan disimpan mentah lalu
 // diparse ulang tiap GET /auth/sessions, lihat parseUserAgent di

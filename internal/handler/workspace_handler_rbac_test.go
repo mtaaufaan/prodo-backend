@@ -78,6 +78,13 @@ func (r stubMemberRepo) ListMembers(context.Context, db.Executor, string) ([]rep
 	return []repository.Member{{UserID: testMemberID, Role: r.role}}, nil
 }
 
+// GetWorkspaceOrgID -- S3-41. Tidak ada test di file ini yang menguji jalur
+// Group Admin (itu ditest di internal/middleware/rbac_test.go), jadi cukup
+// string kosong -- tidak akan pernah match claims.ProdoOrgIDs manapun.
+func (stubMemberRepo) GetWorkspaceOrgID(context.Context, db.Executor, string) (string, error) {
+	return "", nil
+}
+
 type noopCache struct{}
 
 func (noopCache) Get(context.Context, string) (string, error)              { return "", cache.ErrNotFound }
@@ -90,7 +97,7 @@ func (noopCache) Close() error                                             { ret
 // langsung ke Locals, tanpa JWT/Postgres sungguhan).
 func newTestApp(actorUserID, platformRole string, repo stubMemberRepo) *fiber.App {
 	rbacSvc := service.NewRBACService(repo, noopCache{})
-	h := handler.NewWorkspaceHandler(rbacSvc, zap.NewNop())
+	h := handler.NewWorkspaceHandler(rbacSvc, nil, zap.NewNop())
 	users := stubUserResolver{userID: actorUserID}
 
 	injectContext := func(hasClaims bool) fiber.Handler {

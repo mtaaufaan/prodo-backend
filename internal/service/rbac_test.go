@@ -26,6 +26,9 @@ type stubWorkspaceMemberRepository struct {
 
 	listMembersResult []repository.Member
 	listMembersErr    error
+
+	orgID    string
+	orgIDErr error
 }
 
 func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
@@ -45,6 +48,10 @@ func (f *stubWorkspaceMemberRepository) AssignRole(_ context.Context, _ db.Execu
 
 func (f *stubWorkspaceMemberRepository) ListMembers(_ context.Context, _ db.Executor, _ string) ([]repository.Member, error) {
 	return f.listMembersResult, f.listMembersErr
+}
+
+func (f *stubWorkspaceMemberRepository) GetWorkspaceOrgID(_ context.Context, _ db.Executor, _ string) (string, error) {
+	return f.orgID, f.orgIDErr
 }
 
 func strPtr(s string) *string { return &s }

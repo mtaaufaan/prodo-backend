@@ -130,7 +130,7 @@ func run() error {
 	sessionRepo := repository.NewSessionRepository(pool)
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	invitationRepo := repository.NewInvitationRepository()
-	organizationRepo := repository.NewOrganizationRepository(pool)
+	organizationRepo := repository.NewOrganizationRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -141,6 +141,8 @@ func run() error {
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
 	organizationSvc := service.NewOrganizationService(organizationRepo)
+	workspaceRepo := repository.NewWorkspaceRepository()
+	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -153,7 +155,7 @@ func run() error {
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
-	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, logger)
+	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
 
@@ -167,12 +169,12 @@ func run() error {
 	v1.Get("/auth/sessions", jwtAuth, sessionHandler.List)
 	v1.Delete("/auth/sessions/:jti", jwtAuth, sessionHandler.Revoke)
 	v1.Delete("/auth/sessions", jwtAuth, sessionHandler.RevokeAll)
-	// ⚠️ S1-30/35 gap: dibatasi Platform-Admin-only, bukan "group_admin"/
-	// "Group Admin dalam organisasinya sendiri" sesuai wording
-	// sprint_backlog.md/API_CONTRACT.md -- lihat komentar
-	// SessionHandler.ListForUser/RevokeAllForUser.
-	v1.Get("/admin/users/:userId/sessions", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.ListForUser)
-	v1.Post("/admin/users/:userId/sessions/revoke-all", jwtAuth, middleware.RequirePlatformAdmin(), sessionHandler.RevokeAllForUser)
+	// S3-40 (implementation_gaps.md IG-01): gerbang kasar PA/GA di sini
+	// (RequirePlatformRole cuma cek klaim, tanpa query DB); scoping halus
+	// GA ke org target ada di handler (middleware.RequireGroupAdminInOrg).
+	requireSessionAdmin := middleware.RequirePlatformRole(accountSvc, "platform_admin", "group_admin")
+	v1.Get("/admin/users/:userId/sessions", jwtAuth, requireSessionAdmin, sessionHandler.ListForUser)
+	v1.Post("/admin/users/:userId/sessions/revoke-all", jwtAuth, requireSessionAdmin, sessionHandler.RevokeAllForUser)
 	// ⚠️ S2-04/09 gap: otorisasi "GA atau AW only" cuma sebagian -- lihat
 	// komentar middleware.RequireRole (sama gap dengan S1-30/35, IG-01:
 	// scoping Group Admin butuh data organisasi yang belum lengkap).
@@ -202,10 +204,20 @@ func run() error {
 	// lihat komentar OrganizationHandler. organizations BELUM di-RLS
 	// (S3-42 menyusul), jadi TIDAK pakai dbCtx/DBContextMiddleware seperti
 	// route /workspaces/....
+	// organizations kena RLS sejak S3-42 -- dbCtx WAJIB sebelum requireOrgAdmin
+	// (RequirePlatformRole) supaya session variable app.current_user_id/
+	// app.current_platform_role sudah tersuntik saat OrganizationRepository
+	// query lewat exec. Beda dari S3-02..06 (sebelum S3-42) yang belum pakai
+	// dbCtx sama sekali karena organizations belum ber-RLS saat itu.
 	requireOrgAdmin := middleware.RequirePlatformRole(accountSvc, "platform_admin", "group_admin")
-	v1.Post("/organizations", jwtAuth, requireOrgAdmin, organizationHandler.Create)
-	v1.Put("/organizations/:id", jwtAuth, requireOrgAdmin, organizationHandler.Update)
-	v1.Put("/organizations/:id/deactivate", jwtAuth, requireOrgAdmin, organizationHandler.Deactivate)
+	v1.Post("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Create)
+	v1.Put("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Update)
+	v1.Put("/organizations/:id/deactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Deactivate)
+	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
+	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
+	// S3-09, US-008. Otorisasi sama seperti organizations (reuse
+	// OrganizationService.AuthorizeOrgAccess via WorkspaceService).
+	v1.Post("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.CreateWorkspace)
 
 	serverErr := make(chan error, 1)
 	go func() {

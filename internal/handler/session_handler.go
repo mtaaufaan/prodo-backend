@@ -116,13 +116,16 @@ func (h *SessionHandler) RevokeAll(c *fiber.Ctx) error {
 }
 
 // RevokeAllForUser menangani POST /admin/users/:userId/sessions/revoke-all --
-// force logout semua sesi milik user target (S1-35). ⚠️ Gap yang sama
-// dengan ListForUser (S1-30): dibatasi Platform-Admin-only lewat
-// middleware.RequirePlatformAdmin() di routing, BUKAN "Platform Admin ATAU
-// Group Admin dalam organisasinya sendiri" sesuai API_CONTRACT.md --
-// scoping org untuk Group Admin belum bisa diimplementasikan dengan aman
-// karena data model organisasi/keanggotaan belum ada (Epic 2).
+// force logout semua sesi milik user target (S1-35). Otorisasi: Platform
+// Admin (semua user) ATAU Group Admin dengan targetUserID member salah satu
+// org yang dia kelola (S3-40, menutup implementation_gaps.md IG-01) --
+// gerbang kasar PA/GA di routing (middleware.RequirePlatformRole), scoping
+// halus di sini lewat middleware.RequireGroupAdminInOrg.
 func (h *SessionHandler) RevokeAllForUser(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
 	targetUserID := c.Params("userId")
 
 	if err := h.accounts.UserExists(c.Context(), targetUserID); err != nil {
@@ -130,6 +133,13 @@ func (h *SessionHandler) RevokeAllForUser(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("USER_NOT_FOUND", "User tidak ditemukan.", nil))
 		}
 		h.logger.Error("gagal cek keberadaan user target", zap.String("target_user_id", targetUserID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses permintaan", nil))
+	}
+	if err := middleware.RequireGroupAdminInOrg(c.Context(), h.sessions, claims, targetUserID); err != nil {
+		if errors.Is(err, domain.ErrForbidden) {
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas user ini.", nil))
+		}
+		h.logger.Error("gagal cek otorisasi Group Admin", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses permintaan", nil))
 	}
 
@@ -141,19 +151,22 @@ func (h *SessionHandler) RevokeAllForUser(c *fiber.Ctx) error {
 }
 
 // ListForUser menangani GET /admin/users/:userId/sessions -- semua sesi
-// milik user target, untuk dashboard admin (S1-30). ⚠️ Gap diketahui:
-// sprint_backlog.md menulis "hanya role group_admin", tapi API_CONTRACT.md
-// tidak pernah mendokumentasikan endpoint ini secara eksplisit (cuma
-// revoke-all yang eksplisit mengizinkan Platform Admin ATAU Group Admin
-// dalam org yang sama). Endpoint ini dibatasi Platform-Admin-only untuk
-// sekarang lewat middleware.RequirePlatformAdmin() -- akses Group Admin
-// (dibatasi ke member org mereka sendiri) baru bisa diimplementasikan
-// dengan aman setelah data organisasi/keanggotaan ada (Epic 2, belum
-// dibangun sama sekali di S1). Membiarkan GA lolos tanpa pengecekan org
-// akan jadi lubang keamanan (bisa lihat sesi user org lain), jadi
-// sengaja ditolak dulu daripada dibuka tanpa scoping yang benar.
+// milik user target, untuk dashboard admin (S1-30). Otorisasi sama seperti
+// RevokeAllForUser (S3-40).
 func (h *SessionHandler) ListForUser(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
 	targetUserID := c.Params("userId")
+
+	if err := middleware.RequireGroupAdminInOrg(c.Context(), h.sessions, claims, targetUserID); err != nil {
+		if errors.Is(err, domain.ErrForbidden) {
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas user ini.", nil))
+		}
+		h.logger.Error("gagal cek otorisasi Group Admin", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses permintaan", nil))
+	}
 
 	sessions, err := h.sessions.ListSessions(c.Context(), targetUserID, "")
 	if err != nil {

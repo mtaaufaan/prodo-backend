@@ -1,0 +1,1 @@
+DROP FUNCTION IF EXISTS prodo_user_in_org(UUID, UUID);
