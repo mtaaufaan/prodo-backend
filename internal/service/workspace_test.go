@@ -174,6 +174,16 @@ func TestWorkspaceService_DeleteWorkspace_WorkspaceNotFound(t *testing.T) {
 	}
 }
 
+func TestWorkspaceService_DeleteWorkspace_HasActiveProjects(t *testing.T) {
+	repo := &fakeWorkspaceRepo{orgID: map[string]string{"ws-1": "org-1"}, deleteErr: domain.ErrWorkspaceHasProjects}
+	svc := NewWorkspaceService(repo, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
+
+	err := svc.DeleteWorkspace(context.Background(), nil, "ws-1", "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrWorkspaceHasProjects) {
+		t.Errorf("err = %v, want wrapped domain.ErrWorkspaceHasProjects", err)
+	}
+}
+
 func TestWorkspaceService_ListWorkspaces_Success(t *testing.T) {
 	repo := &fakeWorkspaceRepo{listResult: []repository.Workspace{{ID: "ws-1", Name: "Engineering"}}}
 	svc := NewWorkspaceService(repo, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})

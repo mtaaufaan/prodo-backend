@@ -142,20 +142,29 @@ func (r *WorkspaceRepository) setArchived(ctx context.Context, exec db.Executor,
 }
 
 // Delete menghapus workspace permanen (S3-12). ⚠️ Wording task asli
-// ("soft-delete", "hanya jika semua project dihapus", "row tetap ada di DB
-// dengan deleted_at") TIDAK COCOK skema: §5.9 tidak punya kolom deleted_at
-// (cuma archived_at, sudah dipakai Deactivate di atas untuk arti berbeda),
-// dan tabel `projects` BELUM ADA sama sekali sampai sprint ini (migrasi
-// baru menyusul S3-19+, lihat implementation_gaps.md IG-17) -- guard "semua
-// project dihapus" TIDAK BISA diimplementasikan sekarang. Direalisasikan
-// sebagai hard DELETE tanpa guard project (sama pola OrganizationRepository.
-// Delete yang JUGA hard DELETE walau wording task-nya juga bilang "soft"),
-// cascade ke workspace_members via FK. Guard project menyusul begitu tabel
-// projects ada -- dicatat IG-17, JANGAN didiamkan.
+// ("soft-delete", "row tetap ada di DB dengan deleted_at") TIDAK COCOK
+// skema: §5.9 tidak punya kolom deleted_at (cuma archived_at, sudah
+// dipakai Deactivate di atas untuk arti berbeda) -- direalisasikan sebagai
+// hard DELETE, sama pola OrganizationRepository.Delete. Guard "semua
+// project dihapus" AWALNYA di-DEFERRED (tabel projects belum ada,
+// implementation_gaps.md IG-17) -- ditambahkan di sini begitu tabel
+// projects ada (forward-pull S3 H9), sesuai rekomendasi IG-17 sendiri:
+// "WAJIB ditutup bersamaan dengan migrasi projects, jangan dibiarkan
+// tanpa guard setelah fitur project benar-benar ada."
 func (r *WorkspaceRepository) Delete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
 	orgID, err := r.GetOrgID(ctx, exec, workspaceID)
 	if err != nil {
 		return fmt.Errorf("repository.Delete: %w", err)
+	}
+
+	var hasActiveProjects bool
+	if err := exec.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM projects WHERE workspace_id = $1 AND is_archived = FALSE)
+	`, workspaceID).Scan(&hasActiveProjects); err != nil {
+		return fmt.Errorf("repository.Delete: cek project aktif: %w", err)
+	}
+	if hasActiveProjects {
+		return fmt.Errorf("repository.Delete: %w", domain.ErrWorkspaceHasProjects)
 	}
 
 	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.deleted", workspaceID, orgID); err != nil {
