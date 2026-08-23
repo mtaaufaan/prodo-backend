@@ -94,6 +94,13 @@ type fakeAuthRepository struct {
 
 	recordedLoginUserID string
 	recordLoginErr      error
+
+	orgIDsForGroupAdmin []string
+	orgIDsErr           error
+}
+
+func (f *fakeAuthRepository) ListOrgIDsForGroupAdmin(_ context.Context, _ string) ([]string, error) {
+	return f.orgIDsForGroupAdmin, f.orgIDsErr
 }
 
 func (f *fakeAuthRepository) RecordLogin(_ context.Context, userID, _ string) error {
@@ -154,7 +161,7 @@ func TestAuthService_LoginLocal_Success(t *testing.T) {
 		ID: "user-1", Email: "ga@example.com", DisplayName: "GA", PlatformRole: "group_admin", IsActive: true,
 	}}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", RefreshToken: "rt", TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	result, err := svc.LoginLocal(context.Background(), "ga@example.com", "Str0ng!Passw0rd")
 	if err != nil {
@@ -167,7 +174,7 @@ func TestAuthService_LoginLocal_Success(t *testing.T) {
 
 func TestAuthService_LoginLocal_EmailNotFound(t *testing.T) {
 	repo := &fakeAuthRepository{findErr: domain.ErrUserNotFound}
-	svc := NewAuthService(repo, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	_, err := svc.LoginLocal(context.Background(), "unknown@example.com", "whatever")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
@@ -177,7 +184,7 @@ func TestAuthService_LoginLocal_EmailNotFound(t *testing.T) {
 
 func TestAuthService_LoginLocal_AccountInactive(t *testing.T) {
 	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{ID: "user-1", IsActive: false}}
-	svc := NewAuthService(repo, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	_, err := svc.LoginLocal(context.Background(), "pending@example.com", "whatever")
 	if !errors.Is(err, domain.ErrAccountInactive) {
@@ -188,11 +195,83 @@ func TestAuthService_LoginLocal_AccountInactive(t *testing.T) {
 func TestAuthService_LoginLocal_WrongPassword(t *testing.T) {
 	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{ID: "user-1", IsActive: true}}
 	oidc := &fakeOIDCClient{err: keycloak.ErrInvalidGrant}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	_, err := svc.LoginLocal(context.Background(), "ga@example.com", "wrong-password")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidCredentials", err)
+	}
+}
+
+// S3-38 (implementation_gaps.md IG-14): LoginLocal wajib mensinkron
+// attribute Keycloak SEBELUM menukar credential -- tiga test di bawah
+// mengunci perilaku itu supaya tidak regresi diam-diam ke kondisi sebelum
+// S3-38 (attribute tidak pernah disetel sama sekali).
+func TestAuthService_LoginLocal_SyncsGroupAdminOrgIDs(t *testing.T) {
+	repo := &fakeAuthRepository{
+		user: &repository.LoginUserRecord{
+			ID: "ga-1", Email: "ga@example.com", PlatformRole: "group_admin",
+			IsActive: true, KeycloakUserID: "kc-ga-1",
+		},
+		orgIDsForGroupAdmin: []string{"org-1", "org-2"},
+	}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at"}}
+	kc := &fakeKeycloakClient{}
+	svc := NewAuthService(repo, oidc, kc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+
+	if _, err := svc.LoginLocal(context.Background(), "ga@example.com", "Str0ng!Passw0rd"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if kc.lastAttributesUserID != "kc-ga-1" {
+		t.Errorf("lastAttributesUserID = %q, want kc-ga-1", kc.lastAttributesUserID)
+	}
+	if got := kc.lastAttributes["prodo_platform_role"]; len(got) != 1 || got[0] != "group_admin" {
+		t.Errorf("prodo_platform_role = %v, want [group_admin]", got)
+	}
+	orgIDs := kc.lastAttributes["prodo_org_ids"]
+	if len(orgIDs) != 2 || orgIDs[0] != "org-1" || orgIDs[1] != "org-2" {
+		t.Errorf("prodo_org_ids = %v, want [org-1 org-2]", orgIDs)
+	}
+}
+
+func TestAuthService_LoginLocal_MemberDoesNotSyncOrgIDs(t *testing.T) {
+	repo := &fakeAuthRepository{
+		user: &repository.LoginUserRecord{
+			ID: "member-1", Email: "member@example.com", PlatformRole: "member",
+			IsActive: true, KeycloakUserID: "kc-member-1",
+		},
+	}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at"}}
+	kc := &fakeKeycloakClient{}
+	svc := NewAuthService(repo, oidc, kc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+
+	if _, err := svc.LoginLocal(context.Background(), "member@example.com", "Str0ng!Passw0rd"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := kc.lastAttributes["prodo_platform_role"]; len(got) != 1 || got[0] != "member" {
+		t.Errorf("prodo_platform_role = %v, want [member]", got)
+	}
+	if _, ok := kc.lastAttributes["prodo_org_ids"]; ok {
+		t.Errorf("prodo_org_ids = %v, want key absent for non-GA", kc.lastAttributes["prodo_org_ids"])
+	}
+}
+
+func TestAuthService_LoginLocal_KeycloakSyncFailureDoesNotBlockLogin(t *testing.T) {
+	repo := &fakeAuthRepository{
+		user: &repository.LoginUserRecord{ID: "user-1", Email: "member@example.com", PlatformRole: "member", IsActive: true},
+	}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at"}}
+	kc := &fakeKeycloakClient{attributesErr: errors.New("keycloak admin api down")}
+	svc := NewAuthService(repo, oidc, kc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+
+	result, err := svc.LoginLocal(context.Background(), "member@example.com", "Str0ng!Passw0rd")
+	if err != nil {
+		t.Fatalf("sync failure should not block login, got error: %v", err)
+	}
+	if result.AccessToken != "at" {
+		t.Errorf("result = %+v, unexpected", result)
 	}
 }
 
@@ -203,7 +282,7 @@ func TestAuthService_LoginSSO_ExistingUser(t *testing.T) {
 		usersByID:           map[string]*repository.LoginUserRecord{"user-1": {ID: "user-1", Email: "member@example.com", PlatformRole: "member", IsActive: true}},
 	}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", IDToken: idToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	result, err := svc.LoginSSO(context.Background(), "auth-code", "http://localhost:5173/auth/callback")
 	if err != nil {
@@ -221,7 +300,7 @@ func TestAuthService_LoginSSO_FirstTimeAutoCreate(t *testing.T) {
 	idToken := jwtNewUnsigned(t, "kc-sub-new", "newmember@example.com", "New Member")
 	repo := &fakeAuthRepository{providerSubToUserID: map[string]string{}}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", IDToken: idToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	result, err := svc.LoginSSO(context.Background(), "auth-code", "http://localhost:5173/auth/callback")
 	if err != nil {
@@ -239,7 +318,7 @@ func TestAuthService_LoginSSO_EmailCollision(t *testing.T) {
 	idToken := jwtNewUnsigned(t, "kc-sub-new", "taken@example.com", "New Member")
 	repo := &fakeAuthRepository{providerSubToUserID: map[string]string{}, createErr: domain.ErrEmailAlreadyExists}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", IDToken: idToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	_, err := svc.LoginSSO(context.Background(), "auth-code", "http://localhost:5173/auth/callback")
 	if !errors.Is(err, domain.ErrEmailAlreadyExists) {
@@ -250,7 +329,7 @@ func TestAuthService_LoginSSO_EmailCollision(t *testing.T) {
 func TestAuthService_LoginSSO_InvalidCode(t *testing.T) {
 	repo := &fakeAuthRepository{}
 	oidc := &fakeOIDCClient{err: keycloak.ErrInvalidGrant}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), zap.NewNop())
 
 	_, err := svc.LoginSSO(context.Background(), "expired-code", "http://localhost:5173/auth/callback")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
@@ -260,7 +339,7 @@ func TestAuthService_LoginSSO_InvalidCode(t *testing.T) {
 
 func TestAuthService_VerifyMFA_ValidOTP(t *testing.T) {
 	secret := generateTestTOTPSecret(t)
-	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
 	err := svc.VerifyMFA(context.Background(), "user-1", true, currentTOTPCode(t, secret))
 	if err != nil {
@@ -270,7 +349,7 @@ func TestAuthService_VerifyMFA_ValidOTP(t *testing.T) {
 
 func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
 	secret := generateTestTOTPSecret(t)
-	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
 	err := svc.VerifyMFA(context.Background(), "user-1", true, "000000")
 	if !errors.Is(err, domain.ErrInvalidOTP) {
@@ -279,7 +358,7 @@ func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
 }
 
 func TestAuthService_VerifyMFA_GroupAdminWithoutMFA_Blocked(t *testing.T) {
-	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
 
 	err := svc.VerifyMFA(context.Background(), "user-1", true, "")
 	if !errors.Is(err, domain.ErrMFARequired) {
@@ -288,7 +367,7 @@ func TestAuthService_VerifyMFA_GroupAdminWithoutMFA_Blocked(t *testing.T) {
 }
 
 func TestAuthService_VerifyMFA_MemberWithoutMFA_Passes(t *testing.T) {
-	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
 
 	err := svc.VerifyMFA(context.Background(), "user-1", false, "")
 	if err != nil {
@@ -303,7 +382,7 @@ func TestAuthService_Login_Success_RecordsAudit(t *testing.T) {
 	}}
 	accessToken := testAccessTokenJWT(t, "jti-login-success")
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: accessToken, TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
 	result, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", currentTOTPCode(t, secret), "test-agent", "127.0.0.1")
 	if err != nil {
@@ -323,7 +402,7 @@ func TestAuthService_Login_WrongOTP_NoAuditRecorded(t *testing.T) {
 		ID: "user-1", Email: "ga@example.com", PlatformRole: "group_admin", IsActive: true,
 	}}
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", TokenType: "Bearer", ExpiresIn: 3600}}
-	svc := NewAuthService(repo, oidc, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
 	_, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", "000000", "test-agent", "127.0.0.1")
 	if !errors.Is(err, domain.ErrInvalidOTP) {
