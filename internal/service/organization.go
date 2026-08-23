@@ -56,6 +56,17 @@ func (s *OrganizationService) authorizeGroup(ctx context.Context, exec db.Execut
 	return nil
 }
 
+// IsGroupAdminOfGroup -- pass-through tipis ke repo (S3-20), dipakai
+// GroupService untuk cek apakah actor pengelola grup target (selain jalur
+// Platform Admin/Project Manager).
+func (s *OrganizationService) IsGroupAdminOfGroup(ctx context.Context, exec db.Executor, userID, groupID string) (bool, error) {
+	isGA, err := s.repo.IsGroupAdminOfGroup(ctx, exec, userID, groupID)
+	if err != nil {
+		return false, fmt.Errorf("service.IsGroupAdminOfGroup: %w", err)
+	}
+	return isGA, nil
+}
+
 // AuthorizeOrgAccess menolak actor yang bukan Platform Admin dan bukan Group
 // Admin dari grup pemilik orgID -- dipakai Update/Deactivate/Delete/GetSummary
 // (org sudah ada). Diekspor (bukan authorizeOrg lagi) supaya WorkspaceService
