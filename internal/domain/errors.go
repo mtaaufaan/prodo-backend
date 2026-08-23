@@ -77,7 +77,27 @@ var (
 	// (S3-10/11/12).
 	ErrWorkspaceNotFound = errors.New("workspace not found")
 
+	// ErrWorkspaceHasProjects dikembalikan DELETE /workspaces/:id (S3-12)
+	// saat masih ada project aktif (is_archived = FALSE) di workspace tsb.
+	// Guard ini awalnya DEFERRED (implementation_gaps.md IG-17, tabel
+	// projects belum ada) -- ditambahkan begitu forward-pull projects
+	// selesai (S3 H9).
+	ErrWorkspaceHasProjects = errors.New("workspace still has active projects")
+
 	// ErrMemberNotFound dikembalikan saat target bukan member workspace
 	// (S3-15) -- tidak ada baris workspace_members yang cocok.
 	ErrMemberNotFound = errors.New("workspace member not found")
+
+	// ErrProjectNotFound dikembalikan saat projects.id tidak ditemukan
+	// (S3-21/22/23).
+	ErrProjectNotFound = errors.New("project not found")
+
+	// ErrProjectMemberAlreadyExists dikembalikan POST /projects/:id/members
+	// (S3-21) saat user sudah jadi project member (PK (project_id, user_id)
+	// bentrok) -- pakai PUT .../role (S3-22) untuk ubah role yang sudah ada.
+	ErrProjectMemberAlreadyExists = errors.New("project member already exists")
+
+	// ErrProjectMemberNotFound dikembalikan saat target bukan project
+	// member (S3-22/23).
+	ErrProjectMemberNotFound = errors.New("project member not found")
 )
