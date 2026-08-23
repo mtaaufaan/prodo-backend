@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
+	"github.com/mtaaufaan/prodo-backend/internal/domain"
 )
 
 // WorkspaceMemberRepository tidak menyimpan *pgxpool.Pool -- setiap method
@@ -144,4 +145,27 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 		return nil, fmt.Errorf("repository.ListMembers: rows: %w", err)
 	}
 	return members, nil
+}
+
+// RemoveMember menghapus satu baris workspace_members (S3-15) + audit
+// trail. Akun (`users`) itu sendiri TIDAK disentuh -- cuma mencabut
+// keanggotaan workspace ini (US-009 AC: "akun masih ada di accounts").
+func (r *WorkspaceMemberRepository) RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2
+	`, workspaceID, userID)
+	if err != nil {
+		return fmt.Errorf("repository.RemoveMember: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.RemoveMember: %w", domain.ErrMemberNotFound)
+	}
+
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id)
+		VALUES ($1, $2, 'member.removed', 'workspace_member', $3, $4)
+	`, actorID, actorRole, userID, workspaceID); err != nil {
+		return fmt.Errorf("repository.RemoveMember: audit: %w", err)
+	}
+	return nil
 }

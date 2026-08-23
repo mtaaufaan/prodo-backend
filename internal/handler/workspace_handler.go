@@ -132,6 +132,30 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 	}))
 }
 
+// RemoveMember menangani DELETE /workspaces/:wsId/members/:userId (S3-15).
+// Otorisasi sama seperti UpdateMemberRole (middleware.RequireRole
+// admin_workspace di routing).
+func (h *WorkspaceHandler) RemoveMember(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("RemoveMember dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("RemoveMember dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+	targetUserID := c.Params("userId")
+
+	if err := h.rbac.RemoveMember(c.Context(), exec, workspaceID, targetUserID, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal mengeluarkan member")
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 type updateWorkspaceRequest struct {
 	Name string `json:"name"`
 }
@@ -274,6 +298,8 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas workspace/organisasi ini.", nil))
 	case errors.Is(err, domain.ErrWorkspaceNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Workspace tidak ditemukan", nil))
+	case errors.Is(err, domain.ErrMemberNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Member tidak ditemukan di workspace ini", nil))
 	case errors.Is(err, domain.ErrOrganizationNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
 	default:

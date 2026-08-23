@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
+	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
@@ -29,6 +30,10 @@ type stubWorkspaceMemberRepository struct {
 
 	orgID    string
 	orgIDErr error
+
+	removeErr        error
+	removedUserID    string
+	removedWorkspace string
 }
 
 func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
@@ -52,6 +57,12 @@ func (f *stubWorkspaceMemberRepository) ListMembers(_ context.Context, _ db.Exec
 
 func (f *stubWorkspaceMemberRepository) GetWorkspaceOrgID(_ context.Context, _ db.Executor, _ string) (string, error) {
 	return f.orgID, f.orgIDErr
+}
+
+func (f *stubWorkspaceMemberRepository) RemoveMember(_ context.Context, _ db.Executor, workspaceID, userID, _, _ string) error {
+	f.removedWorkspace = workspaceID
+	f.removedUserID = userID
+	return f.removeErr
 }
 
 func strPtr(s string) *string { return &s }
@@ -217,5 +228,41 @@ func TestRBACService_ListMembers_ReturnsMembers(t *testing.T) {
 	}
 	if len(members) != 2 {
 		t.Fatalf("len(members) = %d, want 2", len(members))
+	}
+}
+
+func TestRBACService_RemoveMember_Success(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{}
+	svc := NewRBACService(repo, newStubCache())
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.removedWorkspace != "ws-1" || repo.removedUserID != "user-1" {
+		t.Errorf("RemoveMember dipanggil dengan workspace=%q user=%q, unexpected", repo.removedWorkspace, repo.removedUserID)
+	}
+}
+
+func TestRBACService_RemoveMember_InvalidatesCache(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{}
+	c := newStubCache()
+	c.store[roleCacheKey("user-1", "ws-1")] = "editor"
+	svc := NewRBACService(repo, c)
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := c.store[roleCacheKey("user-1", "ws-1")]; ok {
+		t.Error("cache key role:<user>:<workspace> harusnya di-delete setelah RemoveMember, tapi masih ada")
+	}
+}
+
+func TestRBACService_RemoveMember_NotFound(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{removeErr: domain.ErrMemberNotFound}
+	svc := NewRBACService(repo, newStubCache())
+
+	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-missing", "actor-1", "admin_workspace")
+	if !errors.Is(err, domain.ErrMemberNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrMemberNotFound", err)
 	}
 }
