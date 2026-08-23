@@ -184,6 +184,12 @@ func run() error {
 	// sekarang -- lihat komentar middleware.DBContextMiddleware.
 	dbCtx := middleware.DBContextMiddleware(pool, accountSvc)
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
+	// S3-10/11, US-008. RequireRole admin_workspace -- AW mengelola
+	// workspace-nya sendiri, PA/GA-of-org bypass (konsisten RLS
+	// workspaces_update, S3-42).
+	v1.Put("/workspaces/:wsId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Update)
+	v1.Put("/workspaces/:wsId/deactivate", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Deactivate)
+	v1.Put("/workspaces/:wsId/reactivate", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Reactivate)
 	// ⚠️ S2-07/08 prasyarat, dimajukan dari S3-14 (implementation_gaps.md
 	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
 	// workspace boleh lihat daftar member workspace mereka sendiri.
@@ -220,6 +226,11 @@ func run() error {
 	// S3-09, US-008. Otorisasi sama seperti organizations (reuse
 	// OrganizationService.AuthorizeOrgAccess via WorkspaceService).
 	v1.Post("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.CreateWorkspace)
+	// S3-13 prasyarat (implementation_gaps.md IG-17) -- list dan delete
+	// workspace level-org, PA/GA saja (bukan admin_workspace, konsisten
+	// RLS workspaces_delete yang tidak punya cabang workspace_member).
+	v1.Get("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.List)
+	v1.Delete("/workspaces/:wsId", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.Delete)
 
 	serverErr := make(chan error, 1)
 	go func() {
