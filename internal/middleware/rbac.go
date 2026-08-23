@@ -2,10 +2,12 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
+	"github.com/mtaaufaan/prodo-backend/internal/domain"
 )
 
 // Locals key -- pola sama dengan claimsLocalsKey (auth.go).
@@ -41,6 +43,10 @@ type UserResolver interface {
 // yang session variable-nya sudah disuntik (bukan sembarang koneksi).
 type WorkspaceRoleChecker interface {
 	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
+
+	// GetWorkspaceOrgID -- S3-41, dasar scoping Group Admin di RequireRole
+	// (implementation_gaps.md IG-01).
+	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 }
 
 // RequirePlatformRole meloloskan request HANYA kalau claims.PlatformRole ada
@@ -69,16 +75,58 @@ func RequirePlatformRole(users UserResolver, roles ...string) fiber.Handler {
 			return forbidden(c, "FORBIDDEN", "Anda tidak memiliki izin untuk mengakses resource ini.")
 		}
 
-		actorUserID, err := users.ResolveActorUserID(c.Context(), claims.Subject)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "Gagal mengidentifikasi user"},
-			})
+		// actorUserID mungkin sudah diresolve DBContextMiddleware yang
+		// jalan lebih dulu (S3-42, route organizations sekarang butuh
+		// dbCtx) -- pakai itu kalau ada, hindari query users dua kali.
+		if _, ok := c.Locals(actorUserIDLocalsKey).(string); !ok {
+			resolved, err := users.ResolveActorUserID(c.Context(), claims.Subject)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "Gagal mengidentifikasi user"},
+				})
+			}
+			c.Locals(actorUserIDLocalsKey, resolved)
 		}
-		c.Locals(actorUserIDLocalsKey, actorUserID)
 		c.Locals(actorRoleLocalsKey, claims.PlatformRole)
 		return c.Next()
 	}
+}
+
+// GroupAdminOrgChecker -- interface didefinisikan di consumer, lihat §3.9.
+// Diimplementasikan repository.SessionRepository (S3-40).
+type GroupAdminOrgChecker interface {
+	IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error)
+}
+
+// RequireGroupAdminInOrg mengecek apakah actor berwenang atas targetUserID
+// (S3-39, implementation_gaps.md IG-01): Platform Admin selalu lolos; Group
+// Admin lolos kalau targetUserID adalah member SALAH SATU org di
+// claims.ProdoOrgIDs (S3-38); role lain ditolak.
+//
+// BUKAN fiber.Handler seperti RequireRole/RequirePlatformRole -- route yang
+// butuh ini (S1-30/35 admin sessions, dst.) punya target di param :userId,
+// bukan :orgId, jadi org yang relevan baru bisa diketahui SETELAH resolve
+// target (checker.IsUserInOrg per org GA) -- tidak bisa dicek generik di
+// edge routing seperti middleware berbasis :wsId/:orgId. Dipanggil langsung
+// dari handler setelah RequirePlatformRole (gerbang kasar PA/GA) meloloskan
+// request.
+func RequireGroupAdminInOrg(ctx context.Context, checker GroupAdminOrgChecker, claims *Claims, targetUserID string) error {
+	if claims.PlatformRole == "platform_admin" {
+		return nil
+	}
+	if claims.PlatformRole != "group_admin" {
+		return domain.ErrForbidden
+	}
+	for _, orgID := range claims.ProdoOrgIDs {
+		inOrg, err := checker.IsUserInOrg(ctx, targetUserID, orgID)
+		if err != nil {
+			return fmt.Errorf("middleware.RequireGroupAdminInOrg: %w", err)
+		}
+		if inOrg {
+			return nil
+		}
+	}
+	return domain.ErrForbidden
 }
 
 // RequireRole meloloskan request HANYA kalau actor adalah Platform Admin
@@ -138,6 +186,26 @@ func RequireRole(users UserResolver, checker WorkspaceRoleChecker, roles ...stri
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "RequireRole butuh DBContextMiddleware dipasang lebih dulu di route ini"},
 			})
+		}
+
+		// S3-41 (implementation_gaps.md IG-01): Group Admin lolos (seperti
+		// Platform Admin -- bypass penuh `roles`, bukan diperiksa terhadap
+		// `allowed`) kalau workspace target ada di ORGANISASI yang dia
+		// kelola (claims.ProdoOrgIDs, S3-38), TIDAK PERLU jadi
+		// workspace_members. GA yang bukan pengelola org workspace ini
+		// jatuh lanjut ke pengecekan role biasa di bawah (kemungkinan besar
+		// tetap ditolak, kecuali GA itu KEBETULAN juga workspace member --
+		// jarang, tapi tidak sengaja diblokir).
+		if claims.PlatformRole == "group_admin" {
+			workspaceOrgID, err := checker.GetWorkspaceOrgID(c.Context(), exec, workspaceID)
+			if err == nil {
+				for _, gaOrgID := range claims.ProdoOrgIDs {
+					if gaOrgID == workspaceOrgID {
+						c.Locals(actorRoleLocalsKey, "group_admin")
+						return c.Next()
+					}
+				}
+			}
 		}
 
 		role, err := checker.GetMemberRole(c.Context(), exec, workspaceID, actorUserID)

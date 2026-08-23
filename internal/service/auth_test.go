@@ -36,6 +36,9 @@ func (f *fakeSessionRepository) RevokeSession(_ context.Context, _, _ string) (t
 func (f *fakeSessionRepository) RevokeAllSessions(_ context.Context, _, _ string) ([]repository.RevokedSession, error) {
 	return nil, nil
 }
+func (f *fakeSessionRepository) IsUserInOrg(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
 
 type fakeCache struct{}
 

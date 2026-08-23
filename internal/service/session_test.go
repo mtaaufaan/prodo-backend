@@ -27,6 +27,9 @@ type stubSessionRepository struct {
 
 	revokeAllResult []repository.RevokedSession
 	revokeAllErr    error
+
+	isUserInOrgResult bool
+	isUserInOrgErr    error
 }
 
 func (f *stubSessionRepository) CreateSession(_ context.Context, userID, jti string, device repository.DeviceInfo, expiresAt time.Time) error {
@@ -49,6 +52,10 @@ func (f *stubSessionRepository) RevokeSession(_ context.Context, _, _ string) (t
 
 func (f *stubSessionRepository) RevokeAllSessions(_ context.Context, _, _ string) ([]repository.RevokedSession, error) {
 	return f.revokeAllResult, f.revokeAllErr
+}
+
+func (f *stubSessionRepository) IsUserInOrg(_ context.Context, _, _ string) (bool, error) {
+	return f.isUserInOrgResult, f.isUserInOrgErr
 }
 
 type stubCache struct {
