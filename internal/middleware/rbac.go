@@ -43,6 +43,44 @@ type WorkspaceRoleChecker interface {
 	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 }
 
+// RequirePlatformRole meloloskan request HANYA kalau claims.PlatformRole ada
+// di antara `roles` -- gerbang cepat berbasis klaim JWT saja (tanpa query
+// DB), untuk endpoint level-platform yang dibagi lebih dari satu platform
+// role (mis. organizations: Platform Admin ATAU Group Admin, S3-02/03/04).
+// Beda dari RequireRole (S2-09) yang scoped ke workspace tertentu lewat
+// param :wsId + query workspace_members -- endpoint organizations tidak
+// selalu punya org yang sudah ada (POST /organizations bikin org BARU),
+// jadi scoping detail (GA ini benar-benar pengelola grup yang dituju atau
+// bukan) dilakukan di service layer via group_admin_assignments, bukan di
+// sini. actorUserID diresolve & disimpan di locals sama seperti RequireRole
+// supaya handler tidak query ulang.
+func RequirePlatformRole(users UserResolver, roles ...string) fiber.Handler {
+	allowed := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		allowed[r] = true
+	}
+
+	return func(c *fiber.Ctx) error {
+		claims, ok := ClaimsFromContext(c)
+		if !ok {
+			return unauthorized(c, "INVALID_CREDENTIALS", "Token tidak ditemukan")
+		}
+		if !allowed[claims.PlatformRole] {
+			return forbidden(c, "FORBIDDEN", "Anda tidak memiliki izin untuk mengakses resource ini.")
+		}
+
+		actorUserID, err := users.ResolveActorUserID(c.Context(), claims.Subject)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fiber.Map{"code": "INTERNAL_ERROR", "message": "Gagal mengidentifikasi user"},
+			})
+		}
+		c.Locals(actorUserIDLocalsKey, actorUserID)
+		c.Locals(actorRoleLocalsKey, claims.PlatformRole)
+		return c.Next()
+	}
+}
+
 // RequireRole meloloskan request HANYA kalau actor adalah Platform Admin
 // (bypass penuh, konsisten dengan RequirePlatformAdmin()) ATAU salah satu
 // dari `roles` di workspace target (S2-09, US-003). Route WAJIB punya

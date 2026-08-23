@@ -130,6 +130,7 @@ func run() error {
 	sessionRepo := repository.NewSessionRepository(pool)
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	invitationRepo := repository.NewInvitationRepository()
+	organizationRepo := repository.NewOrganizationRepository(pool)
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -139,6 +140,7 @@ func run() error {
 	authSvc := service.NewAuthService(accountRepo, oidcClient, kcAdmin, mfaSvc, sessionSvc, logger)
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
+	organizationSvc := service.NewOrganizationService(organizationRepo)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -153,6 +155,7 @@ func run() error {
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
+	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -193,6 +196,16 @@ func run() error {
 	v1.Post("/auth/invitations/accept", invitationHandler.AcceptInvitation)
 	v1.Delete("/workspaces/:wsId/invitations/:invId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CancelInvitation)
 	v1.Post("/workspaces/:wsId/invitations/:invId/resend", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.ResendInvitation)
+
+	// S3-02/03/04, US-007. RequirePlatformRole cuma gerbang kasar (PA atau
+	// GA lolos); scoping GA ke grup target ada di OrganizationService --
+	// lihat komentar OrganizationHandler. organizations BELUM di-RLS
+	// (S3-42 menyusul), jadi TIDAK pakai dbCtx/DBContextMiddleware seperti
+	// route /workspaces/....
+	requireOrgAdmin := middleware.RequirePlatformRole(accountSvc, "platform_admin", "group_admin")
+	v1.Post("/organizations", jwtAuth, requireOrgAdmin, organizationHandler.Create)
+	v1.Put("/organizations/:id", jwtAuth, requireOrgAdmin, organizationHandler.Update)
+	v1.Put("/organizations/:id/deactivate", jwtAuth, requireOrgAdmin, organizationHandler.Deactivate)
 
 	serverErr := make(chan error, 1)
 	go func() {
