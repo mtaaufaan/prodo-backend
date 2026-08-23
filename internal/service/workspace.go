@@ -12,6 +12,12 @@ import (
 // workspaceRepository -- interface didefinisikan di consumer, §3.9.
 type workspaceRepository interface {
 	Create(ctx context.Context, exec db.Executor, orgID, name, actorID, actorRole string) (*repository.Workspace, error)
+	GetOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+	Update(ctx context.Context, exec db.Executor, workspaceID, name, actorID, actorRole string) error
+	Deactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
+	Reactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
+	Delete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
+	List(ctx context.Context, exec db.Executor, orgID string) ([]repository.Workspace, error)
 }
 
 // orgAuthorizer -- interface didefinisikan di consumer, §3.9.
@@ -61,4 +67,80 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor
 		return nil, fmt.Errorf("service.CreateWorkspace: assign admin_workspace: %w", err)
 	}
 	return ws, nil
+}
+
+// UpdateWorkspace mengubah name workspace (S3-10). Otorisasi ("Admin
+// Workspace di workspace ini, atau Platform Admin/Group Admin pengelola
+// org", konsisten RLS workspaces_update) sudah ditegakkan
+// middleware.RequireRole di routing -- sama pola UpdateMemberRole, tidak
+// ada pengecekan tambahan di sini.
+func (s *WorkspaceService) UpdateWorkspace(ctx context.Context, exec db.Executor, workspaceID, name, actorID, actorRole string) error {
+	if workspaceID == "" || name == "" {
+		return fmt.Errorf("service.UpdateWorkspace: %w", domain.ErrInvalidInput)
+	}
+	if err := s.repo.Update(ctx, exec, workspaceID, name, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.UpdateWorkspace: %w", err)
+	}
+	return nil
+}
+
+// DeactivateWorkspace menyetel archived_at (S3-11) -- US-008 AC: akses
+// seluruh member diblokir, data tetap tersimpan.
+func (s *WorkspaceService) DeactivateWorkspace(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	if workspaceID == "" {
+		return fmt.Errorf("service.DeactivateWorkspace: %w", domain.ErrInvalidInput)
+	}
+	if err := s.repo.Deactivate(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.DeactivateWorkspace: %w", err)
+	}
+	return nil
+}
+
+// ReactivateWorkspace membatalkan deactivate (kebalikan DeactivateWorkspace).
+func (s *WorkspaceService) ReactivateWorkspace(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	if workspaceID == "" {
+		return fmt.Errorf("service.ReactivateWorkspace: %w", domain.ErrInvalidInput)
+	}
+	if err := s.repo.Reactivate(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.ReactivateWorkspace: %w", err)
+	}
+	return nil
+}
+
+// DeleteWorkspace menghapus workspace permanen (S3-12). BEDA dari Update/
+// Deactivate/Reactivate -- middleware routing-nya cuma gerbang platform-role
+// kasar (requireOrgAdmin), BUKAN RequireRole(admin_workspace), karena RLS
+// `workspaces_delete` sengaja TIDAK mengizinkan Admin Workspace (cuma
+// Platform Admin/Group Admin pemilik org) -- lihat catatan
+// WorkspaceRepository.GetOrgID. Otorisasi halus (GA benar-benar pengelola
+// org PEMILIK workspace ini) karena itu ditegakkan EKSPLISIT di sini,
+// resolve org_id dari workspace_id dulu baru panggil AuthorizeOrgAccess --
+// sama pola OrganizationService.DeleteOrganization.
+func (s *WorkspaceService) DeleteWorkspace(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	if workspaceID == "" {
+		return fmt.Errorf("service.DeleteWorkspace: %w", domain.ErrInvalidInput)
+	}
+	orgID, err := s.repo.GetOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("service.DeleteWorkspace: %w", err)
+	}
+	if err := s.orgs.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.Delete(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.DeleteWorkspace: %w", err)
+	}
+	return nil
+}
+
+// ListWorkspaces mengembalikan workspace yang terlihat oleh actor dalam
+// satu organisasi -- scoping sepenuhnya lewat RLS (lihat repository.List),
+// sama pola OrganizationService.ListOrganizations.
+func (s *WorkspaceService) ListWorkspaces(ctx context.Context, exec db.Executor, orgID string) ([]repository.Workspace, error) {
+	list, err := s.repo.List(ctx, exec, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListWorkspaces: %w", err)
+	}
+	return list, nil
 }

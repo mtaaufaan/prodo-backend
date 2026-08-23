@@ -72,4 +72,8 @@ var (
 	// organisasi tsb -- US-007 AC: "hanya bisa dihapus jika semua workspace
 	// sudah dihapus/dipindahkan".
 	ErrOrganizationHasWorkspaces = errors.New("organization still has active workspaces")
+
+	// ErrWorkspaceNotFound dikembalikan saat workspaces.id tidak ditemukan
+	// (S3-10/11/12).
+	ErrWorkspaceNotFound = errors.New("workspace not found")
 )
