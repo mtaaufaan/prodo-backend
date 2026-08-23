@@ -300,6 +300,8 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Workspace tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrMemberNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Member tidak ditemukan di workspace ini", nil))
+	case errors.Is(err, domain.ErrWorkspaceHasProjects):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("WORKSPACE_HAS_PROJECTS", "Workspace masih punya project aktif", nil))
 	case errors.Is(err, domain.ErrOrganizationNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
 	default:
