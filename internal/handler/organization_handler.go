@@ -177,8 +177,8 @@ func (h *OrganizationHandler) Summary(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(fiber.Map{
-		"member_count":      summary.MemberCount,
-		"workspace_count":   summary.WorkspaceCount,
+		"member_count":       summary.MemberCount,
+		"workspace_count":    summary.WorkspaceCount,
 		"storage_used_bytes": summary.StorageUsedByte,
 	}))
 }

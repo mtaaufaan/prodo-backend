@@ -34,7 +34,7 @@ func NewWorkspaceHandler(rbac *service.RBACService, workspaces *service.Workspac
 }
 
 type createWorkspaceRequest struct {
-	Name               string `json:"name"`
+	Name                 string `json:"name"`
 	AdminWorkspaceUserID string `json:"admin_workspace_user_id"`
 }
 
@@ -77,9 +77,9 @@ func (h *WorkspaceHandler) CreateWorkspace(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
-		"id":       ws.ID,
-		"org_id":   ws.OrgID,
-		"name":     ws.Name,
+		"id":     ws.ID,
+		"org_id": ws.OrgID,
+		"name":   ws.Name,
 	}))
 }
 
