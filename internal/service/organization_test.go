@@ -10,12 +10,12 @@ import (
 )
 
 type fakeOrganizationRepo struct {
-	gaGroups map[string]bool // "userID:groupID" -> is GA of that group
+	gaGroups map[string]bool   // "userID:groupID" -> is GA of that group
 	orgGroup map[string]string // orgID -> groupID
 
-	createdOrg *repository.Organization
-	createErr  error
-	updateErr  error
+	createdOrg    *repository.Organization
+	createErr     error
+	updateErr     error
 	deactivateErr error
 }
 
