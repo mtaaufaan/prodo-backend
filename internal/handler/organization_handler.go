@@ -40,6 +40,11 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 		h.logger.Error("OrganizationHandler.Create dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Create dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
 
 	var req createOrganizationRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -55,7 +60,7 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 			[]response.FieldError{{Field: "slug", Message: "lowercase, alphanumeric, hyphen (mis. \"acme-corp\")"}}))
 	}
 
-	org, err := h.orgs.CreateOrganization(c.Context(), req.GroupID, req.Name, req.Slug, actorUserID, actorRole)
+	org, err := h.orgs.CreateOrganization(c.Context(), exec, req.GroupID, req.Name, req.Slug, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal membuat organisasi")
 	}
@@ -82,6 +87,11 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 		h.logger.Error("OrganizationHandler.Update dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Update dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
 	orgID := c.Params("id")
 
 	var req updateOrganizationRequest
@@ -98,7 +108,7 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 			[]response.FieldError{{Field: "slug", Message: "lowercase, alphanumeric, hyphen (mis. \"acme-corp\")"}}))
 	}
 
-	if err := h.orgs.UpdateOrganization(c.Context(), orgID, req.Name, req.Slug, actorUserID, actorRole); err != nil {
+	if err := h.orgs.UpdateOrganization(c.Context(), exec, orgID, req.Name, req.Slug, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah organisasi")
 	}
 
@@ -112,13 +122,65 @@ func (h *OrganizationHandler) Deactivate(c *fiber.Ctx) error {
 		h.logger.Error("OrganizationHandler.Deactivate dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Deactivate dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
 	orgID := c.Params("id")
 
-	if err := h.orgs.DeactivateOrganization(c.Context(), orgID, actorUserID, actorRole); err != nil {
+	if err := h.orgs.DeactivateOrganization(c.Context(), exec, orgID, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal menonaktifkan organisasi")
 	}
 
 	return c.JSON(response.Success(fiber.Map{"id": orgID, "deactivated": true}))
+}
+
+// Delete menangani DELETE /organizations/:id (S3-05).
+func (h *OrganizationHandler) Delete(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Delete dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Delete dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	if err := h.orgs.DeleteOrganization(c.Context(), exec, orgID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menghapus organisasi")
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// Summary menangani GET /organizations/:id/summary (S3-06).
+func (h *OrganizationHandler) Summary(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Summary dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Summary dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	summary, err := h.orgs.GetSummary(c.Context(), exec, orgID, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil ringkasan organisasi")
+	}
+
+	return c.JSON(response.Success(fiber.Map{
+		"member_count":      summary.MemberCount,
+		"workspace_count":   summary.WorkspaceCount,
+		"storage_used_bytes": summary.StorageUsedByte,
+	}))
 }
 
 func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
@@ -131,6 +193,8 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrSlugAlreadyExists):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("SLUG_ALREADY_EXISTS", "Slug sudah dipakai organisasi lain", nil))
+	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))

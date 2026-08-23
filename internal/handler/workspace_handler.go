@@ -1,9 +1,13 @@
 package handler
 
 import (
+	"errors"
+	"strings"
+
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
+	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
@@ -18,14 +22,65 @@ var validWorkspaceRoles = map[string]bool{
 	"viewer":          true,
 }
 
-// WorkspaceHandler -- S2-04/07, US-002.
+// WorkspaceHandler -- S2-04/07/S3-09, US-002/US-008.
 type WorkspaceHandler struct {
-	rbac   *service.RBACService
-	logger *zap.Logger
+	rbac       *service.RBACService
+	workspaces *service.WorkspaceService
+	logger     *zap.Logger
 }
 
-func NewWorkspaceHandler(rbac *service.RBACService, logger *zap.Logger) *WorkspaceHandler {
-	return &WorkspaceHandler{rbac: rbac, logger: logger}
+func NewWorkspaceHandler(rbac *service.RBACService, workspaces *service.WorkspaceService, logger *zap.Logger) *WorkspaceHandler {
+	return &WorkspaceHandler{rbac: rbac, workspaces: workspaces, logger: logger}
+}
+
+type createWorkspaceRequest struct {
+	Name               string `json:"name"`
+	AdminWorkspaceUserID string `json:"admin_workspace_user_id"`
+}
+
+// CreateWorkspace menangani POST /organizations/:orgId/workspaces (S3-09).
+func (h *WorkspaceHandler) CreateWorkspace(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.CreateWorkspace dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.CreateWorkspace dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("orgId")
+
+	var req createWorkspaceRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || req.AdminWorkspaceUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "name dan admin_workspace_user_id wajib diisi", nil))
+	}
+
+	ws, err := h.workspaces.CreateWorkspace(c.Context(), exec, orgID, req.Name, req.AdminWorkspaceUserID, actorUserID, actorRole)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidInput):
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid", nil))
+		case errors.Is(err, domain.ErrForbidden):
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas organisasi ini.", nil))
+		case errors.Is(err, domain.ErrOrganizationNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
+		default:
+			h.logger.Error("gagal membuat workspace", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat workspace", nil))
+		}
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
+		"id":       ws.ID,
+		"org_id":   ws.OrgID,
+		"name":     ws.Name,
+	}))
 }
 
 type updateMemberRoleRequest struct {

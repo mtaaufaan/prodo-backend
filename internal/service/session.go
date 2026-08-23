@@ -25,6 +25,7 @@ type sessionRepository interface {
 	TouchSession(ctx context.Context, jti string, idleTimeout time.Duration) (valid bool, err error)
 	RevokeSession(ctx context.Context, userID, jti string) (remaining time.Duration, err error)
 	RevokeAllSessions(ctx context.Context, userID, exceptJTI string) ([]repository.RevokedSession, error)
+	IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error)
 }
 
 // SessionService menangani tracking sesi JWT (S1-27/28/29/32/33/34/35,
@@ -149,6 +150,16 @@ func (s *SessionService) RevokeAllSessions(ctx context.Context, userID, exceptJT
 		}
 	}
 	return nil
+}
+
+// IsUserInOrg -- pass-through tipis ke repo (S3-40), dipakai
+// middleware.RequireGroupAdminInOrg lewat handler.
+func (s *SessionService) IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error) {
+	inOrg, err := s.repo.IsUserInOrg(ctx, userID, orgID)
+	if err != nil {
+		return false, fmt.Errorf("service.IsUserInOrg: %w", err)
+	}
+	return inOrg, nil
 }
 
 func (s *SessionService) blacklist(ctx context.Context, jti string, remaining time.Duration) error {

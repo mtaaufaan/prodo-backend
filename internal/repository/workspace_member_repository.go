@@ -38,6 +38,20 @@ func (r *WorkspaceMemberRepository) GetRole(ctx context.Context, exec db.Executo
 	return role, nil
 }
 
+// GetWorkspaceOrgID mengembalikan organizations.id pemilik workspaceID
+// (S3-41, implementation_gaps.md IG-01) -- dasar scoping Group Admin di
+// middleware.RequireRole. `workspaces` BELUM di-RLS (S3-42 menyusul), tapi
+// query tetap lewat `exec` yang sama (transaksi request-scoped) supaya
+// konsisten dengan pola satu koneksi per request.
+func (r *WorkspaceMemberRepository) GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error) {
+	var orgID string
+	err := exec.QueryRow(ctx, `SELECT org_id FROM workspaces WHERE id = $1`, workspaceID).Scan(&orgID)
+	if err != nil {
+		return "", fmt.Errorf("repository.GetWorkspaceOrgID: %w", err)
+	}
+	return orgID, nil
+}
+
 // AssignRole menetapkan role user di workspace (S2-03), mencatat audit
 // trail (S2-06), dan mengirim in-app notification ke target (S2-05).
 // Atomicity SEKARANG dijamin oleh transaksi request-scoped yang dibawa

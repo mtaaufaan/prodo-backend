@@ -20,6 +20,7 @@ type workspaceMemberRepository interface {
 	GetRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
+	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -119,6 +120,16 @@ func (s *RBACService) GetMemberRole(ctx context.Context, exec db.Executor, works
 		return "", fmt.Errorf("service.GetMemberRole: set cache: %w", err)
 	}
 	return role, nil
+}
+
+// GetWorkspaceOrgID -- pass-through tipis ke repo (S3-41), dipakai
+// middleware.RequireRole untuk scoping Group Admin.
+func (s *RBACService) GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error) {
+	orgID, err := s.repo.GetWorkspaceOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return "", fmt.Errorf("service.GetWorkspaceOrgID: %w", err)
+	}
+	return orgID, nil
 }
 
 // ListMembers mengembalikan seluruh member workspace (S2-07/08 prasyarat --
