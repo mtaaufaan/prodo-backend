@@ -127,6 +127,61 @@ func (r *OrganizationRepository) Deactivate(ctx context.Context, exec db.Executo
 	return nil
 }
 
+// Reactivate mengosongkan deactivated_at (kebalikan Deactivate) -- bukan
+// task tersendiri di sprint_backlog.md (S3-04 cuma sebut deactivate), tapi
+// prasyarat langsung S3-07 (FE): panel kelola organisasi (GA Organizations.dc.html)
+// selalu punya toggle dua arah AKTIF<->NONAKTIF, sama pola S3-11 workspaces
+// yang MEMANG sudah sepasang deactivate+reactivate sejak awal. Ditemukan
+// lewat implementasi FE, dicatat sebagai IG-09-style forward-pull minimal.
+func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE organizations SET deactivated_at = NULL, updated_at = NOW()
+		WHERE id = $1 AND deactivated_at IS NOT NULL
+	`, orgID)
+	if err != nil {
+		return fmt.Errorf("repository.Reactivate: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.Reactivate: %w", domain.ErrOrganizationNotFound)
+	}
+
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.reactivated", orgID); err != nil {
+		return fmt.Errorf("repository.Reactivate: audit: %w", err)
+	}
+	return nil
+}
+
+// List mengembalikan organisasi yang TERLIHAT oleh actor (S3-07 prasyarat,
+// sama pola IG-09). Tidak ada filter WHERE eksplisit di sini -- scoping
+// (Platform Admin lihat semua, Group Admin cuma org dalam grup yang dia
+// kelola, member cuma org sendiri) SEPENUHNYA ditegakkan RLS `orgs_select`
+// (S3-42) lewat exec yang session variable-nya sudah disuntik
+// DBContextMiddleware -- query di sini polos SELECT *.
+func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]Organization, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, group_id, name, slug, deactivated_at, created_at
+		FROM organizations
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("repository.List: %w", err)
+	}
+	defer rows.Close()
+
+	orgs := make([]Organization, 0)
+	for rows.Next() {
+		var o Organization
+		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.DeactivatedAt, &o.CreatedAt); err != nil {
+			return nil, fmt.Errorf("repository.List: scan: %w", err)
+		}
+		orgs = append(orgs, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.List: %w", err)
+	}
+	return orgs, nil
+}
+
 // Delete menghapus organisasi permanen (S3-05, US-007 AC) -- HANYA kalau
 // tidak ada workspace AKTIF (archived_at IS NULL) di dalamnya. Workspace
 // yang sudah diarsipkan tidak menghalangi -- AC "semua workspace sudah
