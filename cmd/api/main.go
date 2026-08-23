@@ -131,6 +131,7 @@ func run() error {
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	invitationRepo := repository.NewInvitationRepository()
 	organizationRepo := repository.NewOrganizationRepository()
+	groupRepo := repository.NewGroupRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -143,6 +144,7 @@ func run() error {
 	organizationSvc := service.NewOrganizationService(organizationRepo)
 	workspaceRepo := repository.NewWorkspaceRepository()
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc)
+	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -158,6 +160,7 @@ func run() error {
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
+	groupHandler := handler.NewGroupHandler(groupSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -234,6 +237,10 @@ func run() error {
 	// RLS workspaces_delete yang tidak punya cabang workspace_member).
 	v1.Get("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.List)
 	v1.Delete("/workspaces/:wsId", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.Delete)
+	// S3-20, US-009b. TANPA requireOrgAdmin/RequireRole -- target scope-nya
+	// groupID (bukan :wsId/:orgId), dan aktor sah (Project Manager)
+	// platform_role-nya "member" biasa. Otorisasi penuh di GroupService.
+	v1.Get("/groups/:groupId/accounts/search", jwtAuth, dbCtx, groupHandler.SearchAccounts)
 
 	serverErr := make(chan error, 1)
 	go func() {
