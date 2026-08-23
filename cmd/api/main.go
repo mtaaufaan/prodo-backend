@@ -210,9 +210,11 @@ func run() error {
 	// query lewat exec. Beda dari S3-02..06 (sebelum S3-42) yang belum pakai
 	// dbCtx sama sekali karena organizations belum ber-RLS saat itu.
 	requireOrgAdmin := middleware.RequirePlatformRole(accountSvc, "platform_admin", "group_admin")
+	v1.Get("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.List)
 	v1.Post("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Create)
 	v1.Put("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Update)
 	v1.Put("/organizations/:id/deactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Deactivate)
+	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
 	// S3-09, US-008. Otorisasi sama seperti organizations (reuse

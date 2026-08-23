@@ -18,10 +18,14 @@ type fakeOrganizationRepo struct {
 	createErr     error
 	updateErr     error
 	deactivateErr error
+	reactivateErr error
 	deleteErr     error
 
 	summaryResult *repository.Summary
 	summaryErr    error
+
+	listResult []repository.Organization
+	listErr    error
 }
 
 func (f *fakeOrganizationRepo) IsGroupAdminOfGroup(_ context.Context, _ db.Executor, userID, groupID string) (bool, error) {
@@ -52,8 +56,16 @@ func (f *fakeOrganizationRepo) Deactivate(_ context.Context, _ db.Executor, _, _
 	return f.deactivateErr
 }
 
+func (f *fakeOrganizationRepo) Reactivate(_ context.Context, _ db.Executor, _, _, _ string) error {
+	return f.reactivateErr
+}
+
 func (f *fakeOrganizationRepo) Delete(_ context.Context, _ db.Executor, _, _, _ string) error {
 	return f.deleteErr
+}
+
+func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor) ([]repository.Organization, error) {
+	return f.listResult, f.listErr
 }
 
 func (f *fakeOrganizationRepo) GetSummary(_ context.Context, _ db.Executor, _ string) (*repository.Summary, error) {
