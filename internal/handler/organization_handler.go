@@ -115,6 +115,67 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": orgID, "name": req.Name, "slug": req.Slug}))
 }
 
+type updateSettingsRequest struct {
+	DefaultLanguage string `json:"default_language"`
+}
+
+// UpdateSettings menangani PUT /organizations/:id/settings (S3-30, US-010).
+func (h *OrganizationHandler) UpdateSettings(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.UpdateSettings dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.UpdateSettings dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	var req updateSettingsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+
+	if err := h.orgs.UpdateSettings(c.Context(), exec, orgID, req.DefaultLanguage, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal mengubah pengaturan organisasi")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": orgID, "default_language": req.DefaultLanguage}))
+}
+
+type updateStorageQuotaRequest struct {
+	StorageQuotaBytes int64 `json:"storage_quota_bytes"`
+}
+
+// UpdateStorageQuota menangani PUT /organizations/:id/storage-quota
+// (S3-34, US-011).
+func (h *OrganizationHandler) UpdateStorageQuota(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.UpdateStorageQuota dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.UpdateStorageQuota dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	var req updateStorageQuotaRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+
+	if err := h.orgs.UpdateStorageQuota(c.Context(), exec, orgID, req.StorageQuotaBytes, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal mengubah kuota storage")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": orgID, "storage_quota_bytes": req.StorageQuotaBytes}))
+}
+
 // Deactivate menangani PUT /organizations/:id/deactivate (S3-04).
 func (h *OrganizationHandler) Deactivate(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -176,12 +237,15 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 	for i := range orgs {
 		o := &orgs[i]
 		data[i] = fiber.Map{
-			"id":             o.ID,
-			"group_id":       o.GroupID,
-			"name":           o.Name,
-			"slug":           o.Slug,
-			"deactivated_at": o.DeactivatedAt,
-			"created_at":     o.CreatedAt,
+			"id":                  o.ID,
+			"group_id":            o.GroupID,
+			"name":                o.Name,
+			"slug":                o.Slug,
+			"default_language":    o.DefaultLanguage,
+			"storage_quota_bytes": o.StorageQuotaBytes,
+			"storage_max_bytes":   o.StorageMaxBytes,
+			"deactivated_at":      o.DeactivatedAt,
+			"created_at":          o.CreatedAt,
 		}
 	}
 	return c.JSON(response.Success(data))
@@ -244,6 +308,8 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrSlugAlreadyExists):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("SLUG_ALREADY_EXISTS", "Slug sudah dipakai organisasi lain", nil))
+	case errors.Is(err, domain.ErrStorageQuotaExceedsMax):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STORAGE_QUOTA_EXCEEDS_MAX", "Kuota melebihi batas maksimum yang ditetapkan Platform Admin", nil))
 	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
 	default:

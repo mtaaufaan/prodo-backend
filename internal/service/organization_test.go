@@ -17,6 +17,8 @@ type fakeOrganizationRepo struct {
 	createdOrg    *repository.Organization
 	createErr     error
 	updateErr     error
+	settingsErr   error
+	quotaErr      error
 	deactivateErr error
 	reactivateErr error
 	deleteErr     error
@@ -50,6 +52,14 @@ func (f *fakeOrganizationRepo) Create(_ context.Context, _ db.Executor, groupID,
 
 func (f *fakeOrganizationRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
 	return f.updateErr
+}
+
+func (f *fakeOrganizationRepo) UpdateSettings(_ context.Context, _ db.Executor, _, _, _, _ string) error {
+	return f.settingsErr
+}
+
+func (f *fakeOrganizationRepo) UpdateStorageQuota(_ context.Context, _ db.Executor, _ string, _ int64, _, _ string) error {
+	return f.quotaErr
 }
 
 func (f *fakeOrganizationRepo) Deactivate(_ context.Context, _ db.Executor, _, _, _ string) error {
@@ -226,6 +236,44 @@ func TestOrganizationService_DeactivateOrganization_GroupAdminNotAssigned_Forbid
 	svc := NewOrganizationService(repo)
 
 	err := svc.DeactivateOrganization(context.Background(), nil, "org-1", "ga-1", "group_admin")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
+	}
+}
+
+func TestOrganizationService_UpdateSettings_Success(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
+	svc := NewOrganizationService(repo)
+
+	if err := svc.UpdateSettings(context.Background(), nil, "org-1", "en", "pa-1", "platform_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOrganizationService_UpdateSettings_InvalidLanguage(t *testing.T) {
+	svc := NewOrganizationService(&fakeOrganizationRepo{})
+
+	err := svc.UpdateSettings(context.Background(), nil, "org-1", "fr", "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestOrganizationService_UpdateStorageQuota_ExceedsMax(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, quotaErr: domain.ErrStorageQuotaExceedsMax}
+	svc := NewOrganizationService(repo)
+
+	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 999999999999, "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrStorageQuotaExceedsMax) {
+		t.Errorf("err = %v, want wrapped domain.ErrStorageQuotaExceedsMax", err)
+	}
+}
+
+func TestOrganizationService_UpdateStorageQuota_GroupAdminNotAssigned_Forbidden(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
+	svc := NewOrganizationService(repo)
+
+	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 1024, "ga-1", "group_admin")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
