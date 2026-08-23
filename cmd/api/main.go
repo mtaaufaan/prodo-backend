@@ -132,6 +132,7 @@ func run() error {
 	invitationRepo := repository.NewInvitationRepository()
 	organizationRepo := repository.NewOrganizationRepository()
 	groupRepo := repository.NewGroupRepository()
+	projectMemberRepo := repository.NewProjectMemberRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -145,6 +146,7 @@ func run() error {
 	workspaceRepo := repository.NewWorkspaceRepository()
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
+	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -161,6 +163,7 @@ func run() error {
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
 	groupHandler := handler.NewGroupHandler(groupSvc, logger)
+	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
@@ -241,6 +244,17 @@ func run() error {
 	// groupID (bukan :wsId/:orgId), dan aktor sah (Project Manager)
 	// platform_role-nya "member" biasa. Otorisasi penuh di GroupService.
 	v1.Get("/groups/:groupId/accounts/search", jwtAuth, dbCtx, groupHandler.SearchAccounts)
+	// S3-21/22/23/24, US-009b (implementation_gaps.md IG-17, forward-pull
+	// projects/project_members). TANPA middleware role -- target scope-nya
+	// projectID, aktor sah (AW/PM) platform_role-nya "member" biasa.
+	// Otorisasi penuh di ProjectMemberService.
+	v1.Get("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.ListMembers)
+	v1.Post("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.AddMember)
+	v1.Put("/projects/:id/members/:userId/role", jwtAuth, dbCtx, projectMemberHandler.UpdateMemberRole)
+	v1.Delete("/projects/:id/members/:userId", jwtAuth, dbCtx, projectMemberHandler.RemoveMember)
+	// S3-25/27, US-009c. GA/PA saja (bukan PM seperti S3-20) -- GA sudah
+	// punya visibility penuh lintas org lewat RLS pm_select.
+	v1.Get("/groups/:groupId/cross-org-memberships", jwtAuth, dbCtx, requireOrgAdmin, projectMemberHandler.ListCrossOrgMemberships)
 
 	serverErr := make(chan error, 1)
 	go func() {
