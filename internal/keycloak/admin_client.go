@@ -204,9 +204,9 @@ func (c *httpAdminClient) SetPassword(ctx context.Context, keycloakUserID, newPa
 	if err != nil {
 		return fmt.Errorf("keycloak.SetPassword: encode credential: %w", err)
 	}
-	if err := c.doJSON(ctx, tok, http.MethodPut,
+	if err := c.doJSON(ctx, tok,
 		fmt.Sprintf("%s/admin/realms/%s/users/%s/reset-password", c.baseURL, c.realm, keycloakUserID),
-		credPayload, http.StatusNoContent); err != nil {
+		credPayload); err != nil {
 		return fmt.Errorf("keycloak.SetPassword: reset-password: %w", err)
 	}
 
@@ -220,9 +220,9 @@ func (c *httpAdminClient) SetPassword(ctx context.Context, keycloakUserID, newPa
 	if err != nil {
 		return fmt.Errorf("keycloak.SetPassword: encode requiredActions: %w", err)
 	}
-	if err := c.doJSON(ctx, tok, http.MethodPut,
+	if err := c.doJSON(ctx, tok,
 		fmt.Sprintf("%s/admin/realms/%s/users/%s", c.baseURL, c.realm, keycloakUserID),
-		actionsPayload, http.StatusNoContent); err != nil {
+		actionsPayload); err != nil {
 		return fmt.Errorf("keycloak.SetPassword: update requiredActions: %w", err)
 	}
 
@@ -242,9 +242,9 @@ func (c *httpAdminClient) EnableUser(ctx context.Context, keycloakUserID string)
 	if err != nil {
 		return fmt.Errorf("keycloak.EnableUser: encode payload: %w", err)
 	}
-	if err := c.doJSON(ctx, tok, http.MethodPut,
+	if err := c.doJSON(ctx, tok,
 		fmt.Sprintf("%s/admin/realms/%s/users/%s", c.baseURL, c.realm, keycloakUserID),
-		payload, http.StatusNoContent); err != nil {
+		payload); err != nil {
 		return fmt.Errorf("keycloak.EnableUser: %w", err)
 	}
 	return nil
@@ -260,17 +260,19 @@ func (c *httpAdminClient) SetUserAttributes(ctx context.Context, keycloakUserID 
 	if err != nil {
 		return fmt.Errorf("keycloak.SetUserAttributes: encode payload: %w", err)
 	}
-	if err := c.doJSON(ctx, tok, http.MethodPut,
+	if err := c.doJSON(ctx, tok,
 		fmt.Sprintf("%s/admin/realms/%s/users/%s", c.baseURL, c.realm, keycloakUserID),
-		payload, http.StatusNoContent); err != nil {
+		payload); err != nil {
 		return fmt.Errorf("keycloak.SetUserAttributes: %w", err)
 	}
 	return nil
 }
 
-// doJSON adalah helper request PUT/POST JSON umum dengan Authorization Bearer.
-func (c *httpAdminClient) doJSON(ctx context.Context, token, method, targetURL string, body []byte, wantStatus int) error {
-	req, err := http.NewRequestWithContext(ctx, method, targetURL, bytes.NewReader(body))
+// doJSON adalah helper request PUT JSON umum dengan Authorization Bearer --
+// method dan status sukses yang diharapkan di-hardcode (bukan parameter)
+// karena seluruh caller saat ini selalu PUT + 204 No Content (gocritic unparam).
+func (c *httpAdminClient) doJSON(ctx context.Context, token, targetURL string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -283,7 +285,7 @@ func (c *httpAdminClient) doJSON(ctx context.Context, token, method, targetURL s
 	}
 	defer resp.Body.Close() //nolint:errcheck // close error on a read-only response body is not actionable
 
-	if resp.StatusCode != wantStatus {
+	if resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body) //nolint:errcheck // best-effort untuk pesan error
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
