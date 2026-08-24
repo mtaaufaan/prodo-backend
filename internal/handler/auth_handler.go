@@ -135,6 +135,10 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		case errors.Is(err, domain.ErrAccountInactive):
 			return c.Status(fiber.StatusForbidden).JSON(response.Error("ACCOUNT_INACTIVE",
 				"Akun belum aktif. Periksa email undangan Anda atau hubungi administrator.", nil))
+		case errors.Is(err, domain.ErrAccountSuspended):
+			// S4P-02, US-067.
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("ACCOUNT_SUSPENDED",
+				"Akun ini telah dinonaktifkan. Hubungi Platform Admin.", nil))
 		case errors.Is(err, domain.ErrInvalidOTP):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OTP", "Kode OTP tidak valid.", nil))
 		case errors.Is(err, domain.ErrIPNotAllowed):
@@ -213,6 +217,9 @@ func (h *AuthHandler) CompletePlatformAdminMFASetup(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Email atau password tidak valid.", nil))
 		case errors.Is(err, domain.ErrAccountInactive):
 			return c.Status(fiber.StatusForbidden).JSON(response.Error("ACCOUNT_INACTIVE", "Akun belum aktif.", nil))
+		case errors.Is(err, domain.ErrAccountSuspended):
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("ACCOUNT_SUSPENDED",
+				"Akun ini telah dinonaktifkan. Hubungi Platform Admin.", nil))
 		case errors.Is(err, domain.ErrInvalidOTP):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OTP", "Kode OTP tidak valid.", nil))
 		case errors.Is(err, domain.ErrIPNotAllowed):

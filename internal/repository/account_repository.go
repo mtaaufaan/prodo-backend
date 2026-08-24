@@ -300,6 +300,7 @@ type LoginUserRecord struct {
 	DisplayName    string
 	PlatformRole   string
 	IsActive       bool
+	SuspendedAt    *time.Time
 	AvatarURL      *string
 	KeycloakUserID string
 }
@@ -318,13 +319,13 @@ type LoginUserRecord struct {
 func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) (*LoginUserRecord, error) {
 	u := &LoginUserRecord{}
 	err := r.db.QueryRow(ctx, `
-		SELECT u.id, u.email, u.display_name, u.platform_role, u.is_active, u.avatar_url, uap.provider_sub
+		SELECT u.id, u.email, u.display_name, u.platform_role, u.is_active, u.suspended_at, u.avatar_url, uap.provider_sub
 		FROM users u
 		JOIN user_auth_providers uap ON uap.user_id = u.id
 		WHERE u.email = $1 AND u.deleted_at IS NULL
 		ORDER BY uap.created_at
 		LIMIT 1
-	`, email).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PlatformRole, &u.IsActive, &u.AvatarURL, &u.KeycloakUserID)
+	`, email).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PlatformRole, &u.IsActive, &u.SuspendedAt, &u.AvatarURL, &u.KeycloakUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.FindUserForLogin: %w", domain.ErrUserNotFound)
@@ -540,6 +541,221 @@ func (r *AccountRepository) RegenerateInvitationToken(ctx context.Context, targe
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("repository.RegenerateInvitationToken: commit tx: %w", err)
+	}
+	return nil
+}
+
+// SuspendGroupAdmin menandai users.suspended_at (S4P-02, US-067) -- HANYA
+// untuk target platform_role='group_admin'. is_active TIDAK disentuh --
+// suspend adalah state terpisah dari status onboarding (domain.
+// ErrAccountSuspended), supaya reaktivasi tidak memaksa GA mengulang alur
+// invite+aktivasi dari nol. 0 baris terpengaruh (target bukan GA atau tidak
+// ada) -> domain.ErrUserNotFound.
+func (r *AccountRepository) SuspendGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.SuspendGroupAdmin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE users SET suspended_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND platform_role = 'group_admin'
+	`, targetUserID)
+	if err != nil {
+		return fmt.Errorf("repository.SuspendGroupAdmin: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.SuspendGroupAdmin: %w", domain.ErrUserNotFound)
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.suspended", targetUserID); err != nil {
+		return fmt.Errorf("repository.SuspendGroupAdmin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.SuspendGroupAdmin: commit tx: %w", err)
+	}
+	return nil
+}
+
+// ReactivateGroupAdmin mengosongkan users.suspended_at (S4P-02, US-067) --
+// GA langsung bisa login lagi tanpa mengulang aktivasi (is_active tidak
+// pernah disentuh oleh suspend, jadi tetap TRUE dari sebelumnya).
+func (r *AccountRepository) ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.ReactivateGroupAdmin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE users SET suspended_at = NULL, updated_at = NOW()
+		WHERE id = $1 AND platform_role = 'group_admin'
+	`, targetUserID)
+	if err != nil {
+		return fmt.Errorf("repository.ReactivateGroupAdmin: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.ReactivateGroupAdmin: %w", domain.ErrUserNotFound)
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.reactivated", targetUserID); err != nil {
+		return fmt.Errorf("repository.ReactivateGroupAdmin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.ReactivateGroupAdmin: commit tx: %w", err)
+	}
+	return nil
+}
+
+// GetPASessionIdleTimeoutSeconds membaca setting global session timeout
+// Platform Admin (S4P-18, satu baris singleton platform_settings id=1)
+// dalam detik -- dipakai FE PlatformSecuritySettings menampilkan nilai saat
+// ini di form.
+func (r *AccountRepository) GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error) {
+	var seconds int
+	if err := r.db.QueryRow(ctx, `
+		SELECT EXTRACT(EPOCH FROM pa_session_idle_timeout)::int FROM platform_settings WHERE id = 1
+	`).Scan(&seconds); err != nil {
+		return 0, fmt.Errorf("repository.GetPASessionIdleTimeoutSeconds: %w", err)
+	}
+	return seconds, nil
+}
+
+// SetPASessionIdleTimeoutSeconds mengubah setting global session timeout
+// Platform Admin (S4P-18) -- berlaku untuk SEMUA akun Platform Admin (bukan
+// per-akun, beda dari IP allowlist), langsung tanpa redeploy karena dibaca
+// dinamis oleh SessionRepository.TouchSessionFixed lewat subquery.
+func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, seconds int, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE platform_settings SET pa_session_idle_timeout = make_interval(secs => $1), updated_at = NOW() WHERE id = 1
+	`, seconds); err != nil {
+		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: update: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		VALUES ($1, 'platform_admin', 'platform_settings.session_timeout_changed', 'platform_settings', NULL)
+	`, actorUserID); err != nil {
+		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: commit tx: %w", err)
+	}
+	return nil
+}
+
+// IPAllowlistEntry -- satu baris platform_admin_ip_allowlist untuk respons
+// GET /platform/security-settings (S4P-18).
+type IPAllowlistEntry struct {
+	ID        string
+	CIDR      string
+	CreatedAt time.Time
+}
+
+// ListIPAllowlist mengembalikan entry allowlist milik SATU akun Platform
+// Admin (S4P-18) -- self-service per akun, bukan lintas akun (beda dari
+// session timeout yang global).
+func (r *AccountRepository) ListIPAllowlist(ctx context.Context, userID string) ([]IPAllowlistEntry, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, cidr::text, created_at
+		FROM platform_admin_ip_allowlist
+		WHERE user_id = $1
+		ORDER BY created_at
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListIPAllowlist: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []IPAllowlistEntry
+	for rows.Next() {
+		var e IPAllowlistEntry
+		if err := rows.Scan(&e.ID, &e.CIDR, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListIPAllowlist: scan: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListIPAllowlist: rows: %w", err)
+	}
+	return entries, nil
+}
+
+// AddIPAllowlistEntry menambah satu entry CIDR untuk userID (S4P-18).
+// domain.ErrInvalidCIDR kalau cidr bukan notasi valid -- pengaman kedua,
+// service layer sudah validasi lewat net.ParseCIDR sebelum sampai sini.
+func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (id string, err error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("repository.AddIPAllowlistEntry: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO platform_admin_ip_allowlist (user_id, cidr) VALUES ($1, $2::cidr)
+		RETURNING id
+	`, userID, cidr).Scan(&id)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			return "", fmt.Errorf("repository.AddIPAllowlistEntry: %w", domain.ErrInvalidCIDR)
+		}
+		return "", fmt.Errorf("repository.AddIPAllowlistEntry: insert: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		VALUES ($1, 'platform_admin', 'ip_allowlist.added', 'ip_allowlist', $2)
+	`, actorUserID, id); err != nil {
+		return "", fmt.Errorf("repository.AddIPAllowlistEntry: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("repository.AddIPAllowlistEntry: commit tx: %w", err)
+	}
+	return id, nil
+}
+
+// DeleteIPAllowlistEntry menghapus satu entry -- HANYA kalau benar milik
+// userID (S4P-18), sama pola ownership-check-di-WHERE seperti
+// SessionRepository.RevokeSession, supaya satu PA tidak bisa menebak/hapus
+// entry PA lain lewat ID.
+func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.DeleteIPAllowlistEntry: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, `
+		DELETE FROM platform_admin_ip_allowlist WHERE id = $1 AND user_id = $2
+	`, entryID, userID)
+	if err != nil {
+		return fmt.Errorf("repository.DeleteIPAllowlistEntry: delete: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.DeleteIPAllowlistEntry: %w", domain.ErrIPAllowlistEntryNotFound)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		VALUES ($1, 'platform_admin', 'ip_allowlist.removed', 'ip_allowlist', $2)
+	`, actorUserID, entryID); err != nil {
+		return fmt.Errorf("repository.DeleteIPAllowlistEntry: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.DeleteIPAllowlistEntry: commit tx: %w", err)
 	}
 	return nil
 }

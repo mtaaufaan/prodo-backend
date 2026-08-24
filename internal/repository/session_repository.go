@@ -152,7 +152,12 @@ func (r *SessionRepository) TouchSession(ctx context.Context, jti string, idleTi
 // last_active_at TETAP diperbarui (dipakai murni untuk tampilan "terakhir
 // aktif" di GET /auth/sessions), tapi validitas sesi dicek terhadap
 // created_at yang TIDAK PERNAH berubah.
-func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string, fixedTimeout time.Duration) (valid bool, err error) {
+//
+// Timeout dibaca langsung dari platform_settings (S4P-18, singleton id=1)
+// lewat subquery -- BUKAN parameter Go lagi seperti sebelum S4 H3, supaya
+// perubahan lewat PlatformSecuritySettings langsung berlaku tanpa redeploy
+// (env var PA_SESSION_IDLE_TIMEOUT dihapus, S4P-15 tergantikan penuh).
+func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string) (valid bool, err error) {
 	var id string
 	err = r.db.QueryRow(ctx, `
 		UPDATE user_sessions
@@ -160,9 +165,9 @@ func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string, f
 		WHERE jti = $1
 		  AND revoked_at IS NULL
 		  AND expires_at > NOW()
-		  AND created_at > NOW() - $2::interval
+		  AND created_at > NOW() - (SELECT pa_session_idle_timeout FROM platform_settings WHERE id = 1)
 		RETURNING id
-	`, jti, fixedTimeout.String()).Scan(&id)
+	`, jti).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil

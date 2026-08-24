@@ -46,7 +46,7 @@ func (f *stubSessionRepository) TouchSession(_ context.Context, jti string, _ ti
 	return f.touchValid, f.touchErr
 }
 
-func (f *stubSessionRepository) TouchSessionFixed(_ context.Context, jti string, _ time.Duration) (bool, error) {
+func (f *stubSessionRepository) TouchSessionFixed(_ context.Context, jti string) (bool, error) {
 	f.touchedJTI = jti
 	return f.touchValid, f.touchErr
 }
@@ -91,7 +91,7 @@ func (c *stubCache) Close() error { return nil }
 
 func TestSessionService_RecordSession_DecodesJTIAndExp(t *testing.T) {
 	repo := &stubSessionRepository{}
-	svc := NewSessionService(repo, newStubCache(), 10*time.Minute)
+	svc := NewSessionService(repo, newStubCache())
 
 	token := testAccessTokenJWT(t, "jti-123")
 	err := svc.RecordSession(context.Background(), "user-1", token, "Mozilla/5.0 Chrome/125.0 Safari/537.36", "10.0.0.1")
@@ -117,7 +117,7 @@ func TestSessionService_ListSessions_MarksCurrent(t *testing.T) {
 		{JTI: "jti-a", DeviceInfo: repository.DeviceInfo{Browser: "Chrome 125", OS: "Windows", IP: "1.1.1.1"}},
 		{JTI: "jti-b", DeviceInfo: repository.DeviceInfo{Browser: "Safari 17", OS: "macOS", IP: "2.2.2.2"}},
 	}}
-	svc := NewSessionService(repo, newStubCache(), 10*time.Minute)
+	svc := NewSessionService(repo, newStubCache())
 
 	out, err := svc.ListSessions(context.Background(), "user-1", "jti-b")
 	if err != nil {
@@ -137,7 +137,7 @@ func TestSessionService_ListSessions_MarksCurrent(t *testing.T) {
 func TestSessionService_IsValidSession_Blacklisted(t *testing.T) {
 	c := newStubCache()
 	c.store[blacklistKey("jti-revoked")] = "1"
-	svc := NewSessionService(&stubSessionRepository{touchValid: true}, c, 10*time.Minute)
+	svc := NewSessionService(&stubSessionRepository{touchValid: true}, c)
 
 	valid, err := svc.IsValidSession(context.Background(), "jti-revoked", "")
 	if err != nil {
@@ -150,7 +150,7 @@ func TestSessionService_IsValidSession_Blacklisted(t *testing.T) {
 
 func TestSessionService_IsValidSession_NotBlacklisted_DelegatesToTouchSession(t *testing.T) {
 	repo := &stubSessionRepository{touchValid: true}
-	svc := NewSessionService(repo, newStubCache(), 10*time.Minute)
+	svc := NewSessionService(repo, newStubCache())
 
 	valid, err := svc.IsValidSession(context.Background(), "jti-fresh", "")
 	if err != nil {
@@ -168,7 +168,7 @@ func TestSessionService_IsValidSession_IdleTimeout(t *testing.T) {
 	// TouchSession repo-level yang menegakkan idle timeout (S1-28) --
 	// diuji di sini lewat stub yang mensimulasikan repo bilang "tidak
 	// valid" (baris tidak ke-update karena WHERE clause idle gagal).
-	svc := NewSessionService(&stubSessionRepository{touchValid: false}, newStubCache(), 10*time.Minute)
+	svc := NewSessionService(&stubSessionRepository{touchValid: false}, newStubCache())
 
 	valid, err := svc.IsValidSession(context.Background(), "jti-idle", "")
 	if err != nil {
@@ -183,7 +183,7 @@ func TestSessionService_IsValidSession_PlatformAdmin_UsesFixedNonSlidingTimeout(
 	// S4P-14/15 (implementation_gaps.md IG-20): Platform Admin harus lewat
 	// TouchSessionFixed (non-sliding), BUKAN TouchSession biasa.
 	repo := &stubSessionRepository{touchValid: true}
-	svc := NewSessionService(repo, newStubCache(), 10*time.Minute)
+	svc := NewSessionService(repo, newStubCache())
 
 	valid, err := svc.IsValidSession(context.Background(), "jti-pa", "platform_admin")
 	if err != nil {
@@ -198,7 +198,7 @@ func TestSessionService_IsValidSession_PlatformAdmin_UsesFixedNonSlidingTimeout(
 }
 
 func TestSessionService_IsValidSession_PlatformAdmin_FixedTimeoutExpired(t *testing.T) {
-	svc := NewSessionService(&stubSessionRepository{touchValid: false}, newStubCache(), 10*time.Minute)
+	svc := NewSessionService(&stubSessionRepository{touchValid: false}, newStubCache())
 
 	valid, err := svc.IsValidSession(context.Background(), "jti-pa-idle", "platform_admin")
 	if err != nil {
@@ -212,7 +212,7 @@ func TestSessionService_IsValidSession_PlatformAdmin_FixedTimeoutExpired(t *test
 func TestSessionService_RevokeSession_AddsToBlacklist(t *testing.T) {
 	repo := &stubSessionRepository{revokeRemaining: 5 * time.Minute}
 	c := newStubCache()
-	svc := NewSessionService(repo, c, 10*time.Minute)
+	svc := NewSessionService(repo, c)
 
 	if err := svc.RevokeSession(context.Background(), "user-1", "jti-x"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -225,7 +225,7 @@ func TestSessionService_RevokeSession_AddsToBlacklist(t *testing.T) {
 func TestSessionService_RevokeSession_AlreadyExpired_SkipsBlacklist(t *testing.T) {
 	repo := &stubSessionRepository{revokeRemaining: -1 * time.Second}
 	c := newStubCache()
-	svc := NewSessionService(repo, c, 10*time.Minute)
+	svc := NewSessionService(repo, c)
 
 	if err := svc.RevokeSession(context.Background(), "user-1", "jti-x"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -241,7 +241,7 @@ func TestSessionService_RevokeAllSessions_BlacklistsEach(t *testing.T) {
 		{JTI: "jti-2", Remaining: 2 * time.Minute},
 	}}
 	c := newStubCache()
-	svc := NewSessionService(repo, c, 10*time.Minute)
+	svc := NewSessionService(repo, c)
 
 	if err := svc.RevokeAllSessions(context.Background(), "user-1", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)

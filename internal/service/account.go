@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"go.uber.org/zap"
@@ -29,7 +30,26 @@ type accountRepository interface {
 	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
 	RegenerateInvitationToken(ctx context.Context, targetUserID, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error
 	ListGroupAdmins(ctx context.Context, limit, offset int) ([]repository.GroupAdminSummary, int, error)
+
+	// SuspendGroupAdmin/ReactivateGroupAdmin -- S4P-02, US-067.
+	SuspendGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
+	ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
+
+	// GetPASessionIdleTimeoutSeconds/SetPASessionIdleTimeoutSeconds --
+	// S4P-18, satu setting global untuk seluruh akun Platform Admin.
+	GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error)
+	SetPASessionIdleTimeoutSeconds(ctx context.Context, seconds int, actorUserID string) error
+
+	// ListIPAllowlist/AddIPAllowlistEntry/DeleteIPAllowlistEntry -- S4P-18,
+	// self-service per akun Platform Admin.
+	ListIPAllowlist(ctx context.Context, userID string) ([]repository.IPAllowlistEntry, error)
+	AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (id string, err error)
+	DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error
 }
+
+// minPASessionIdleTimeout -- US-070 AC: "dapat dikonfigurasi ... minimum 10
+// menit" (S4P-18).
+const minPASessionIdleTimeout = 10 * time.Minute
 
 type AccountService struct {
 	repo     accountRepository
@@ -200,6 +220,80 @@ func (s *AccountService) GetDisplayName(ctx context.Context, userID string) (str
 		return "", fmt.Errorf("service.GetDisplayName: %w", err)
 	}
 	return contact.DisplayName, nil
+}
+
+// SuspendGroupAdmin menonaktifkan akun Group Admin (S4P-02, US-067) --
+// tidak menghapus/mengubah data lain, murni memblokir login sampai
+// direaktivasi.
+func (s *AccountService) SuspendGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	if err := s.repo.SuspendGroupAdmin(ctx, targetUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.SuspendGroupAdmin: %w", err)
+	}
+	return nil
+}
+
+// ReactivateGroupAdmin mengaktifkan kembali akun Group Admin yang
+// sebelumnya disuspend (S4P-02, US-067).
+func (s *AccountService) ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	if err := s.repo.ReactivateGroupAdmin(ctx, targetUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.ReactivateGroupAdmin: %w", err)
+	}
+	return nil
+}
+
+// GetPASessionIdleTimeoutSeconds -- S4P-18, dipakai FE PlatformSecuritySettings
+// menampilkan nilai saat ini.
+func (s *AccountService) GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error) {
+	seconds, err := s.repo.GetPASessionIdleTimeoutSeconds(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("service.GetPASessionIdleTimeoutSeconds: %w", err)
+	}
+	return seconds, nil
+}
+
+// SetPASessionIdleTimeout mengubah setting global session timeout Platform
+// Admin (S4P-18) -- domain.ErrSessionTimeoutTooShort kalau di bawah 10 menit
+// (US-070 AC).
+func (s *AccountService) SetPASessionIdleTimeout(ctx context.Context, seconds int, actorUserID string) error {
+	if time.Duration(seconds)*time.Second < minPASessionIdleTimeout {
+		return fmt.Errorf("service.SetPASessionIdleTimeout: %w", domain.ErrSessionTimeoutTooShort)
+	}
+	if err := s.repo.SetPASessionIdleTimeoutSeconds(ctx, seconds, actorUserID); err != nil {
+		return fmt.Errorf("service.SetPASessionIdleTimeout: %w", err)
+	}
+	return nil
+}
+
+// ListIPAllowlist -- S4P-18, entry allowlist milik satu akun Platform Admin.
+func (s *AccountService) ListIPAllowlist(ctx context.Context, userID string) ([]repository.IPAllowlistEntry, error) {
+	entries, err := s.repo.ListIPAllowlist(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListIPAllowlist: %w", err)
+	}
+	return entries, nil
+}
+
+// AddIPAllowlistEntry -- S4P-18. Validasi format CIDR di sini (stdlib
+// net.ParseCIDR) SEBELUM menyentuh DB -- repository juga menjaga lewat cast
+// Postgres ($2::cidr) sebagai pengaman kedua, tapi pesan error yang jelas
+// (domain.ErrInvalidCIDR) lebih murah divalidasi di Go dulu.
+func (s *AccountService) AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (string, error) {
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return "", fmt.Errorf("service.AddIPAllowlistEntry: %w", domain.ErrInvalidCIDR)
+	}
+	id, err := s.repo.AddIPAllowlistEntry(ctx, userID, cidr, actorUserID)
+	if err != nil {
+		return "", fmt.Errorf("service.AddIPAllowlistEntry: %w", err)
+	}
+	return id, nil
+}
+
+// DeleteIPAllowlistEntry -- S4P-18.
+func (s *AccountService) DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error {
+	if err := s.repo.DeleteIPAllowlistEntry(ctx, userID, entryID, actorUserID); err != nil {
+		return fmt.Errorf("service.DeleteIPAllowlistEntry: %w", err)
+	}
+	return nil
 }
 
 // generateActivationToken menghasilkan token acak (256-bit) untuk dikirim
