@@ -23,7 +23,7 @@ type sessionRepository interface {
 	CreateSession(ctx context.Context, userID, jti string, device repository.DeviceInfo, expiresAt time.Time) error
 	ListActiveSessions(ctx context.Context, userID string) ([]repository.Session, error)
 	TouchSession(ctx context.Context, jti string, idleTimeout time.Duration) (valid bool, err error)
-	TouchSessionFixed(ctx context.Context, jti string, fixedTimeout time.Duration) (valid bool, err error)
+	TouchSessionFixed(ctx context.Context, jti string) (valid bool, err error)
 	RevokeSession(ctx context.Context, userID, jti string) (remaining time.Duration, err error)
 	RevokeAllSessions(ctx context.Context, userID, exceptJTI string) ([]repository.RevokedSession, error)
 	IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error)
@@ -34,13 +34,12 @@ type sessionRepository interface {
 // timeout, revoke satu/semua sesi dengan Redis blacklist untuk penolakan
 // cepat tanpa query DB (docs/DATABASE_SCHEMA.md §5.3).
 type SessionService struct {
-	repo          sessionRepository
-	cache         cache.Cache
-	paIdleTimeout time.Duration
+	repo  sessionRepository
+	cache cache.Cache
 }
 
-func NewSessionService(repo sessionRepository, c cache.Cache, paIdleTimeout time.Duration) *SessionService {
-	return &SessionService{repo: repo, cache: c, paIdleTimeout: paIdleTimeout}
+func NewSessionService(repo sessionRepository, c cache.Cache) *SessionService {
+	return &SessionService{repo: repo, cache: c}
 }
 
 // blacklistKey -- satu key per jti, TTL = sisa masa berlaku token (lewat
@@ -115,8 +114,9 @@ func (s *SessionService) ListSessions(ctx context.Context, userID, currentJTI st
 // platformRole menentukan kebijakan sesi mana yang berlaku (S4P-14/15,
 // implementation_gaps.md IG-20): Platform Admin pakai TouchSessionFixed
 // (non-sliding, sesuai desain "sliding disabled") dengan timeout jauh
-// lebih ketat (paIdleTimeout); role lain TETAP pakai TouchSession sliding
-// 30 menit seperti semula -- TIDAK terpengaruh perubahan ini.
+// lebih ketat, dibaca dinamis dari platform_settings (S4P-18); role lain
+// TETAP pakai TouchSession sliding 30 menit seperti semula -- TIDAK
+// terpengaruh perubahan ini.
 func (s *SessionService) IsValidSession(ctx context.Context, jti, platformRole string) (bool, error) {
 	_, err := s.cache.Get(ctx, blacklistKey(jti))
 	if err == nil {
@@ -127,7 +127,7 @@ func (s *SessionService) IsValidSession(ctx context.Context, jti, platformRole s
 	}
 
 	if platformRole == "platform_admin" {
-		valid, err := s.repo.TouchSessionFixed(ctx, jti, s.paIdleTimeout)
+		valid, err := s.repo.TouchSessionFixed(ctx, jti)
 		if err != nil {
 			return false, fmt.Errorf("service.IsValidSession: %w", err)
 		}

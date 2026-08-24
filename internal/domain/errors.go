@@ -41,6 +41,14 @@ var (
 	// (belum menyelesaikan alur aktivasi US-073) (S1-14).
 	ErrAccountInactive = errors.New("account is not active")
 
+	// ErrAccountSuspended dikembalikan saat users.suspended_at TERISI
+	// (S4P-02, US-067) -- SENGAJA kolom terpisah dari is_active: akun yang
+	// baru diundang (belum pernah aktif) dan akun yang disuspend (pernah
+	// aktif, sengaja dinonaktifkan PA) butuh pesan berbeda ("selesaikan
+	// aktivasi" vs "hubungi Platform Admin"), dan reaktivasi tidak boleh
+	// memaksa GA mengulang alur invite+aktivasi dari nol.
+	ErrAccountSuspended = errors.New("account has been suspended")
+
 	// ErrMFARequired dikembalikan saat Group Admin login tapi belum punya
 	// MFA aktif (S1-17) -- seharusnya tidak pernah terjadi lewat alur
 	// onboarding normal (S1-06/07 mewajibkan setup MFA sebelum is_active
@@ -119,4 +127,18 @@ var (
 	// ErrProjectMemberNotFound dikembalikan saat target bukan project
 	// member (S3-22/23).
 	ErrProjectMemberNotFound = errors.New("project member not found")
+
+	// ErrInvalidCIDR dikembalikan saat input allowlist IP Platform Admin
+	// (S4P-18) bukan notasi CIDR yang valid.
+	ErrInvalidCIDR = errors.New("invalid cidr notation")
+
+	// ErrIPAllowlistEntryNotFound dikembalikan saat entry allowlist yang
+	// mau dihapus tidak ada, atau milik akun Platform Admin lain (S4P-18) --
+	// disamakan supaya satu PA tidak bisa menebak ID entry milik PA lain.
+	ErrIPAllowlistEntryNotFound = errors.New("ip allowlist entry not found")
+
+	// ErrSessionTimeoutTooShort dikembalikan saat Platform Admin mencoba
+	// set session timeout di bawah batas minimum 10 menit (US-070 AC,
+	// S4P-18).
+	ErrSessionTimeoutTooShort = errors.New("session timeout below minimum allowed")
 )
