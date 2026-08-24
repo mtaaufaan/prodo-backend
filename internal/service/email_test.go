@@ -59,3 +59,25 @@ func TestBuildWorkspaceInvitationEmailMessage(t *testing.T) {
 		t.Error("email tidak boleh memuat password asli, hanya link untuk menyetelnya")
 	}
 }
+
+func TestBuildPlatformAdminLoginAlertMessage(t *testing.T) {
+	loginTime := time.Date(2026, 8, 24, 9, 15, 0, 0, time.UTC)
+	msg := string(buildPlatformAdminLoginAlertMessage(
+		"noreply@prodo.local", "pa@example.com", "PA Demo", "203.0.113.5", "Chrome 125 di Windows", loginTime,
+	))
+
+	checks := []string{
+		"From: noreply@prodo.local",
+		"To: pa@example.com",
+		"Subject: Peringatan Login Platform Admin - PRODO",
+		"Halo PA Demo,",
+		"203.0.113.5",
+		"Chrome 125 di Windows",
+		"24 August 2026",
+	}
+	for _, want := range checks {
+		if !strings.Contains(msg, want) {
+			t.Errorf("pesan email tidak mengandung %q\n---\n%s", want, msg)
+		}
+	}
+}

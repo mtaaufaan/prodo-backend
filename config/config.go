@@ -26,6 +26,16 @@ type Config struct {
 	AppEnv          string        `env:"APP_ENV" envDefault:"development"`
 	ServerPort      int           `env:"SERVER_PORT" envDefault:"3001"`
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"30s"`
+	// PASessionIdleTimeout -- S4P-15 (implementation_gaps.md IG-20): sesi
+	// Platform Admin non-sliding (SessionService.IsValidSession), TIDAK
+	// mempengaruhi role lain (tetap 30 menit sliding, service/session.go).
+	// Default 10 menit mengikuti copy yang SUDAH TAMPIL di UI (Platform
+	// Admin Login.dc.html, "Session timeout: 10 menit idle") -- BUKAN 15
+	// menit seperti draft AC US-070 (backlog.md); default diselaraskan ke
+	// angka yang sudah nyata ditampilkan ke user, bukan sebaliknya.
+	// caarlos0/env butuh unit Go duration ("600s"/"10m"), BEDA dari contoh
+	// literal AC "PA_SESSION_IDLE_TIMEOUT=900" (detik polos tanpa unit).
+	PASessionIdleTimeout time.Duration `env:"PA_SESSION_IDLE_TIMEOUT" envDefault:"10m"`
 
 	// Database (PostgreSQL via pgx)
 	DatabaseURL string `env:"DATABASE_URL" envDefault:""`

@@ -334,6 +334,25 @@ func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) 
 	return u, nil
 }
 
+// CheckIPAllowlist mengembalikan true kalau ip diperbolehkan login untuk
+// userID (S4P-17): TIDAK ADA baris allowlist sama sekali untuk user ini
+// berarti fitur belum dikonfigurasi -> selalu diperbolehkan (opsional,
+// bukan wajib). Kalau ADA baris, ip harus cocok dengan SALAH SATU CIDR
+// yang terdaftar. Satu query pakai operator containment native Postgres
+// (`<<=`) -- lebih murah dan lebih benar daripada fetch semua baris lalu
+// parse CIDR manual di Go.
+func (r *AccountRepository) CheckIPAllowlist(ctx context.Context, userID, ip string) (allowed bool, err error) {
+	err = r.db.QueryRow(ctx, `
+		SELECT
+			NOT EXISTS(SELECT 1 FROM platform_admin_ip_allowlist WHERE user_id = $1)
+			OR EXISTS(SELECT 1 FROM platform_admin_ip_allowlist WHERE user_id = $1 AND $2::inet <<= cidr)
+	`, userID, ip).Scan(&allowed)
+	if err != nil {
+		return false, fmt.Errorf("repository.CheckIPAllowlist: %w", err)
+	}
+	return allowed, nil
+}
+
 // ListOrgIDsForGroupAdmin mengembalikan seluruh organizations.id dalam grup
 // yang dikelola userID (S3-38, implementation_gaps.md IG-01) -- dasar klaim
 // JWT prodo_org_ids. Slice kosong (bukan error) untuk GA yang belum
