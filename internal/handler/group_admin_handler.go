@@ -31,6 +31,10 @@ func NewGroupAdminHandler(accounts *service.AccountService, email *service.Email
 type createGroupAdminRequest struct {
 	Email       string `json:"email"`
 	DisplayName string `json:"display_name"`
+	// GroupName -- IG-21, sesuai desain "Tambah Group Admin" (field "Nama
+	// Perusahaan / Grup"). Wajib -- setiap GA baru langsung mengelola satu
+	// grup baru.
+	GroupName string `json:"group_name"`
 }
 
 // Create menangani POST /platform/group-admins -- dipasang di belakang
@@ -47,8 +51,9 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 	}
 	req.Email = strings.TrimSpace(req.Email)
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
-	if req.Email == "" || req.DisplayName == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email dan display_name wajib diisi", nil))
+	req.GroupName = strings.TrimSpace(req.GroupName)
+	if req.Email == "" || req.DisplayName == "" || req.GroupName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email, display_name, dan group_name wajib diisi", nil))
 	}
 	if !validator.IsValidEmail(req.Email) {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format email tidak valid", nil))
@@ -64,6 +69,7 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 	result, err := h.accounts.CreateGroupAdmin(c.Context(), service.CreateGroupAdminRequest{
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
+		GroupName:       req.GroupName,
 		InvitedByUserID: actorUserID,
 	})
 	if err != nil {
@@ -71,7 +77,7 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		case errors.Is(err, domain.ErrEmailAlreadyExists):
 			return c.Status(fiber.StatusConflict).JSON(response.Error("CONFLICT", "Email sudah terdaftar", nil))
 		case errors.Is(err, domain.ErrInvalidInput):
-			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email dan display_name wajib diisi", nil))
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email, display_name, dan group_name wajib diisi", nil))
 		default:
 			h.logger.Error("gagal membuat akun Group Admin", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat akun Group Admin", nil))
@@ -231,6 +237,94 @@ func (h *GroupAdminHandler) setSuspension(c *fiber.Ctx, suspend bool) error {
 		"id":     targetUserID,
 		"status": status,
 	}))
+}
+
+type transferGroupRequest struct {
+	ToUserID string `json:"to_user_id"`
+}
+
+// Transfer menangani POST /platform/group-admins/:id/transfer (S4P-03/04,
+// IG-21) -- pindahkan pengelolaan seluruh grup :id ke to_user_id.
+func (h *GroupAdminHandler) Transfer(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+
+	fromUserID := c.Params("id")
+	if fromUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
+	}
+
+	var req transferGroupRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	req.ToUserID = strings.TrimSpace(req.ToUserID)
+	if req.ToUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "to_user_id wajib diisi", nil))
+	}
+
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users",
+			zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+
+	count, err := h.accounts.TransferGroup(c.Context(), fromUserID, req.ToUserID, actorUserID)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidTransferTarget):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_TRANSFER_TARGET",
+				"Target transfer bukan akun Group Admin yang valid", nil))
+		default:
+			h.logger.Error("gagal transfer grup", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal transfer grup", nil))
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{
+		"from_user_id":       fromUserID,
+		"to_user_id":         req.ToUserID,
+		"transferred_groups": count,
+	}))
+}
+
+// Delete menangani DELETE /platform/group-admins/:id (S4P-05, IG-21) --
+// HANYA berhasil kalau target sudah tidak mengelola grup manapun.
+func (h *GroupAdminHandler) Delete(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+
+	targetUserID := c.Params("id")
+	if targetUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
+	}
+
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users",
+			zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+
+	if err := h.accounts.DeleteGroupAdmin(c.Context(), targetUserID, actorUserID); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrGroupTransferRequired):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("GROUP_TRANSFER_REQUIRED",
+				"Transfer grup ke Group Admin lain sebelum menghapus akun ini", nil))
+		case errors.Is(err, domain.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		default:
+			h.logger.Error("gagal menghapus akun Group Admin", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menghapus akun Group Admin", nil))
+		}
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // sendActivationEmail mengirim email aktivasi -- dipakai Create (S1-05) dan

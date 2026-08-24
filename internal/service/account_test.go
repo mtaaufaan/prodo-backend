@@ -41,6 +41,13 @@ type fakeAccountRepository struct {
 	addedCIDR            string
 	deleteIPAllowlistErr error
 	deletedEntryID       string
+
+	transferErr         error
+	transferCount       int
+	transferFromUserID  string
+	transferToUserID    string
+	deleteGroupAdminErr error
+	deletedGroupAdminID string
 }
 
 func (f *fakeAccountRepository) SuspendGroupAdmin(_ context.Context, targetUserID, _ string) error {
@@ -51,6 +58,20 @@ func (f *fakeAccountRepository) SuspendGroupAdmin(_ context.Context, targetUserI
 func (f *fakeAccountRepository) ReactivateGroupAdmin(_ context.Context, targetUserID, _ string) error {
 	f.reactivatedTarget = targetUserID
 	return f.reactivateErr
+}
+
+func (f *fakeAccountRepository) TransferGroup(_ context.Context, fromUserID, toUserID, _ string) (int, error) {
+	f.transferFromUserID = fromUserID
+	f.transferToUserID = toUserID
+	if f.transferErr != nil {
+		return 0, f.transferErr
+	}
+	return f.transferCount, nil
+}
+
+func (f *fakeAccountRepository) DeleteGroupAdmin(_ context.Context, targetUserID, _ string) error {
+	f.deletedGroupAdminID = targetUserID
+	return f.deleteGroupAdminErr
 }
 
 func (f *fakeAccountRepository) GetPASessionIdleTimeoutSeconds(_ context.Context) (int, error) {
@@ -147,6 +168,7 @@ func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {
 	req := CreateGroupAdminRequest{
 		Email:           "ga@example.com",
 		DisplayName:     "Group Admin",
+		GroupName:       "PT Contoh",
 		InvitedByUserID: "platform-admin-1",
 	}
 
@@ -190,6 +212,7 @@ func TestAccountService_CreateGroupAdmin_EmailAlreadyExistsInKeycloak(t *testing
 	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
 		Email:           "dup@example.com",
 		DisplayName:     "Dup",
+		GroupName:       "PT Contoh",
 		InvitedByUserID: "platform-admin-1",
 	})
 	if !errors.Is(err, domain.ErrEmailAlreadyExists) {
@@ -205,6 +228,7 @@ func TestAccountService_CreateGroupAdmin_RepoFailureAfterKeycloakCreate(t *testi
 	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
 		Email:           "ga@example.com",
 		DisplayName:     "Group Admin",
+		GroupName:       "PT Contoh",
 		InvitedByUserID: "platform-admin-1",
 	})
 	if err == nil {
@@ -375,5 +399,53 @@ func TestAccountService_DeleteIPAllowlistEntry_NotFound(t *testing.T) {
 	err := svc.DeleteIPAllowlistEntry(context.Background(), "pa-1", "entry-1", "pa-1")
 	if !errors.Is(err, domain.ErrIPAllowlistEntryNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrIPAllowlistEntryNotFound", err)
+	}
+}
+
+func TestAccountService_TransferGroup_Success(t *testing.T) {
+	repo := &fakeAccountRepository{transferCount: 2}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	count, err := svc.TransferGroup(context.Background(), "ga-a", "ga-b", "pa-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
+	}
+	if repo.transferFromUserID != "ga-a" || repo.transferToUserID != "ga-b" {
+		t.Errorf("transfer args = (%q, %q), want (ga-a, ga-b)", repo.transferFromUserID, repo.transferToUserID)
+	}
+}
+
+func TestAccountService_TransferGroup_InvalidTarget(t *testing.T) {
+	repo := &fakeAccountRepository{transferErr: domain.ErrInvalidTransferTarget}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	_, err := svc.TransferGroup(context.Background(), "ga-a", "not-a-ga", "pa-1")
+	if !errors.Is(err, domain.ErrInvalidTransferTarget) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidTransferTarget", err)
+	}
+}
+
+func TestAccountService_DeleteGroupAdmin_Success(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	if err := svc.DeleteGroupAdmin(context.Background(), "ga-a", "pa-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.deletedGroupAdminID != "ga-a" {
+		t.Errorf("deletedGroupAdminID = %q, want %q", repo.deletedGroupAdminID, "ga-a")
+	}
+}
+
+func TestAccountService_DeleteGroupAdmin_GroupTransferRequired(t *testing.T) {
+	repo := &fakeAccountRepository{deleteGroupAdminErr: domain.ErrGroupTransferRequired}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.DeleteGroupAdmin(context.Background(), "ga-a", "pa-1")
+	if !errors.Is(err, domain.ErrGroupTransferRequired) {
+		t.Errorf("err = %v, want wrapped domain.ErrGroupTransferRequired", err)
 	}
 }

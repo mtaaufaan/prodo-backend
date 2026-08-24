@@ -173,6 +173,9 @@ func run() error {
 	// S4P-02, US-067.
 	v1.Put("/platform/group-admins/:id/suspend", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Suspend)
 	v1.Put("/platform/group-admins/:id/reactivate", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Reactivate)
+	// S4P-03/04/05, IG-21.
+	v1.Post("/platform/group-admins/:id/transfer", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Transfer)
+	v1.Delete("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Delete)
 	// S4P-18, US-070. Session timeout global (semua akun PA); IP allowlist
 	// self-service (per akun PA sendiri, lihat komentar PlatformSecurityHandler).
 	v1.Get("/platform/security-settings", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.Get)

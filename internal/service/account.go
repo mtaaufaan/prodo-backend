@@ -35,6 +35,10 @@ type accountRepository interface {
 	SuspendGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
 	ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
 
+	// TransferGroup/DeleteGroupAdmin -- S4P-03/04/05, IG-21.
+	TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (transferredGroupCount int, err error)
+	DeleteGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
+
 	// GetPASessionIdleTimeoutSeconds/SetPASessionIdleTimeoutSeconds --
 	// S4P-18, satu setting global untuk seluruh akun Platform Admin.
 	GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error)
@@ -62,14 +66,16 @@ func NewAccountService(repo accountRepository, kc keycloak.AdminClient, logger *
 }
 
 // CreateGroupAdminRequest adalah input pembuatan akun Group Admin oleh
-// Platform Admin (US-073). Field "organisasi yang akan dikelola" pada
-// acceptance criteria BELUM ditangani -- tabel groups/organizations belum
-// ada di scope S1 (pola sama dengan FK yang di-deferred di S1-01/02,
-// group_admin_assignments per docs/DATABASE_SCHEMA.md §5.6 baru bisa diisi
-// setelah tabel groups dibuat).
+// Platform Admin (US-073). GroupName WAJIB (IG-21, sesuai desain "Tambah
+// Group Admin" -- field "Nama Perusahaan / Grup") -- setiap GA baru
+// langsung mengelola satu grup baru, tidak ada lagi GA "yatim" seperti
+// sejak S1-05. Field desain lain (Jabatan PIC, Alamat Perusahaan, No.
+// Telepon, Tier + plafon otomatis) SENGAJA belum ditangani -- menyusul
+// S4P-06/07.
 type CreateGroupAdminRequest struct {
 	Email           string
 	DisplayName     string
+	GroupName       string
 	InvitedByUserID string // Platform Admin yang melakukan invite
 }
 
@@ -115,7 +121,7 @@ func (s *AccountService) ResolveActorUserID(ctx context.Context, keycloakSub str
 // cukup di-log sebagai error supaya bisa dibersihkan manual. Upgrade ke
 // cleanup otomatis kalau ini jadi masalah operasional nyata.
 func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAdminRequest) (*GroupAdminInvitation, error) {
-	if req.Email == "" || req.DisplayName == "" || req.InvitedByUserID == "" {
+	if req.Email == "" || req.DisplayName == "" || req.GroupName == "" || req.InvitedByUserID == "" {
 		return nil, fmt.Errorf("service.CreateGroupAdmin: %w", domain.ErrInvalidInput)
 	}
 
@@ -137,6 +143,7 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAd
 	userID, err := s.repo.CreateGroupAdminInvitation(ctx, &repository.CreateGroupAdminInvitationParams{
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
+		GroupName:       req.GroupName,
 		KeycloakUserID:  kcUserID,
 		TokenHash:       tokenHash,
 		ExpiresAt:       expiresAt,
@@ -237,6 +244,26 @@ func (s *AccountService) SuspendGroupAdmin(ctx context.Context, targetUserID, ac
 func (s *AccountService) ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
 	if err := s.repo.ReactivateGroupAdmin(ctx, targetUserID, actorUserID); err != nil {
 		return fmt.Errorf("service.ReactivateGroupAdmin: %w", err)
+	}
+	return nil
+}
+
+// TransferGroup memindahkan pengelolaan seluruh grup dari satu GA ke GA
+// lain (S4P-03/04, IG-21).
+func (s *AccountService) TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (int, error) {
+	count, err := s.repo.TransferGroup(ctx, fromUserID, toUserID, actorUserID)
+	if err != nil {
+		return 0, fmt.Errorf("service.TransferGroup: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteGroupAdmin menghapus akun Group Admin (S4P-05, IG-21) -- HANYA
+// kalau dia sudah tidak mengelola grup manapun (lihat komentar
+// repository.DeleteGroupAdmin).
+func (s *AccountService) DeleteGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	if err := s.repo.DeleteGroupAdmin(ctx, targetUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.DeleteGroupAdmin: %w", err)
 	}
 	return nil
 }
