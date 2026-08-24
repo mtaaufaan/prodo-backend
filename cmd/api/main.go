@@ -176,6 +176,11 @@ func run() error {
 	// S4P-03/04/05, IG-21.
 	v1.Post("/platform/group-admins/:id/transfer", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Transfer)
 	v1.Delete("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Delete)
+	// S4P-06/07: mode Lihat/Ubah lengkap + katalog tier, sesuai desain
+	// "PA Group Admins"/"PA Group Admin Form".
+	v1.Get("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Get)
+	v1.Put("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Update)
+	v1.Get("/platform/tiers", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ListTiers)
 	// S4P-18, US-070. Session timeout global (semua akun PA); IP allowlist
 	// self-service (per akun PA sendiri, lihat komentar PlatformSecurityHandler).
 	v1.Get("/platform/security-settings", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.Get)

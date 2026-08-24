@@ -36,14 +36,20 @@ func NewAccountRepository(db *pgxpool.Pool) *AccountRepository {
 //
 // GroupName -- IG-21: SETIAP GA baru WAJIB langsung mengelola satu grup
 // (sesuai desain "Tambah Group Admin", field "Nama Perusahaan / Grup") --
-// tidak ada lagi GA "yatim" tanpa grup seperti sejak S1-05. Field
-// desain lain (Jabatan PIC, Alamat Perusahaan, No. Telepon, Tier +
-// plafon otomatis) SENGAJA belum ditangani di sini -- kolomnya belum ada
-// di skema `groups`, menyusul S4P-06/07.
+// tidak ada lagi GA "yatim" tanpa grup seperti sejak S1-05. JobTitle/
+// Address/Phone/Tier/StorageQuotaGB -- S4P-06/07, sesuai desain "PA
+// Group Admin Form" -- field kontak & paket layanan grup, ditambahkan
+// setelah forward-pull tier system (S4 H4 lanjutan). StorageQuotaGB nil
+// berarti pakai plafon default tier.
 type CreateGroupAdminInvitationParams struct {
 	Email           string
 	DisplayName     string
 	GroupName       string
+	JobTitle        string
+	Address         string
+	Phone           string
+	Tier            string
+	StorageQuotaGB  *int
 	KeycloakUserID  string
 	TokenHash       string
 	ExpiresAt       time.Time
@@ -91,8 +97,10 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 
 	var groupID string
 	if err = tx.QueryRow(ctx, `
-		INSERT INTO groups (name) VALUES ($1) RETURNING id
-	`, p.GroupName).Scan(&groupID); err != nil {
+		INSERT INTO groups (name, tier, job_title, address, phone, storage_quota_gb)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id
+	`, p.GroupName, p.Tier, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB).Scan(&groupID); err != nil {
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert groups: %w", err)
 	}
 
@@ -126,13 +134,71 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 }
 
 // GroupAdminSummary adalah satu baris daftar Group Admin untuk panel
-// Platform Admin (S1-12).
+// Platform Admin (S1-12, diperkaya S4P-06 sesuai desain "PA Group
+// Admins" -- kolom TIER/SISA ORG/SISA KUOTA/SISA MEMBER/TANGGAL DAFTAR).
+// Mengambil grup PERTAMA (assigned_at paling awal) milik GA -- simplifikasi
+// yang disengaja: GA yang mengelola >1 grup (mis. setelah jadi target
+// TransferGroup, S4P-03) cuma menampilkan grup pertamanya di sini, dicatat
+// sebagai batasan yang diketahui di sprint_backlog.md, bukan bug.
 type GroupAdminSummary struct {
-	ID          string
-	Email       string
-	DisplayName string
-	IsActive    bool
-	CreatedAt   time.Time
+	ID              string
+	Email           string
+	DisplayName     string
+	IsActive        bool
+	SuspendedAt     *time.Time
+	CreatedAt       time.Time
+	GroupID         *string
+	GroupName       *string
+	JobTitle        *string
+	Address         *string
+	Phone           *string
+	Tier            *string
+	TierMaxOrg      int
+	TierMaxStorage  int
+	TierMaxMembers  int
+	UsedOrgCount    int
+	UsedStorageMB   int64
+	UsedMemberCount int
+	StorageQuotaGB  *int
+}
+
+// groupAdminSummaryQuery -- SELECT bersama ListGroupAdmins (banyak baris)
+// dan GetGroupAdminDetail (satu baris): grup pertama (LATERAL, assigned_at
+// paling awal) + katalog tier + agregat pemakaian (jumlah organisasi,
+// storage terpakai, jumlah member unik) di bawah grup itu.
+const groupAdminSummaryQuery = `
+	SELECT u.id, u.email, u.display_name, u.is_active, u.suspended_at, u.created_at,
+	       g.id, g.name, g.job_title, g.address, g.phone, g.tier, g.storage_quota_gb,
+	       COALESCE(st.max_org, 0), COALESCE(st.max_storage_gb, 0), COALESCE(st.max_members, 0),
+	       COALESCE(org_agg.org_count, 0), COALESCE(org_agg.storage_used_mb, 0), COALESCE(mem_agg.member_count, 0)
+	FROM users u
+	LEFT JOIN LATERAL (
+		SELECT gaa.group_id FROM group_admin_assignments gaa
+		WHERE gaa.user_id = u.id ORDER BY gaa.assigned_at LIMIT 1
+	) primary_group ON true
+	LEFT JOIN groups g ON g.id = primary_group.group_id
+	LEFT JOIN service_tiers st ON st.name = g.tier
+	LEFT JOIN LATERAL (
+		SELECT count(*) AS org_count, COALESCE(sum(o.storage_used_mb), 0) AS storage_used_mb
+		FROM organizations o WHERE o.group_id = g.id
+	) org_agg ON true
+	LEFT JOIN LATERAL (
+		SELECT count(DISTINCT wm.user_id) AS member_count
+		FROM workspace_members wm
+		JOIN workspaces w ON w.id = wm.workspace_id
+		JOIN organizations o2 ON o2.id = w.org_id
+		WHERE o2.group_id = g.id
+	) mem_agg ON true
+	WHERE u.platform_role = 'group_admin' AND u.deleted_at IS NULL
+`
+
+func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSummary, error) {
+	var s GroupAdminSummary
+	err := row.Scan(&s.ID, &s.Email, &s.DisplayName, &s.IsActive, &s.SuspendedAt, &s.CreatedAt,
+		&s.GroupID, &s.GroupName, &s.JobTitle, &s.Address, &s.Phone, &s.Tier, &s.StorageQuotaGB,
+		&s.TierMaxOrg, &s.TierMaxStorage, &s.TierMaxMembers,
+		&s.UsedOrgCount, &s.UsedStorageMB, &s.UsedMemberCount)
+	return s, err
 }
 
 // ListGroupAdmins mengembalikan seluruh user dengan platform_role='group_admin',
@@ -140,16 +206,13 @@ type GroupAdminSummary struct {
 func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset int) ([]GroupAdminSummary, int, error) {
 	var total int
 	if err := r.db.QueryRow(ctx, `
-		SELECT count(*) FROM users WHERE platform_role = 'group_admin'
+		SELECT count(*) FROM users WHERE platform_role = 'group_admin' AND deleted_at IS NULL
 	`).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: count: %w", err)
 	}
 
-	rows, err := r.db.Query(ctx, `
-		SELECT id, email, display_name, is_active, created_at
-		FROM users
-		WHERE platform_role = 'group_admin'
-		ORDER BY created_at DESC
+	rows, err := r.db.Query(ctx, groupAdminSummaryQuery+`
+		ORDER BY u.created_at DESC
 		LIMIT $1 OFFSET $2
 	`, limit, offset)
 	if err != nil {
@@ -159,8 +222,8 @@ func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset i
 
 	var result []GroupAdminSummary
 	for rows.Next() {
-		var s GroupAdminSummary
-		if err := rows.Scan(&s.ID, &s.Email, &s.DisplayName, &s.IsActive, &s.CreatedAt); err != nil {
+		s, err := scanGroupAdminSummary(rows)
+		if err != nil {
 			return nil, 0, fmt.Errorf("repository.ListGroupAdmins: scan: %w", err)
 		}
 		result = append(result, s)
@@ -169,6 +232,148 @@ func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset i
 		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: rows: %w", err)
 	}
 	return result, total, nil
+}
+
+// GetGroupAdminDetail mengembalikan satu Group Admin + grup pertamanya
+// untuk mode Lihat/Ubah (S4P-06). domain.ErrUserNotFound kalau tidak ada.
+func (r *AccountRepository) GetGroupAdminDetail(ctx context.Context, targetUserID string) (*GroupAdminSummary, error) {
+	row := r.db.QueryRow(ctx, groupAdminSummaryQuery+` AND u.id = $1`, targetUserID)
+	s, err := scanGroupAdminSummary(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.GetGroupAdminDetail: %w", domain.ErrUserNotFound)
+		}
+		return nil, fmt.Errorf("repository.GetGroupAdminDetail: %w", err)
+	}
+	return &s, nil
+}
+
+// UpdateGroupAdminParams -- S4P-06, field form "Ubah Group Admin".
+// NewStatus kosong berarti status tidak diubah; kalau diisi harus
+// 'AKTIF' atau 'SUSPENDED' -- 'TIDAK AKTIF' (pending, belum aktivasi)
+// TIDAK bisa diset manual lewat form ini (domain.ErrInvalidStatusTransition),
+// hanya dicapai lewat alur onboarding yang belum selesai.
+type UpdateGroupAdminParams struct {
+	DisplayName    string
+	GroupName      string
+	JobTitle       string
+	Address        string
+	Phone          string
+	Tier           string
+	StorageQuotaGB *int
+	NewStatus      string // "", "AKTIF", atau "SUSPENDED"
+}
+
+// UpdateGroupAdmin memperbarui data GA + grup pertamanya, dan status kalau
+// diminta (S4P-06). Semua dalam satu transaksi + audit log.
+func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *UpdateGroupAdminParams, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateGroupAdmin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var groupID string
+	if err := tx.QueryRow(ctx, `
+		SELECT gaa.group_id FROM group_admin_assignments gaa
+		WHERE gaa.user_id = $1 ORDER BY gaa.assigned_at LIMIT 1
+	`, targetUserID).Scan(&groupID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
+		}
+		return fmt.Errorf("repository.UpdateGroupAdmin: cari grup: %w", err)
+	}
+
+	if tag, err := tx.Exec(ctx, `
+		UPDATE users SET display_name = $2, updated_at = NOW() WHERE id = $1 AND platform_role = 'group_admin'
+	`, targetUserID, p.DisplayName); err != nil {
+		return fmt.Errorf("repository.UpdateGroupAdmin: update users: %w", err)
+	} else if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE groups SET name = $2, tier = $3, job_title = $4, address = $5, phone = $6,
+		       storage_quota_gb = $7, updated_at = NOW()
+		WHERE id = $1
+	`, groupID, p.GroupName, p.Tier, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB); err != nil {
+		return fmt.Errorf("repository.UpdateGroupAdmin: update groups: %w", err)
+	}
+
+	switch p.NewStatus {
+	case "AKTIF":
+		// is_active = TRUE di WHERE -- "AKTIF" cuma valid sebagai
+		// un-suspend (akun yang PERNAH aktif), BUKAN force-activate akun
+		// yang masih pending (is_active masih FALSE, belum menyelesaikan
+		// onboarding US-073). Tanpa guard ini, request "AKTIF" pada akun
+		// pending jadi no-op diam-diam (suspended_at memang sudah NULL)
+		// tapi status yang ditampilkan tetap "TIDAK AKTIF" -- ditemukan
+		// lewat verifikasi live, bukan dugaan.
+		tag, err := tx.Exec(ctx, `UPDATE users SET suspended_at = NULL WHERE id = $1 AND is_active = TRUE`, targetUserID)
+		if err != nil {
+			return fmt.Errorf("repository.UpdateGroupAdmin: reactivate: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+		}
+	case "SUSPENDED":
+		if _, err := tx.Exec(ctx, `UPDATE users SET suspended_at = NOW() WHERE id = $1`, targetUserID); err != nil {
+			return fmt.Errorf("repository.UpdateGroupAdmin: suspend: %w", err)
+		}
+	case "":
+		// status tidak diubah
+	default:
+		return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.updated", targetUserID); err != nil {
+		return fmt.Errorf("repository.UpdateGroupAdmin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.UpdateGroupAdmin: commit tx: %w", err)
+	}
+	return nil
+}
+
+// ServiceTier -- satu baris katalog tier (S4P-07) untuk dropdown Tier +
+// panel "Paket Tier (Otomatis)" di form Group Admin.
+type ServiceTier struct {
+	Name             string
+	MinRetentionDays int
+	MaxRetentionDays int
+	WebhookRate      int
+	SSOEnabled       bool
+	MaxOrg           int
+	MaxStorageGB     int
+	MaxMembers       int
+}
+
+// ListServiceTiers mengembalikan katalog tier, urutan tetap (starter <
+// business < enterprise) via CASE eksplisit -- bukan alfabet.
+func (r *AccountRepository) ListServiceTiers(ctx context.Context) ([]ServiceTier, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT name, min_retention_days, max_retention_days, webhook_rate, sso_enabled, max_org, max_storage_gb, max_members
+		FROM service_tiers
+		ORDER BY CASE name WHEN 'starter' THEN 1 WHEN 'business' THEN 2 WHEN 'enterprise' THEN 3 ELSE 4 END
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListServiceTiers: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ServiceTier
+	for rows.Next() {
+		var t ServiceTier
+		if err := rows.Scan(&t.Name, &t.MinRetentionDays, &t.MaxRetentionDays, &t.WebhookRate, &t.SSOEnabled, &t.MaxOrg, &t.MaxStorageGB, &t.MaxMembers); err != nil {
+			return nil, fmt.Errorf("repository.ListServiceTiers: scan: %w", err)
+		}
+		result = append(result, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListServiceTiers: rows: %w", err)
+	}
+	return result, nil
 }
 
 // FindUserIDByProviderSub resolve Keycloak subject (JWT "sub" claim) jadi

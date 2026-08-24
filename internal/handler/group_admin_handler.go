@@ -13,6 +13,7 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/validator"
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
@@ -35,6 +36,14 @@ type createGroupAdminRequest struct {
 	// Perusahaan / Grup"). Wajib -- setiap GA baru langsung mengelola satu
 	// grup baru.
 	GroupName string `json:"group_name"`
+	// JobTitle/Address/Phone/Tier/StorageQuotaGB -- S4P-06/07, field
+	// lengkap sesuai desain "PA Group Admin Form". Semua opsional kecuali
+	// yang di atas -- Tier default "starter" kalau kosong.
+	JobTitle       string `json:"job_title"`
+	Address        string `json:"address"`
+	Phone          string `json:"phone"`
+	Tier           string `json:"tier"`
+	StorageQuotaGB *int   `json:"storage_quota_gb"`
 }
 
 // Create menangani POST /platform/group-admins -- dipasang di belakang
@@ -70,6 +79,11 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
 		GroupName:       req.GroupName,
+		JobTitle:        req.JobTitle,
+		Address:         req.Address,
+		Phone:           req.Phone,
+		Tier:            req.Tier,
+		StorageQuotaGB:  req.StorageQuotaGB,
 		InvitedByUserID: actorUserID,
 	})
 	if err != nil {
@@ -78,6 +92,8 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusConflict).JSON(response.Error("CONFLICT", "Email sudah terdaftar", nil))
 		case errors.Is(err, domain.ErrInvalidInput):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email, display_name, dan group_name wajib diisi", nil))
+		case errors.Is(err, domain.ErrInvalidTier):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_TIER", "Tier tidak valid", nil))
 		default:
 			h.logger.Error("gagal membuat akun Group Admin", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat akun Group Admin", nil))
@@ -118,17 +134,7 @@ func (h *GroupAdminHandler) List(c *fiber.Ctx) error {
 
 	data := make([]fiber.Map, len(summaries))
 	for i, s := range summaries {
-		status := "pending"
-		if s.IsActive {
-			status = "active"
-		}
-		data[i] = fiber.Map{
-			"id":           s.ID,
-			"email":        s.Email,
-			"display_name": s.DisplayName,
-			"status":       status,
-			"created_at":   s.CreatedAt.UTC().Format(time.RFC3339),
-		}
+		data[i] = groupAdminSummaryToMap(&s)
 	}
 
 	totalPages := (total + perPage - 1) / perPage
@@ -325,6 +331,170 @@ func (h *GroupAdminHandler) Delete(c *fiber.Ctx) error {
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// groupAdminStatusLabel -- S4P-06, 3 state sesuai desain (dropdown Status
+// "PA Group Admin Form"): AKTIF (aktif, tidak disuspend), SUSPENDED
+// (disuspend PA), TIDAK AKTIF (belum menyelesaikan aktivasi/pending).
+func groupAdminStatusLabel(isActive bool, suspendedAt *time.Time) string {
+	if suspendedAt != nil {
+		return "SUSPENDED"
+	}
+	if !isActive {
+		return "TIDAK AKTIF"
+	}
+	return "AKTIF"
+}
+
+// groupAdminSummaryToMap -- bentuk JSON bersama List (S1-12) dan Get
+// (S4P-06). optionalPtr helper kecil supaya *string/*int nil jadi null,
+// bukan panic/zero-value yang menyesatkan.
+func groupAdminSummaryToMap(s *repository.GroupAdminSummary) fiber.Map {
+	m := fiber.Map{
+		"id":                  s.ID,
+		"email":               s.Email,
+		"display_name":        s.DisplayName,
+		"status":              groupAdminStatusLabel(s.IsActive, s.SuspendedAt),
+		"created_at":          s.CreatedAt.UTC().Format(time.RFC3339),
+		"group_id":            s.GroupID,
+		"group_name":          s.GroupName,
+		"job_title":           s.JobTitle,
+		"address":             s.Address,
+		"phone":               s.Phone,
+		"tier":                s.Tier,
+		"storage_quota_gb":    s.StorageQuotaGB,
+		"tier_max_org":        s.TierMaxOrg,
+		"tier_max_storage_gb": s.TierMaxStorage,
+		"tier_max_members":    s.TierMaxMembers,
+		"used_org_count":      s.UsedOrgCount,
+		"used_storage_mb":     s.UsedStorageMB,
+		"used_member_count":   s.UsedMemberCount,
+	}
+	return m
+}
+
+// Get menangani GET /platform/group-admins/:id -- mode "Lihat"/"Ubah"
+// (S4P-06).
+func (h *GroupAdminHandler) Get(c *fiber.Ctx) error {
+	targetUserID := c.Params("id")
+	if targetUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
+	}
+
+	detail, err := h.accounts.GetGroupAdminDetail(c.Context(), targetUserID)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		default:
+			h.logger.Error("gagal mengambil detail Group Admin", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil detail Group Admin", nil))
+		}
+	}
+
+	return c.JSON(response.Success(groupAdminSummaryToMap(detail)))
+}
+
+type updateGroupAdminRequest struct {
+	DisplayName    string `json:"display_name"`
+	GroupName      string `json:"group_name"`
+	JobTitle       string `json:"job_title"`
+	Address        string `json:"address"`
+	Phone          string `json:"phone"`
+	Tier           string `json:"tier"`
+	StorageQuotaGB *int   `json:"storage_quota_gb"`
+	// Status -- "", "AKTIF", atau "SUSPENDED". "TIDAK AKTIF" tidak bisa
+	// diset manual, lihat domain.ErrInvalidStatusTransition.
+	Status string `json:"status"`
+}
+
+// Update menangani PUT /platform/group-admins/:id -- form "Ubah Group
+// Admin" (S4P-06).
+func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+
+	targetUserID := c.Params("id")
+	if targetUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
+	}
+
+	var req updateGroupAdminRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.GroupName = strings.TrimSpace(req.GroupName)
+	if req.DisplayName == "" || req.GroupName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "display_name dan group_name wajib diisi", nil))
+	}
+
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users",
+			zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+
+	if err := h.accounts.UpdateGroupAdmin(c.Context(), targetUserID, &repository.UpdateGroupAdminParams{
+		DisplayName:    req.DisplayName,
+		GroupName:      req.GroupName,
+		JobTitle:       req.JobTitle,
+		Address:        req.Address,
+		Phone:          req.Phone,
+		Tier:           req.Tier,
+		StorageQuotaGB: req.StorageQuotaGB,
+		NewStatus:      req.Status,
+	}, actorUserID); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidInput):
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "display_name dan group_name wajib diisi", nil))
+		case errors.Is(err, domain.ErrInvalidTier):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_TIER", "Tier tidak valid", nil))
+		case errors.Is(err, domain.ErrInvalidStatusTransition):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_STATUS_TRANSITION",
+				`Status hanya bisa diubah ke "AKTIF" atau "SUSPENDED"`, nil))
+		case errors.Is(err, domain.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		default:
+			h.logger.Error("gagal mengubah data Group Admin", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengubah data Group Admin", nil))
+		}
+	}
+
+	detail, err := h.accounts.GetGroupAdminDetail(c.Context(), targetUserID)
+	if err != nil {
+		h.logger.Error("Group Admin berhasil diubah tapi gagal membaca ulang detailnya", zap.Error(err))
+		return c.JSON(response.Success(fiber.Map{"id": targetUserID}))
+	}
+	return c.JSON(response.Success(groupAdminSummaryToMap(detail)))
+}
+
+// ListTiers menangani GET /platform/tiers (S4P-07) -- katalog tier untuk
+// dropdown Tier + panel "Paket Tier (Otomatis)" di form Group Admin.
+func (h *GroupAdminHandler) ListTiers(c *fiber.Ctx) error {
+	tiers, err := h.accounts.ListServiceTiers(c.Context())
+	if err != nil {
+		h.logger.Error("gagal mengambil katalog tier", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil katalog tier", nil))
+	}
+
+	data := make([]fiber.Map, len(tiers))
+	for i, t := range tiers {
+		data[i] = fiber.Map{
+			"name":               t.Name,
+			"min_retention_days": t.MinRetentionDays,
+			"max_retention_days": t.MaxRetentionDays,
+			"webhook_rate":       t.WebhookRate,
+			"sso_enabled":        t.SSOEnabled,
+			"max_org":            t.MaxOrg,
+			"max_storage_gb":     t.MaxStorageGB,
+			"max_members":        t.MaxMembers,
+		}
+	}
+	return c.JSON(response.Success(data))
 }
 
 // sendActivationEmail mengirim email aktivasi -- dipakai Create (S1-05) dan

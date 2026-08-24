@@ -151,4 +151,14 @@ var (
 	// transfer (S4P-03/04) dulu sebelum bisa dihapus, supaya organisasi di
 	// grup itu tidak kehilangan pengelola.
 	ErrGroupTransferRequired = errors.New("group must be transferred before this account can be deleted")
+
+	// ErrInvalidStatusTransition dikembalikan saat form Ubah Group Admin
+	// (S4P-06) mencoba set status ke nilai selain "AKTIF"/"SUSPENDED" --
+	// "TIDAK AKTIF" (pending, belum aktivasi) cuma bisa dicapai lewat
+	// alur onboarding yang belum selesai, tidak bisa diset manual mundur.
+	ErrInvalidStatusTransition = errors.New("invalid group admin status transition")
+
+	// ErrInvalidTier dikembalikan saat tier yang diminta (S4P-06/07) bukan
+	// salah satu dari starter/business/enterprise.
+	ErrInvalidTier = errors.New("invalid service tier")
 )

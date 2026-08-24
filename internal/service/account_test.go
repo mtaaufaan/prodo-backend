@@ -48,6 +48,28 @@ type fakeAccountRepository struct {
 	transferToUserID    string
 	deleteGroupAdminErr error
 	deletedGroupAdminID string
+
+	groupAdminDetail       *repository.GroupAdminSummary
+	groupAdminDetailErr    error
+	updateGroupAdminErr    error
+	updatedGroupAdminID    string
+	updatedGroupAdminParam *repository.UpdateGroupAdminParams
+	tiers                  []repository.ServiceTier
+	tiersErr               error
+}
+
+func (f *fakeAccountRepository) GetGroupAdminDetail(_ context.Context, _ string) (*repository.GroupAdminSummary, error) {
+	return f.groupAdminDetail, f.groupAdminDetailErr
+}
+
+func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, _ string) error {
+	f.updatedGroupAdminID = targetUserID
+	f.updatedGroupAdminParam = p
+	return f.updateGroupAdminErr
+}
+
+func (f *fakeAccountRepository) ListServiceTiers(_ context.Context) ([]repository.ServiceTier, error) {
+	return f.tiers, f.tiersErr
 }
 
 func (f *fakeAccountRepository) SuspendGroupAdmin(_ context.Context, targetUserID, _ string) error {
@@ -447,5 +469,107 @@ func TestAccountService_DeleteGroupAdmin_GroupTransferRequired(t *testing.T) {
 	err := svc.DeleteGroupAdmin(context.Background(), "ga-a", "pa-1")
 	if !errors.Is(err, domain.ErrGroupTransferRequired) {
 		t.Errorf("err = %v, want wrapped domain.ErrGroupTransferRequired", err)
+	}
+}
+
+func TestAccountService_CreateGroupAdmin_DefaultsTierToStarter(t *testing.T) {
+	repo := &fakeAccountRepository{returnID: "user-1"}
+	kc := &fakeKeycloakClient{userID: "kc-1"}
+	svc := NewAccountService(repo, kc, zap.NewNop())
+
+	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
+		Email: "ga@example.com", DisplayName: "GA", GroupName: "PT Contoh", InvitedByUserID: "pa-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.captured.Tier != "starter" {
+		t.Errorf("Tier = %q, want default %q", repo.captured.Tier, "starter")
+	}
+}
+
+func TestAccountService_CreateGroupAdmin_InvalidTier(t *testing.T) {
+	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
+
+	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
+		Email: "ga@example.com", DisplayName: "GA", GroupName: "PT Contoh", Tier: "gold", InvitedByUserID: "pa-1",
+	})
+	if !errors.Is(err, domain.ErrInvalidTier) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidTier", err)
+	}
+}
+
+func TestAccountService_GetGroupAdminDetail_Success(t *testing.T) {
+	repo := &fakeAccountRepository{groupAdminDetail: &repository.GroupAdminSummary{ID: "ga-1", Email: "ga@example.com"}}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	detail, err := svc.GetGroupAdminDetail(context.Background(), "ga-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ID != "ga-1" {
+		t.Errorf("ID = %q, want %q", detail.ID, "ga-1")
+	}
+}
+
+func TestAccountService_UpdateGroupAdmin_InvalidInput(t *testing.T) {
+	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{Tier: "starter"}, "pa-1")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestAccountService_UpdateGroupAdmin_InvalidTier(t *testing.T) {
+	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+		DisplayName: "GA", GroupName: "PT Contoh", Tier: "gold",
+	}, "pa-1")
+	if !errors.Is(err, domain.ErrInvalidTier) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidTier", err)
+	}
+}
+
+func TestAccountService_UpdateGroupAdmin_InvalidStatusTransition(t *testing.T) {
+	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+		DisplayName: "GA", GroupName: "PT Contoh", Tier: "starter", NewStatus: "TIDAK AKTIF",
+	}, "pa-1")
+	if !errors.Is(err, domain.ErrInvalidStatusTransition) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidStatusTransition", err)
+	}
+}
+
+func TestAccountService_UpdateGroupAdmin_Success(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+		DisplayName: "GA Baru", GroupName: "PT Contoh Baru", Tier: "business", NewStatus: "SUSPENDED",
+	}, "pa-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.updatedGroupAdminID != "ga-1" {
+		t.Errorf("updatedGroupAdminID = %q, want %q", repo.updatedGroupAdminID, "ga-1")
+	}
+	if repo.updatedGroupAdminParam.NewStatus != "SUSPENDED" {
+		t.Errorf("NewStatus = %q, want %q", repo.updatedGroupAdminParam.NewStatus, "SUSPENDED")
+	}
+}
+
+func TestAccountService_ListServiceTiers(t *testing.T) {
+	repo := &fakeAccountRepository{tiers: []repository.ServiceTier{{Name: "starter"}, {Name: "business"}, {Name: "enterprise"}}}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	tiers, err := svc.ListServiceTiers(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tiers) != 3 {
+		t.Errorf("len(tiers) = %d, want 3", len(tiers))
 	}
 }
