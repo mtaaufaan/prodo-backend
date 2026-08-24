@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
@@ -23,6 +24,15 @@ type authRepository interface {
 
 	// ListOrgIDsForGroupAdmin -- S3-38, dasar klaim JWT prodo_org_ids.
 	ListOrgIDsForGroupAdmin(ctx context.Context, userID string) ([]string, error)
+
+	// CheckIPAllowlist -- S4P-17, implementation_gaps.md IG-20.
+	CheckIPAllowlist(ctx context.Context, userID, ip string) (allowed bool, err error)
+}
+
+// authEmailSender -- interface didefinisikan di consumer,
+// diimplementasikan *EmailService (S4P-16, implementation_gaps.md IG-20).
+type authEmailSender interface {
+	SendPlatformAdminLoginAlertEmail(ctx context.Context, to, displayName, ip, device string, loginTime time.Time) error
 }
 
 // AuthService menangani login (US-001) lewat model Keycloak-delegated yang
@@ -36,11 +46,12 @@ type AuthService struct {
 	keycloak keycloak.AdminClient
 	mfa      *MFAService
 	sessions *SessionService
+	email    authEmailSender
 	logger   *zap.Logger
 }
 
-func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, kc keycloak.AdminClient, mfa *MFAService, sessions *SessionService, logger *zap.Logger) *AuthService {
-	return &AuthService{repo: repo, oidc: oidc, keycloak: kc, mfa: mfa, sessions: sessions, logger: logger}
+func NewAuthService(repo authRepository, oidc keycloak.OIDCClient, kc keycloak.AdminClient, mfa *MFAService, sessions *SessionService, email authEmailSender, logger *zap.Logger) *AuthService {
+	return &AuthService{repo: repo, oidc: oidc, keycloak: kc, mfa: mfa, sessions: sessions, email: email, logger: logger}
 }
 
 // LoginResult adalah hasil LoginLocal/LoginSSO, dipetakan langsung ke
@@ -186,6 +197,11 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userA
 
 	isGroupAdmin := result.User.PlatformRole == string(domain.PlatformRoleGroupAdmin)
 	isPlatformAdmin := result.User.PlatformRole == string(domain.PlatformRoleAdmin)
+	if isPlatformAdmin {
+		if err := s.checkPAIPAllowlist(ctx, result.User.ID, ip); err != nil {
+			return nil, nil, err
+		}
+	}
 	if err := s.VerifyMFA(ctx, result.User.ID, isGroupAdmin, isPlatformAdmin, otpCode); err != nil {
 		if errors.Is(err, domain.ErrMFASetupRequired) {
 			challenge, setupErr := s.mfa.SetupTOTP(ctx, result.User.ID, result.User.Email)
@@ -213,7 +229,46 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userA
 		return nil, nil, fmt.Errorf("service.Login: %w", err)
 	}
 
+	if isPlatformAdmin {
+		s.sendPlatformAdminLoginAlert(ctx, result.User, userAgent, ip)
+	}
+
 	return result, nil, nil
+}
+
+// sendPlatformAdminLoginAlert (S4P-16, implementation_gaps.md IG-20) --
+// best-effort, TIDAK menggagalkan login kalau SMTP gagal (beda dari
+// RecordLogin/RecordSession di atas yang memang harus gagal -- keduanya
+// audit/keamanan inti, ini cuma notifikasi tambahan).
+func (s *AuthService) sendPlatformAdminLoginAlert(ctx context.Context, user *repository.LoginUserRecord, userAgent, ip string) {
+	browser, os := parseUserAgent(userAgent)
+	device := browser
+	if os != "" {
+		device = fmt.Sprintf("%s di %s", browser, os)
+	}
+	if err := s.email.SendPlatformAdminLoginAlertEmail(ctx, user.Email, user.DisplayName, ip, device, time.Now()); err != nil {
+		s.logger.Error("login Platform Admin sukses tapi gagal kirim email alert",
+			zap.String("user_id", user.ID), zap.Error(err))
+	}
+}
+
+// checkPAIPAllowlist (S4P-17, implementation_gaps.md IG-20): ip kosong
+// (dev/test client tanpa header nyata) LOLOS tanpa mengecek -- sama pola
+// toleransi yang sudah ada untuk userAgent/ip di RecordSession, dan
+// $1::inet tidak bisa cast string kosong sama sekali (akan error, bukan
+// ditolak dengan wajar).
+func (s *AuthService) checkPAIPAllowlist(ctx context.Context, userID, ip string) error {
+	if ip == "" {
+		return nil
+	}
+	allowed, err := s.repo.CheckIPAllowlist(ctx, userID, ip)
+	if err != nil {
+		return fmt.Errorf("service.checkPAIPAllowlist: %w", err)
+	}
+	if !allowed {
+		return fmt.Errorf("service.checkPAIPAllowlist: %w", domain.ErrIPNotAllowed)
+	}
+	return nil
 }
 
 // CompletePlatformAdminMFASetup menyelesaikan setup MFA Platform Admin yang
@@ -229,6 +284,9 @@ func (s *AuthService) CompletePlatformAdminMFASetup(ctx context.Context, email, 
 	}
 	if result.User.PlatformRole != string(domain.PlatformRoleAdmin) {
 		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", domain.ErrInvalidCredentials)
+	}
+	if err := s.checkPAIPAllowlist(ctx, result.User.ID, ip); err != nil {
+		return nil, err
 	}
 
 	ok, backupCodes, err := s.mfa.VerifyAndEnable(ctx, result.User.ID, otpCode)
@@ -249,6 +307,8 @@ func (s *AuthService) CompletePlatformAdminMFASetup(ctx context.Context, email, 
 			zap.String("user_id", result.User.ID), zap.Error(err))
 		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", err)
 	}
+
+	s.sendPlatformAdminLoginAlert(ctx, result.User, userAgent, ip)
 
 	result.BackupCodes = backupCodes
 	return result, nil

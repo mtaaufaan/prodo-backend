@@ -23,6 +23,7 @@ type sessionRepository interface {
 	CreateSession(ctx context.Context, userID, jti string, device repository.DeviceInfo, expiresAt time.Time) error
 	ListActiveSessions(ctx context.Context, userID string) ([]repository.Session, error)
 	TouchSession(ctx context.Context, jti string, idleTimeout time.Duration) (valid bool, err error)
+	TouchSessionFixed(ctx context.Context, jti string, fixedTimeout time.Duration) (valid bool, err error)
 	RevokeSession(ctx context.Context, userID, jti string) (remaining time.Duration, err error)
 	RevokeAllSessions(ctx context.Context, userID, exceptJTI string) ([]repository.RevokedSession, error)
 	IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error)
@@ -33,12 +34,13 @@ type sessionRepository interface {
 // timeout, revoke satu/semua sesi dengan Redis blacklist untuk penolakan
 // cepat tanpa query DB (docs/DATABASE_SCHEMA.md §5.3).
 type SessionService struct {
-	repo  sessionRepository
-	cache cache.Cache
+	repo          sessionRepository
+	cache         cache.Cache
+	paIdleTimeout time.Duration
 }
 
-func NewSessionService(repo sessionRepository, c cache.Cache) *SessionService {
-	return &SessionService{repo: repo, cache: c}
+func NewSessionService(repo sessionRepository, c cache.Cache, paIdleTimeout time.Duration) *SessionService {
+	return &SessionService{repo: repo, cache: c, paIdleTimeout: paIdleTimeout}
 }
 
 // blacklistKey -- satu key per jti, TTL = sisa masa berlaku token (lewat
@@ -106,16 +108,30 @@ func (s *SessionService) ListSessions(ctx context.Context, userID, currentJTI st
 
 // IsValidSession dipanggil JWT middleware di SETIAP request terautentikasi
 // (S1-28): Redis blacklist dicek dulu (cepat, hindari query DB untuk token
-// yang sudah jelas direvoke -- DATABASE_SCHEMA.md §5.3), baru
-// TouchSession di Postgres yang sekaligus menegakkan sliding idle timeout
-// DAN memperbarui last_active_at dalam satu query atomik.
-func (s *SessionService) IsValidSession(ctx context.Context, jti string) (bool, error) {
+// yang sudah jelas direvoke -- DATABASE_SCHEMA.md §5.3), baru TouchSession
+// di Postgres yang sekaligus menegakkan idle timeout DAN memperbarui
+// last_active_at dalam satu query atomik.
+//
+// platformRole menentukan kebijakan sesi mana yang berlaku (S4P-14/15,
+// implementation_gaps.md IG-20): Platform Admin pakai TouchSessionFixed
+// (non-sliding, sesuai desain "sliding disabled") dengan timeout jauh
+// lebih ketat (paIdleTimeout); role lain TETAP pakai TouchSession sliding
+// 30 menit seperti semula -- TIDAK terpengaruh perubahan ini.
+func (s *SessionService) IsValidSession(ctx context.Context, jti, platformRole string) (bool, error) {
 	_, err := s.cache.Get(ctx, blacklistKey(jti))
 	if err == nil {
 		return false, nil // ada di blacklist -> revoked
 	}
 	if err != cache.ErrNotFound {
 		return false, fmt.Errorf("service.IsValidSession: cek blacklist: %w", err)
+	}
+
+	if platformRole == "platform_admin" {
+		valid, err := s.repo.TouchSessionFixed(ctx, jti, s.paIdleTimeout)
+		if err != nil {
+			return false, fmt.Errorf("service.IsValidSession: %w", err)
+		}
+		return valid, nil
 	}
 
 	valid, err := s.repo.TouchSession(ctx, jti, slidingIdleTimeout)
