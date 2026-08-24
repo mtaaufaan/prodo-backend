@@ -28,13 +28,22 @@ func NewAccountRepository(db *pgxpool.Pool) *AccountRepository {
 
 // CreateGroupAdminInvitationParams membungkus seluruh data yang dibutuhkan
 // untuk provisioning satu akun Group Admin. Semua insert (users,
-// user_auth_providers, platform_invitations, audit_logs) terjadi dalam satu
-// transaksi -- all-or-nothing, lihat docs/DATABASE_SCHEMA.md §5.1/5.2/5.27
+// user_auth_providers, platform_invitations, groups,
+// group_admin_assignments, audit_logs) terjadi dalam satu transaksi --
+// all-or-nothing, lihat docs/DATABASE_SCHEMA.md §5.1/5.2/5.5/5.6/5.27
 // dan migrations/20260820150000_users_auth_providers.up.sql +
 // 20260820150100_platform_invitations_audit_logs.up.sql.
+//
+// GroupName -- IG-21: SETIAP GA baru WAJIB langsung mengelola satu grup
+// (sesuai desain "Tambah Group Admin", field "Nama Perusahaan / Grup") --
+// tidak ada lagi GA "yatim" tanpa grup seperti sejak S1-05. Field
+// desain lain (Jabatan PIC, Alamat Perusahaan, No. Telepon, Tier +
+// plafon otomatis) SENGAJA belum ditangani di sini -- kolomnya belum ada
+// di skema `groups`, menyusul S4P-06/07.
 type CreateGroupAdminInvitationParams struct {
 	Email           string
 	DisplayName     string
+	GroupName       string
 	KeycloakUserID  string
 	TokenHash       string
 	ExpiresAt       time.Time
@@ -42,9 +51,10 @@ type CreateGroupAdminInvitationParams struct {
 }
 
 // CreateGroupAdminInvitation menyimpan user baru (is_active=false,
-// platform_role='group_admin'), referensi Keycloak-nya, token aktivasi, dan
-// entry audit trail (US-073 AC: "seluruh aksi onboarding dicatat"). Kalau
-// email sudah ada, mengembalikan domain.ErrEmailAlreadyExists.
+// platform_role='group_admin'), referensi Keycloak-nya, token aktivasi,
+// grup baru + assignment-nya (IG-21), dan entry audit trail (US-073 AC:
+// "seluruh aksi onboarding dicatat"). Kalau email sudah ada, mengembalikan
+// domain.ErrEmailAlreadyExists.
 func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *CreateGroupAdminInvitationParams) (userID string, err error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -79,9 +89,24 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert platform_invitations: %w", err)
 	}
 
+	var groupID string
+	if err = tx.QueryRow(ctx, `
+		INSERT INTO groups (name) VALUES ($1) RETURNING id
+	`, p.GroupName).Scan(&groupID); err != nil {
+		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert groups: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO group_admin_assignments (group_id, user_id, assigned_by)
+		VALUES ($1, $2, $3)
+	`, groupID, userID, p.InvitedByUserID); err != nil {
+		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert group_admin_assignments: %w", err)
+	}
+
 	metadata, err := json.Marshal(map[string]string{
 		"email":         p.Email,
 		"platform_role": "group_admin",
+		"group_id":      groupID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: encode metadata: %w", err)
@@ -606,6 +631,118 @@ func (r *AccountRepository) ReactivateGroupAdmin(ctx context.Context, targetUser
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("repository.ReactivateGroupAdmin: commit tx: %w", err)
+	}
+	return nil
+}
+
+// TransferGroup memindahkan pengelolaan SEMUA grup dari fromUserID ke
+// toUserID (S4P-03/04, IG-21). `organizations.group_id` TIDAK disentuh --
+// organisasi tetap berada di grup yang sama, yang berubah cuma siapa GA
+// pengelolanya (koreksi wording AC lama sprint_backlog.md yang menyebut
+// "org berpindah group_id", audit S4 H4). toUserID harus akun
+// platform_role='group_admin' yang valid, kalau tidak ->
+// domain.ErrInvalidTransferTarget.
+func (r *AccountRepository) TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (transferredGroupCount int, err error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var targetIsGA bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND platform_role = 'group_admin' AND deleted_at IS NULL)
+	`, toUserID).Scan(&targetIsGA); err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: cek target: %w", err)
+	}
+	if !targetIsGA {
+		return 0, fmt.Errorf("repository.TransferGroup: %w", domain.ErrInvalidTransferTarget)
+	}
+
+	rows, err := tx.Query(ctx, `
+		UPDATE group_admin_assignments
+		SET user_id = $2, assigned_by = $3, assigned_at = NOW()
+		WHERE user_id = $1
+		RETURNING group_id
+	`, fromUserID, toUserID, actorUserID)
+	if err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: update: %w", err)
+	}
+	var groupIDs []string
+	for rows.Next() {
+		var gid string
+		if err := rows.Scan(&gid); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("repository.TransferGroup: scan: %w", err)
+		}
+		groupIDs = append(groupIDs, gid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: rows: %w", err)
+	}
+
+	metadata, err := json.Marshal(map[string]any{
+		"from_user_id": fromUserID,
+		"to_user_id":   toUserID,
+		"group_ids":    groupIDs,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: encode metadata: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
+		VALUES ($1, 'platform_admin', 'group.transferred', 'user', $2, $3::jsonb)
+	`, actorUserID, fromUserID, string(metadata)); err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("repository.TransferGroup: commit tx: %w", err)
+	}
+	return len(groupIDs), nil
+}
+
+// DeleteGroupAdmin menghapus (soft-delete via users.deleted_at, konsisten
+// dengan FindUserForLogin/FindUserByID yang sudah memfilter deleted_at)
+// akun Group Admin -- HANYA kalau dia sudah tidak mengelola grup manapun
+// (S4P-05, IG-21). Transfer (S4P-03/04) memindahkan SELURUH assignment
+// GA sekaligus (bukan per-grup), jadi cukup cek keberadaan baris
+// group_admin_assignments -- GA yang sudah ditransfer otomatis 0 baris.
+func (r *AccountRepository) DeleteGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.DeleteGroupAdmin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var stillManagesGroup bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM group_admin_assignments WHERE user_id = $1)
+	`, targetUserID).Scan(&stillManagesGroup); err != nil {
+		return fmt.Errorf("repository.DeleteGroupAdmin: cek grup: %w", err)
+	}
+	if stillManagesGroup {
+		return fmt.Errorf("repository.DeleteGroupAdmin: %w", domain.ErrGroupTransferRequired)
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE users SET deleted_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND platform_role = 'group_admin' AND deleted_at IS NULL
+	`, targetUserID)
+	if err != nil {
+		return fmt.Errorf("repository.DeleteGroupAdmin: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.DeleteGroupAdmin: %w", domain.ErrUserNotFound)
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.deleted", targetUserID); err != nil {
+		return fmt.Errorf("repository.DeleteGroupAdmin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.DeleteGroupAdmin: commit tx: %w", err)
 	}
 	return nil
 }
