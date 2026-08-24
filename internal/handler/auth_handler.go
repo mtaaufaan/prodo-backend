@@ -137,6 +137,11 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 				"Akun belum aktif. Periksa email undangan Anda atau hubungi administrator.", nil))
 		case errors.Is(err, domain.ErrInvalidOTP):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OTP", "Kode OTP tidak valid.", nil))
+		case errors.Is(err, domain.ErrIPNotAllowed):
+			// S4P-17 (implementation_gaps.md IG-20): dicek SEBELUM MFA --
+			// PA yang login dari IP terlarang tidak perlu tahu status MFA-nya.
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("IP_NOT_ALLOWED",
+				"Login tidak diizinkan dari alamat IP ini.", nil))
 		case errors.Is(err, domain.ErrMFASetupRequired):
 			// S4P-14/19 (implementation_gaps.md IG-20): BUKAN error bagi FE
 			// -- 200 dengan payload setup, PlatformLoginPage lanjut ke
@@ -210,6 +215,9 @@ func (h *AuthHandler) CompletePlatformAdminMFASetup(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusForbidden).JSON(response.Error("ACCOUNT_INACTIVE", "Akun belum aktif.", nil))
 		case errors.Is(err, domain.ErrInvalidOTP):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OTP", "Kode OTP tidak valid.", nil))
+		case errors.Is(err, domain.ErrIPNotAllowed):
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("IP_NOT_ALLOWED",
+				"Login tidak diizinkan dari alamat IP ini.", nil))
 		default:
 			h.logger.Error("gagal menyelesaikan setup MFA Platform Admin", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyelesaikan setup MFA", nil))

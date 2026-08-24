@@ -143,6 +143,35 @@ func (r *SessionRepository) TouchSession(ctx context.Context, jti string, idleTi
 	return true, nil
 }
 
+// TouchSessionFixed adalah versi NON-sliding TouchSession (S4P-14/15,
+// implementation_gaps.md IG-20): dipakai KHUSUS Platform Admin karena
+// desain (Platform Admin Login.dc.html, "sliding disabled") mensyaratkan
+// sesi berakhir tepat pada waktu tetap sejak login, TIDAK diperpanjang
+// oleh aktivitas -- beda dari TouchSession (role lain) yang memperbarui
+// last_active_at sebagai basis pengecekan berikutnya (sliding). Di sini
+// last_active_at TETAP diperbarui (dipakai murni untuk tampilan "terakhir
+// aktif" di GET /auth/sessions), tapi validitas sesi dicek terhadap
+// created_at yang TIDAK PERNAH berubah.
+func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string, fixedTimeout time.Duration) (valid bool, err error) {
+	var id string
+	err = r.db.QueryRow(ctx, `
+		UPDATE user_sessions
+		SET last_active_at = NOW()
+		WHERE jti = $1
+		  AND revoked_at IS NULL
+		  AND expires_at > NOW()
+		  AND created_at > NOW() - $2::interval
+		RETURNING id
+	`, jti, fixedTimeout.String()).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("repository.TouchSessionFixed: %w", err)
+	}
+	return true, nil
+}
+
 // RevokeSession meng-set revoked_at (S1-33) -- HANYA kalau jti benar-benar
 // milik userID (ownership check langsung di WHERE, bukan query terpisah
 // -- mencegah TOCTOU dan sekaligus jadi satu-satunya jalan untuk

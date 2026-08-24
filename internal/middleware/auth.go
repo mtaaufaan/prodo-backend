@@ -44,7 +44,7 @@ type Claims struct {
 // Redis blacklist dulu (cepat), baru sliding idle timeout di Postgres --
 // lihat docs/DATABASE_SCHEMA.md §5.3.
 type SessionChecker interface {
-	IsValidSession(ctx context.Context, jti string) (bool, error)
+	IsValidSession(ctx context.Context, jti, platformRole string) (bool, error)
 }
 
 // JWTAuth memverifikasi Bearer token terhadap JWKS Keycloak (RS256),
@@ -97,7 +97,7 @@ func JWTAuth(cfg *config.Config, sessions SessionChecker) (fiber.Handler, error)
 		// sendiri belum expired. Tidak ada baris sesi sama sekali (mis.
 		// token dari sebelum S1-27 ada) dianggap TIDAK valid juga --
 		// fail-closed, konsisten dengan model "setiap login membuat sesi".
-		valid, err := sessions.IsValidSession(c.Context(), claims.ID)
+		valid, err := sessions.IsValidSession(c.Context(), claims.ID, claims.PlatformRole)
 		if err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "gagal memverifikasi sesi")
 		}

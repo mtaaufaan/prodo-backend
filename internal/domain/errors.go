@@ -56,6 +56,11 @@ var (
 	// menolak login begitu saja.
 	ErrMFASetupRequired = errors.New("mfa setup is required for this platform admin account")
 
+	// ErrIPNotAllowed dikembalikan saat Platform Admin login dari IP di
+	// luar allowlist yang dia konfigurasi sendiri (S4P-17, opsional --
+	// hanya berlaku kalau akun tersebut PUNYA baris allowlist sama sekali).
+	ErrIPNotAllowed = errors.New("login is not allowed from this ip address")
+
 	// ErrSessionNotFound dikembalikan saat jti tidak ditemukan di
 	// user_sessions, atau ditemukan tapi milik user lain (S1-33) --
 	// disamakan supaya tidak membocorkan keberadaan sesi user lain.

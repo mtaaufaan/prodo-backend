@@ -55,6 +55,43 @@ func (e *EmailService) SendWorkspaceInvitationEmail(_ context.Context, to, works
 	return nil
 }
 
+// SendPlatformAdminLoginAlertEmail mengirim notifikasi setiap login
+// Platform Admin (S4P-16, implementation_gaps.md IG-20) -- waktu, IP, dan
+// device, sesuai AC US-070. Dikirim best-effort SETELAH login benar-benar
+// sukses (AuthService.Login) -- kegagalan kirim email TIDAK boleh
+// menggagalkan login itu sendiri (beda dari RecordLogin/RecordSession
+// yang memang harus menggagalkan login kalau gagal, karena keduanya
+// bagian dari audit/keamanan inti, bukan notifikasi tambahan).
+func (e *EmailService) SendPlatformAdminLoginAlertEmail(_ context.Context, to, displayName, ip, device string, loginTime time.Time) error {
+	msg := buildPlatformAdminLoginAlertMessage(e.from, to, displayName, ip, device, loginTime)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendPlatformAdminLoginAlertEmail: %w", err)
+	}
+	return nil
+}
+
+// buildPlatformAdminLoginAlertMessage -- dipisah dari
+// SendPlatformAdminLoginAlertEmail supaya bisa di-unit-test tanpa koneksi
+// SMTP nyata (pola sama dengan buildActivationEmailMessage).
+func buildPlatformAdminLoginAlertMessage(from, to, displayName, ip, device string, loginTime time.Time) []byte {
+	subject := "Peringatan Login Platform Admin - PRODO"
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Login berhasil pada %s dari %s menggunakan %s.\r\n\r\n"+
+			"Jika ini bukan Anda, segera akhiri semua sesi lewat panel keamanan\r\n"+
+			"Platform Admin dan hubungi tim operasional PRODO.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, loginTime.Format("2 January 2006 15:04 MST"), ip, device,
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
 // buildWorkspaceInvitationEmailMessage -- dipisah dari
 // SendWorkspaceInvitationEmail supaya bisa di-unit-test tanpa koneksi SMTP
 // nyata (pola sama dengan buildActivationEmailMessage).
