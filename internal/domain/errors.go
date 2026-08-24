@@ -47,6 +47,15 @@ var (
 	// TRUE), jadi ini murni pengaman untuk state yang tidak konsisten.
 	ErrMFARequired = errors.New("mfa is required for this account but not configured")
 
+	// ErrMFASetupRequired dikembalikan saat Platform Admin login tapi belum
+	// punya MFA aktif (S4P-14, implementation_gaps.md IG-20) -- BEDA dari
+	// ErrMFARequired: ini alur yang DIHARAPKAN terjadi (akun PA tidak
+	// melalui onboarding invite+aktivasi seperti Group Admin/US-073, jadi
+	// tidak ada langkah wajib setup MFA sebelumnya). Caller (AuthService.
+	// Login) menerbitkan tantangan setup MFA saat error ini muncul, bukan
+	// menolak login begitu saja.
+	ErrMFASetupRequired = errors.New("mfa setup is required for this platform admin account")
+
 	// ErrSessionNotFound dikembalikan saat jti tidak ditemukan di
 	// user_sessions, atau ditemukan tapi milik user lain (S1-33) --
 	// disamakan supaya tidak membocorkan keberadaan sesi user lain.

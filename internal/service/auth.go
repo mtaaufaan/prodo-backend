@@ -51,6 +51,20 @@ type LoginResult struct {
 	TokenType    string
 	ExpiresIn    int
 	User         *repository.LoginUserRecord
+	// BackupCodes cuma terisi sekali, tepat setelah MFA baru diaktifkan
+	// (CompletePlatformAdminMFASetup, S4P-14/19) -- nil di login normal.
+	BackupCodes []string
+}
+
+// MFASetupChallenge diterbitkan AuthService.Login saat Platform Admin
+// login tapi belum punya MFA aktif (S4P-14, implementation_gaps.md IG-20).
+// FE (PlatformLoginPage, S4P-19) menampilkan QR/secret ini, lalu POST
+// /auth/platform/mfa-setup/verify dengan email/password/otp_code yang sama
+// untuk menyelesaikan setup DAN login sekaligus.
+type MFASetupChallenge struct {
+	Email           string
+	QRCodePNGBase64 string
+	TOTPSecret      string
 }
 
 // LoginLocal memverifikasi credential lokal dan mengembalikan token
@@ -127,22 +141,30 @@ func (s *AuthService) syncKeycloakClaims(ctx context.Context, user *repository.L
 	return nil
 }
 
-// VerifyMFA memverifikasi OTP saat login (S1-17, US-001). Kebijakan: Group
-// Admin WAJIB punya MFA aktif (kalau belum -> domain.ErrMFARequired --
-// seharusnya tidak pernah terjadi lewat alur onboarding normal, S1-06/07
-// sudah mewajibkan setup MFA sebelum akun aktif; ini murni pengaman).
-// Member yang belum setup MFA -> lolos tanpa OTP (opsional). Kalau MFA
-// aktif dan kode salah -> domain.ErrInvalidOTP.
-func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin bool, otpCode string) error {
+// VerifyMFA memverifikasi OTP saat login (S1-17, US-001; S4P-14 untuk
+// Platform Admin). Kebijakan: Group Admin WAJIB punya MFA aktif (kalau
+// belum -> domain.ErrMFARequired -- seharusnya tidak pernah terjadi lewat
+// alur onboarding normal, S1-06/07 sudah mewajibkan setup MFA sebelum akun
+// aktif; ini murni pengaman). Platform Admin JUGA wajib MFA, tapi BEDA
+// perlakuan -- akun PA tidak melalui alur invite+aktivasi seperti GA, jadi
+// "belum ada MFA" adalah kondisi NORMAL untuk login pertama, bukan state
+// tidak konsisten -> domain.ErrMFASetupRequired (caller menerbitkan
+// tantangan setup, bukan menolak). Member yang belum setup MFA -> lolos
+// tanpa OTP (opsional). Kalau MFA aktif dan kode salah -> domain.ErrInvalidOTP.
+func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin, isPlatformAdmin bool, otpCode string) error {
 	enabled, valid, err := s.mfa.VerifyLoginOTP(ctx, userID, otpCode)
 	if err != nil {
 		return fmt.Errorf("service.VerifyMFA: %w", err)
 	}
 	if !enabled {
-		if isGroupAdmin {
+		switch {
+		case isGroupAdmin:
 			return fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFARequired)
+		case isPlatformAdmin:
+			return fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFASetupRequired)
+		default:
+			return nil
 		}
-		return nil
 	}
 	if !valid {
 		return fmt.Errorf("service.VerifyMFA: %w", domain.ErrInvalidOTP)
@@ -156,29 +178,79 @@ func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin
 // supaya handler tetap tipis (docs/coding-conventions.md). userAgent/ip
 // dari header request, dipakai buat catatan device_info sesi (S1-27) --
 // bukan bagian dari kredensial, jadi lolos meski kosong (dev/test client).
-func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userAgent, ip string) (*LoginResult, error) {
+func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userAgent, ip string) (*LoginResult, *MFASetupChallenge, error) {
 	result, err := s.LoginLocal(ctx, email, password)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	isGroupAdmin := result.User.PlatformRole == string(domain.PlatformRoleGroupAdmin)
-	if err := s.VerifyMFA(ctx, result.User.ID, isGroupAdmin, otpCode); err != nil {
-		return nil, err
+	isPlatformAdmin := result.User.PlatformRole == string(domain.PlatformRoleAdmin)
+	if err := s.VerifyMFA(ctx, result.User.ID, isGroupAdmin, isPlatformAdmin, otpCode); err != nil {
+		if errors.Is(err, domain.ErrMFASetupRequired) {
+			challenge, setupErr := s.mfa.SetupTOTP(ctx, result.User.ID, result.User.Email)
+			if setupErr != nil {
+				return nil, nil, fmt.Errorf("service.Login: init MFA setup PA: %w", setupErr)
+			}
+			return nil, &MFASetupChallenge{
+				Email:           result.User.Email,
+				QRCodePNGBase64: challenge.QRCodePNGBase64,
+				TOTPSecret:      challenge.TOTPSecret,
+			}, err
+		}
+		return nil, nil, err
 	}
 
 	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole); err != nil {
 		s.logger.Error("login berhasil tapi gagal mencatat audit trail",
 			zap.String("user_id", result.User.ID), zap.Error(err))
-		return nil, fmt.Errorf("service.Login: %w", err)
+		return nil, nil, fmt.Errorf("service.Login: %w", err)
 	}
 
 	if err := s.sessions.RecordSession(ctx, result.User.ID, result.AccessToken, userAgent, ip); err != nil {
 		s.logger.Error("login berhasil tapi gagal mencatat sesi -- fitur multi-device/remote-logout tidak akan melihat sesi ini",
 			zap.String("user_id", result.User.ID), zap.Error(err))
-		return nil, fmt.Errorf("service.Login: %w", err)
+		return nil, nil, fmt.Errorf("service.Login: %w", err)
 	}
 
+	return result, nil, nil
+}
+
+// CompletePlatformAdminMFASetup menyelesaikan setup MFA Platform Admin yang
+// dimulai lewat MFASetupChallenge (S4P-14/19) DAN langsung menerbitkan token
+// login -- menghindari PA harus login dua kali (setup lalu login ulang).
+// Re-verifikasi email/password (bukan cuma percaya userID dari challenge
+// sebelumnya) karena tidak ada sesi/token yang mengikat request setup ke
+// request login pertama; keduanya request terpisah tanpa state di server.
+func (s *AuthService) CompletePlatformAdminMFASetup(ctx context.Context, email, password, otpCode, userAgent, ip string) (*LoginResult, error) {
+	result, err := s.LoginLocal(ctx, email, password)
+	if err != nil {
+		return nil, err
+	}
+	if result.User.PlatformRole != string(domain.PlatformRoleAdmin) {
+		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", domain.ErrInvalidCredentials)
+	}
+
+	ok, backupCodes, err := s.mfa.VerifyAndEnable(ctx, result.User.ID, otpCode)
+	if err != nil {
+		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", domain.ErrInvalidOTP)
+	}
+
+	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole); err != nil {
+		s.logger.Error("setup MFA PA berhasil tapi gagal mencatat audit trail",
+			zap.String("user_id", result.User.ID), zap.Error(err))
+		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", err)
+	}
+	if err := s.sessions.RecordSession(ctx, result.User.ID, result.AccessToken, userAgent, ip); err != nil {
+		s.logger.Error("setup MFA PA berhasil tapi gagal mencatat sesi",
+			zap.String("user_id", result.User.ID), zap.Error(err))
+		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", err)
+	}
+
+	result.BackupCodes = backupCodes
 	return result, nil
 }
 

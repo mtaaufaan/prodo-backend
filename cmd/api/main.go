@@ -172,6 +172,7 @@ func run() error {
 	v1.Post("/auth/activate", authHandler.Activate)
 	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
 	v1.Post("/auth/login", authHandler.Login)
+	v1.Post("/auth/platform/mfa-setup/verify", authHandler.CompletePlatformAdminMFASetup) // S4P-14/19
 	v1.Get("/auth/sessions", jwtAuth, sessionHandler.List)
 	v1.Delete("/auth/sessions/:jti", jwtAuth, sessionHandler.Revoke)
 	v1.Delete("/auth/sessions", jwtAuth, sessionHandler.RevokeAll)
