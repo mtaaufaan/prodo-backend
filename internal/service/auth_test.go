@@ -344,7 +344,7 @@ func TestAuthService_VerifyMFA_ValidOTP(t *testing.T) {
 	secret := generateTestTOTPSecret(t)
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", true, currentTOTPCode(t, secret))
+	err := svc.VerifyMFA(context.Background(), "user-1", true, false, currentTOTPCode(t, secret))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
 	secret := generateTestTOTPSecret(t)
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", true, "000000")
+	err := svc.VerifyMFA(context.Background(), "user-1", true, false, "000000")
 	if !errors.Is(err, domain.ErrInvalidOTP) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
 	}
@@ -363,16 +363,25 @@ func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
 func TestAuthService_VerifyMFA_GroupAdminWithoutMFA_Blocked(t *testing.T) {
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", true, "")
+	err := svc.VerifyMFA(context.Background(), "user-1", true, false, "")
 	if !errors.Is(err, domain.ErrMFARequired) {
 		t.Errorf("err = %v, want wrapped domain.ErrMFARequired", err)
+	}
+}
+
+func TestAuthService_VerifyMFA_PlatformAdminWithoutMFA_SetupRequired(t *testing.T) {
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
+
+	err := svc.VerifyMFA(context.Background(), "user-1", false, true, "")
+	if !errors.Is(err, domain.ErrMFASetupRequired) {
+		t.Errorf("err = %v, want wrapped domain.ErrMFASetupRequired", err)
 	}
 }
 
 func TestAuthService_VerifyMFA_MemberWithoutMFA_Passes(t *testing.T) {
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", false, "")
+	err := svc.VerifyMFA(context.Background(), "user-1", false, false, "")
 	if err != nil {
 		t.Errorf("member tanpa MFA harusnya lolos (opsional): %v", err)
 	}
@@ -387,9 +396,12 @@ func TestAuthService_Login_Success_RecordsAudit(t *testing.T) {
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: accessToken, TokenType: "Bearer", ExpiresIn: 3600}}
 	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
-	result, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", currentTOTPCode(t, secret), "test-agent", "127.0.0.1")
+	result, challenge, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", currentTOTPCode(t, secret), "test-agent", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if challenge != nil {
+		t.Errorf("login sukses tidak boleh menerbitkan MFASetupChallenge: %+v", challenge)
 	}
 	if result.AccessToken != accessToken {
 		t.Errorf("result = %+v, unexpected", result)
@@ -407,11 +419,85 @@ func TestAuthService_Login_WrongOTP_NoAuditRecorded(t *testing.T) {
 	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", TokenType: "Bearer", ExpiresIn: 3600}}
 	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), zap.NewNop())
 
-	_, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", "000000", "test-agent", "127.0.0.1")
+	_, _, err := svc.Login(context.Background(), "ga@example.com", "Str0ng!Passw0rd", "000000", "test-agent", "127.0.0.1")
 	if !errors.Is(err, domain.ErrInvalidOTP) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
 	}
 	if repo.recordedLoginUserID != "" {
 		t.Error("login gagal (OTP salah) tidak boleh tercatat sebagai login berhasil")
+	}
+}
+
+func TestAuthService_Login_PlatformAdminWithoutMFA_IssuesSetupChallenge(t *testing.T) {
+	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{
+		ID: "pa-1", Email: "pa@example.com", PlatformRole: "platform_admin", IsActive: true,
+	}}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", TokenType: "Bearer", ExpiresIn: 3600}}
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), zap.NewNop())
+
+	result, challenge, err := svc.Login(context.Background(), "pa@example.com", "Str0ng!Passw0rd", "", "test-agent", "127.0.0.1")
+	if !errors.Is(err, domain.ErrMFASetupRequired) {
+		t.Fatalf("err = %v, want wrapped domain.ErrMFASetupRequired", err)
+	}
+	if result != nil {
+		t.Errorf("result harus nil saat setup MFA dibutuhkan: %+v", result)
+	}
+	if challenge == nil || challenge.QRCodePNGBase64 == "" || challenge.TOTPSecret == "" {
+		t.Fatalf("challenge harus berisi QR + secret: %+v", challenge)
+	}
+	if repo.recordedLoginUserID != "" {
+		t.Error("login belum selesai (masih tahap setup MFA) tidak boleh tercatat sebagai login berhasil")
+	}
+}
+
+func TestAuthService_CompletePlatformAdminMFASetup_Success(t *testing.T) {
+	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{
+		ID: "pa-1", Email: "pa@example.com", PlatformRole: "platform_admin", IsActive: true,
+	}}
+	accessToken := testAccessTokenJWT(t, "jti-pa-setup")
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: accessToken, TokenType: "Bearer", ExpiresIn: 3600}}
+	mfaRepo := &fakeMFARepository{enabled: false}
+	mfaSvc := NewMFAService(mfaRepo)
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, mfaSvc, newTestSessionService(), zap.NewNop())
+
+	setup, err := mfaSvc.SetupTOTP(context.Background(), "pa-1", "pa@example.com")
+	if err != nil {
+		t.Fatalf("SetupTOTP: %v", err)
+	}
+
+	result, err := svc.CompletePlatformAdminMFASetup(context.Background(), "pa@example.com", "Str0ng!Passw0rd", currentTOTPCode(t, setup.TOTPSecret), "test-agent", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.AccessToken != accessToken {
+		t.Errorf("result = %+v, unexpected", result)
+	}
+	if len(result.BackupCodes) == 0 {
+		t.Error("setup MFA sukses harus menerbitkan backup codes")
+	}
+	if repo.recordedLoginUserID != "pa-1" {
+		t.Error("setup MFA + login sukses harusnya tercatat lewat RecordLogin")
+	}
+}
+
+func TestAuthService_CompletePlatformAdminMFASetup_WrongOTP(t *testing.T) {
+	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{
+		ID: "pa-1", Email: "pa@example.com", PlatformRole: "platform_admin", IsActive: true,
+	}}
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: "at", TokenType: "Bearer", ExpiresIn: 3600}}
+	mfaRepo := &fakeMFARepository{enabled: false}
+	mfaSvc := NewMFAService(mfaRepo)
+	svc := NewAuthService(repo, oidc, &fakeKeycloakClient{}, mfaSvc, newTestSessionService(), zap.NewNop())
+
+	if _, err := mfaSvc.SetupTOTP(context.Background(), "pa-1", "pa@example.com"); err != nil {
+		t.Fatalf("SetupTOTP: %v", err)
+	}
+
+	_, err := svc.CompletePlatformAdminMFASetup(context.Background(), "pa@example.com", "Str0ng!Passw0rd", "000000", "test-agent", "127.0.0.1")
+	if !errors.Is(err, domain.ErrInvalidOTP) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
+	}
+	if repo.recordedLoginUserID != "" {
+		t.Error("setup gagal (OTP salah) tidak boleh tercatat sebagai login berhasil")
 	}
 }

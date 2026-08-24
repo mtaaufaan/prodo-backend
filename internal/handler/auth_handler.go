@@ -127,7 +127,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format email tidak valid", nil))
 	}
 
-	result, err := h.auth.Login(c.Context(), req.Email, req.Password, req.MFACode, c.Get("User-Agent"), c.IP())
+	result, challenge, err := h.auth.Login(c.Context(), req.Email, req.Password, req.MFACode, c.Get("User-Agent"), c.IP())
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidCredentials):
@@ -137,6 +137,16 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 				"Akun belum aktif. Periksa email undangan Anda atau hubungi administrator.", nil))
 		case errors.Is(err, domain.ErrInvalidOTP):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OTP", "Kode OTP tidak valid.", nil))
+		case errors.Is(err, domain.ErrMFASetupRequired):
+			// S4P-14/19 (implementation_gaps.md IG-20): BUKAN error bagi FE
+			// -- 200 dengan payload setup, PlatformLoginPage lanjut ke
+			// layar QR lalu POST /auth/platform/mfa-setup/verify.
+			return c.JSON(response.Success(fiber.Map{
+				"mfa_setup_required": true,
+				"totp_qr_url":        "data:image/png;base64," + challenge.QRCodePNGBase64,
+				"totp_secret":        challenge.TOTPSecret,
+				"email":              challenge.Email,
+			}))
 		case errors.Is(err, domain.ErrMFARequired):
 			// ponytail: seharusnya tidak pernah terjadi lewat onboarding
 			// normal (lihat domain.ErrMFARequired) -- 403 generik, bukan
@@ -157,6 +167,61 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		"refresh_token": result.RefreshToken,
 		"token_type":    result.TokenType,
 		"expires_in":    result.ExpiresIn,
+		"user": fiber.Map{
+			"id":            result.User.ID,
+			"email":         result.User.Email,
+			"display_name":  result.User.DisplayName,
+			"platform_role": result.User.PlatformRole,
+			"avatar_url":    result.User.AvatarURL,
+		},
+	}))
+}
+
+type platformMFASetupVerifyRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	OTPCode  string `json:"otp_code"`
+}
+
+// CompletePlatformAdminMFASetup menangani POST /auth/platform/mfa-setup/verify
+// (S4P-14/19, `[PUBLIC]`) -- langkah kedua alur login pertama Platform
+// Admin: verifikasi OTP dari QR yang diterbitkan POST /auth/login
+// (respons `mfa_setup_required`), aktifkan MFA, dan langsung terbitkan
+// token (tidak perlu login ulang).
+func (h *AuthHandler) CompletePlatformAdminMFASetup(c *fiber.Ctx) error {
+	var req platformMFASetupVerifyRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email == "" || req.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email dan password wajib diisi", nil))
+	}
+	if !isSixDigits(req.OTPCode) {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "otp_code harus 6 digit angka", nil))
+	}
+
+	result, err := h.auth.CompletePlatformAdminMFASetup(c.Context(), req.Email, req.Password, req.OTPCode, c.Get("User-Agent"), c.IP())
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidCredentials):
+			return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Email atau password tidak valid.", nil))
+		case errors.Is(err, domain.ErrAccountInactive):
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("ACCOUNT_INACTIVE", "Akun belum aktif.", nil))
+		case errors.Is(err, domain.ErrInvalidOTP):
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OTP", "Kode OTP tidak valid.", nil))
+		default:
+			h.logger.Error("gagal menyelesaikan setup MFA Platform Admin", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyelesaikan setup MFA", nil))
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{
+		"access_token":  result.AccessToken,
+		"refresh_token": result.RefreshToken,
+		"token_type":    result.TokenType,
+		"expires_in":    result.ExpiresIn,
+		"backup_codes":  result.BackupCodes,
 		"user": fiber.Map{
 			"id":            result.User.ID,
 			"email":         result.User.Email,
