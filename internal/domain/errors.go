@@ -141,4 +141,14 @@ var (
 	// set session timeout di bawah batas minimum 10 menit (US-070 AC,
 	// S4P-18).
 	ErrSessionTimeoutTooShort = errors.New("session timeout below minimum allowed")
+
+	// ErrInvalidTransferTarget dikembalikan saat target transfer grup
+	// (S4P-03/04) bukan akun Group Admin yang valid.
+	ErrInvalidTransferTarget = errors.New("transfer target is not a valid group admin")
+
+	// ErrGroupTransferRequired dikembalikan saat mencoba menghapus akun
+	// Group Admin (S4P-05) yang masih mengelola minimal satu grup --
+	// transfer (S4P-03/04) dulu sebelum bisa dihapus, supaya organisasi di
+	// grup itu tidak kehilangan pengelola.
+	ErrGroupTransferRequired = errors.New("group must be transferred before this account can be deleted")
 )
