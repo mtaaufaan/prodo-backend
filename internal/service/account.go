@@ -39,6 +39,12 @@ type accountRepository interface {
 	TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (transferredGroupCount int, err error)
 	DeleteGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
 
+	// GetGroupAdminDetail/UpdateGroupAdmin/ListServiceTiers -- S4P-06/07,
+	// form "Lihat"/"Ubah" Group Admin lengkap sesuai desain.
+	GetGroupAdminDetail(ctx context.Context, targetUserID string) (*repository.GroupAdminSummary, error)
+	UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) error
+	ListServiceTiers(ctx context.Context) ([]repository.ServiceTier, error)
+
 	// GetPASessionIdleTimeoutSeconds/SetPASessionIdleTimeoutSeconds --
 	// S4P-18, satu setting global untuk seluruh akun Platform Admin.
 	GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error)
@@ -65,17 +71,27 @@ func NewAccountService(repo accountRepository, kc keycloak.AdminClient, logger *
 	return &AccountService{repo: repo, keycloak: kc, logger: logger}
 }
 
+// validServiceTiers -- lihat migrations/20260902090000_service_tiers.up.sql.
+// Divalidasi di Go SEBELUM sampai ke DB constraint supaya pesan errornya
+// jelas (domain.ErrInvalidTier), bukan pgError mentah.
+var validServiceTiers = map[string]bool{"starter": true, "business": true, "enterprise": true}
+
 // CreateGroupAdminRequest adalah input pembuatan akun Group Admin oleh
 // Platform Admin (US-073). GroupName WAJIB (IG-21, sesuai desain "Tambah
 // Group Admin" -- field "Nama Perusahaan / Grup") -- setiap GA baru
 // langsung mengelola satu grup baru, tidak ada lagi GA "yatim" seperti
-// sejak S1-05. Field desain lain (Jabatan PIC, Alamat Perusahaan, No.
-// Telepon, Tier + plafon otomatis) SENGAJA belum ditangani -- menyusul
-// S4P-06/07.
+// sejak S1-05. JobTitle/Address/Phone opsional (kontak PIC). Tier default
+// "starter" kalau kosong (S4P-07); StorageQuotaGB nil berarti pakai
+// plafon default tier tsb.
 type CreateGroupAdminRequest struct {
 	Email           string
 	DisplayName     string
 	GroupName       string
+	JobTitle        string
+	Address         string
+	Phone           string
+	Tier            string
+	StorageQuotaGB  *int
 	InvitedByUserID string // Platform Admin yang melakukan invite
 }
 
@@ -120,9 +136,15 @@ func (s *AccountService) ResolveActorUserID(ctx context.Context, keycloakSub str
 // user Keycloak itu jadi orphan (tidak ada compensating transaction/saga) --
 // cukup di-log sebagai error supaya bisa dibersihkan manual. Upgrade ke
 // cleanup otomatis kalau ini jadi masalah operasional nyata.
-func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAdminRequest) (*GroupAdminInvitation, error) {
+func (s *AccountService) CreateGroupAdmin(ctx context.Context, req *CreateGroupAdminRequest) (*GroupAdminInvitation, error) {
 	if req.Email == "" || req.DisplayName == "" || req.GroupName == "" || req.InvitedByUserID == "" {
 		return nil, fmt.Errorf("service.CreateGroupAdmin: %w", domain.ErrInvalidInput)
+	}
+	if req.Tier == "" {
+		req.Tier = "starter"
+	}
+	if !validServiceTiers[req.Tier] {
+		return nil, fmt.Errorf("service.CreateGroupAdmin: %w", domain.ErrInvalidTier)
 	}
 
 	kcUserID, err := s.keycloak.CreateDisabledUser(ctx, req.Email, req.DisplayName)
@@ -144,6 +166,11 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAd
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
 		GroupName:       req.GroupName,
+		JobTitle:        req.JobTitle,
+		Address:         req.Address,
+		Phone:           req.Phone,
+		Tier:            req.Tier,
+		StorageQuotaGB:  req.StorageQuotaGB,
 		KeycloakUserID:  kcUserID,
 		TokenHash:       tokenHash,
 		ExpiresAt:       expiresAt,
@@ -256,6 +283,44 @@ func (s *AccountService) TransferGroup(ctx context.Context, fromUserID, toUserID
 		return 0, fmt.Errorf("service.TransferGroup: %w", err)
 	}
 	return count, nil
+}
+
+// GetGroupAdminDetail -- S4P-06, mode "Lihat"/"Ubah".
+func (s *AccountService) GetGroupAdminDetail(ctx context.Context, targetUserID string) (*repository.GroupAdminSummary, error) {
+	detail, err := s.repo.GetGroupAdminDetail(ctx, targetUserID)
+	if err != nil {
+		return nil, fmt.Errorf("service.GetGroupAdminDetail: %w", err)
+	}
+	return detail, nil
+}
+
+// UpdateGroupAdmin -- S4P-06, form "Ubah Group Admin". Validasi tier dan
+// status di sini (bukan cuma di repository) supaya pesan error konsisten
+// dengan CreateGroupAdmin.
+func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) error {
+	if p.DisplayName == "" || p.GroupName == "" {
+		return fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidInput)
+	}
+	if !validServiceTiers[p.Tier] {
+		return fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidTier)
+	}
+	if p.NewStatus != "" && p.NewStatus != "AKTIF" && p.NewStatus != "SUSPENDED" {
+		return fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+	}
+	if err := s.repo.UpdateGroupAdmin(ctx, targetUserID, p, actorUserID); err != nil {
+		return fmt.Errorf("service.UpdateGroupAdmin: %w", err)
+	}
+	return nil
+}
+
+// ListServiceTiers -- S4P-07, katalog tier untuk dropdown Tier + panel
+// "Paket Tier (Otomatis)".
+func (s *AccountService) ListServiceTiers(ctx context.Context) ([]repository.ServiceTier, error) {
+	tiers, err := s.repo.ListServiceTiers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListServiceTiers: %w", err)
+	}
+	return tiers, nil
 }
 
 // DeleteGroupAdmin menghapus akun Group Admin (S4P-05, IG-21) -- HANYA
