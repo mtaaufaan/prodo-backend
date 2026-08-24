@@ -75,7 +75,7 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
 	}
 
-	result, err := h.accounts.CreateGroupAdmin(c.Context(), service.CreateGroupAdminRequest{
+	result, err := h.accounts.CreateGroupAdmin(c.Context(), &service.CreateGroupAdminRequest{
 		Email:           req.Email,
 		DisplayName:     req.DisplayName,
 		GroupName:       req.GroupName,
@@ -133,8 +133,8 @@ func (h *GroupAdminHandler) List(c *fiber.Ctx) error {
 	}
 
 	data := make([]fiber.Map, len(summaries))
-	for i, s := range summaries {
-		data[i] = groupAdminSummaryToMap(&s)
+	for i := range summaries {
+		data[i] = groupAdminSummaryToMap(&summaries[i])
 	}
 
 	totalPages := (total + perPage - 1) / perPage

@@ -195,7 +195,7 @@ func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {
 	}
 
 	before := time.Now()
-	result, err := svc.CreateGroupAdmin(context.Background(), req)
+	result, err := svc.CreateGroupAdmin(context.Background(), &req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {
 func TestAccountService_CreateGroupAdmin_InvalidInput(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{})
+	_, err := svc.CreateGroupAdmin(context.Background(), &CreateGroupAdminRequest{})
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
 	}
@@ -231,7 +231,7 @@ func TestAccountService_CreateGroupAdmin_EmailAlreadyExistsInKeycloak(t *testing
 	kc := &fakeKeycloakClient{err: keycloak.ErrUserAlreadyExists}
 	svc := NewAccountService(&fakeAccountRepository{}, kc, zap.NewNop())
 
-	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
+	_, err := svc.CreateGroupAdmin(context.Background(), &CreateGroupAdminRequest{
 		Email:           "dup@example.com",
 		DisplayName:     "Dup",
 		GroupName:       "PT Contoh",
@@ -247,7 +247,7 @@ func TestAccountService_CreateGroupAdmin_RepoFailureAfterKeycloakCreate(t *testi
 	kc := &fakeKeycloakClient{userID: "kc-sub-orphan"}
 	svc := NewAccountService(repo, kc, zap.NewNop())
 
-	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
+	_, err := svc.CreateGroupAdmin(context.Background(), &CreateGroupAdminRequest{
 		Email:           "ga@example.com",
 		DisplayName:     "Group Admin",
 		GroupName:       "PT Contoh",
@@ -477,7 +477,7 @@ func TestAccountService_CreateGroupAdmin_DefaultsTierToStarter(t *testing.T) {
 	kc := &fakeKeycloakClient{userID: "kc-1"}
 	svc := NewAccountService(repo, kc, zap.NewNop())
 
-	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
+	_, err := svc.CreateGroupAdmin(context.Background(), &CreateGroupAdminRequest{
 		Email: "ga@example.com", DisplayName: "GA", GroupName: "PT Contoh", InvitedByUserID: "pa-1",
 	})
 	if err != nil {
@@ -491,7 +491,7 @@ func TestAccountService_CreateGroupAdmin_DefaultsTierToStarter(t *testing.T) {
 func TestAccountService_CreateGroupAdmin_InvalidTier(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.CreateGroupAdmin(context.Background(), CreateGroupAdminRequest{
+	_, err := svc.CreateGroupAdmin(context.Background(), &CreateGroupAdminRequest{
 		Email: "ga@example.com", DisplayName: "GA", GroupName: "PT Contoh", Tier: "gold", InvitedByUserID: "pa-1",
 	})
 	if !errors.Is(err, domain.ErrInvalidTier) {

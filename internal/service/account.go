@@ -136,7 +136,7 @@ func (s *AccountService) ResolveActorUserID(ctx context.Context, keycloakSub str
 // user Keycloak itu jadi orphan (tidak ada compensating transaction/saga) --
 // cukup di-log sebagai error supaya bisa dibersihkan manual. Upgrade ke
 // cleanup otomatis kalau ini jadi masalah operasional nyata.
-func (s *AccountService) CreateGroupAdmin(ctx context.Context, req CreateGroupAdminRequest) (*GroupAdminInvitation, error) {
+func (s *AccountService) CreateGroupAdmin(ctx context.Context, req *CreateGroupAdminRequest) (*GroupAdminInvitation, error) {
 	if req.Email == "" || req.DisplayName == "" || req.GroupName == "" || req.InvitedByUserID == "" {
 		return nil, fmt.Errorf("service.CreateGroupAdmin: %w", domain.ErrInvalidInput)
 	}
