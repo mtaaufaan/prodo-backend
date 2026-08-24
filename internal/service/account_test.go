@@ -25,6 +25,58 @@ type fakeAccountRepository struct {
 	regeneratedActor  string
 	regeneratedTarget string
 	groupAdmins       []repository.GroupAdminSummary
+
+	suspendErr           error
+	reactivateErr        error
+	suspendedTarget      string
+	reactivatedTarget    string
+	sessionTimeoutSecs   int
+	sessionTimeoutErr    error
+	setSessionTimeoutErr error
+	setSessionTimeoutTo  int
+	ipAllowlist          []repository.IPAllowlistEntry
+	ipAllowlistErr       error
+	addIPAllowlistID     string
+	addIPAllowlistErr    error
+	addedCIDR            string
+	deleteIPAllowlistErr error
+	deletedEntryID       string
+}
+
+func (f *fakeAccountRepository) SuspendGroupAdmin(_ context.Context, targetUserID, _ string) error {
+	f.suspendedTarget = targetUserID
+	return f.suspendErr
+}
+
+func (f *fakeAccountRepository) ReactivateGroupAdmin(_ context.Context, targetUserID, _ string) error {
+	f.reactivatedTarget = targetUserID
+	return f.reactivateErr
+}
+
+func (f *fakeAccountRepository) GetPASessionIdleTimeoutSeconds(_ context.Context) (int, error) {
+	return f.sessionTimeoutSecs, f.sessionTimeoutErr
+}
+
+func (f *fakeAccountRepository) SetPASessionIdleTimeoutSeconds(_ context.Context, seconds int, _ string) error {
+	f.setSessionTimeoutTo = seconds
+	return f.setSessionTimeoutErr
+}
+
+func (f *fakeAccountRepository) ListIPAllowlist(_ context.Context, _ string) ([]repository.IPAllowlistEntry, error) {
+	return f.ipAllowlist, f.ipAllowlistErr
+}
+
+func (f *fakeAccountRepository) AddIPAllowlistEntry(_ context.Context, _, cidr, _ string) (string, error) {
+	f.addedCIDR = cidr
+	if f.addIPAllowlistErr != nil {
+		return "", f.addIPAllowlistErr
+	}
+	return f.addIPAllowlistID, nil
+}
+
+func (f *fakeAccountRepository) DeleteIPAllowlistEntry(_ context.Context, _, entryID, _ string) error {
+	f.deletedEntryID = entryID
+	return f.deleteIPAllowlistErr
 }
 
 func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p *repository.CreateGroupAdminInvitationParams) (string, error) {
@@ -224,5 +276,104 @@ func TestAccountService_ListGroupAdmins(t *testing.T) {
 	}
 	if total != 2 || len(summaries) != 2 {
 		t.Errorf("total=%d len=%d, want 2/2", total, len(summaries))
+	}
+}
+
+func TestAccountService_SuspendGroupAdmin_Success(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	if err := svc.SuspendGroupAdmin(context.Background(), "ga-1", "pa-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.suspendedTarget != "ga-1" {
+		t.Errorf("suspendedTarget = %q, want %q", repo.suspendedTarget, "ga-1")
+	}
+}
+
+func TestAccountService_SuspendGroupAdmin_NotFound(t *testing.T) {
+	repo := &fakeAccountRepository{suspendErr: domain.ErrUserNotFound}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.SuspendGroupAdmin(context.Background(), "not-a-ga", "pa-1")
+	if !errors.Is(err, domain.ErrUserNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrUserNotFound", err)
+	}
+}
+
+func TestAccountService_ReactivateGroupAdmin_Success(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	if err := svc.ReactivateGroupAdmin(context.Background(), "ga-1", "pa-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.reactivatedTarget != "ga-1" {
+		t.Errorf("reactivatedTarget = %q, want %q", repo.reactivatedTarget, "ga-1")
+	}
+}
+
+func TestAccountService_SetPASessionIdleTimeout_TooShort(t *testing.T) {
+	// US-070 AC: minimum 10 menit (600 detik).
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.SetPASessionIdleTimeout(context.Background(), 599, "pa-1")
+	if !errors.Is(err, domain.ErrSessionTimeoutTooShort) {
+		t.Errorf("err = %v, want wrapped domain.ErrSessionTimeoutTooShort", err)
+	}
+	if repo.setSessionTimeoutTo != 0 {
+		t.Error("repo tidak seharusnya dipanggil kalau validasi minimum gagal")
+	}
+}
+
+func TestAccountService_SetPASessionIdleTimeout_AtMinimum_Accepted(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	if err := svc.SetPASessionIdleTimeout(context.Background(), 600, "pa-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.setSessionTimeoutTo != 600 {
+		t.Errorf("setSessionTimeoutTo = %d, want 600", repo.setSessionTimeoutTo)
+	}
+}
+
+func TestAccountService_AddIPAllowlistEntry_InvalidCIDR(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	_, err := svc.AddIPAllowlistEntry(context.Background(), "pa-1", "not-a-cidr", "pa-1")
+	if !errors.Is(err, domain.ErrInvalidCIDR) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidCIDR", err)
+	}
+	if repo.addedCIDR != "" {
+		t.Error("repo tidak seharusnya dipanggil kalau CIDR tidak valid")
+	}
+}
+
+func TestAccountService_AddIPAllowlistEntry_Valid(t *testing.T) {
+	repo := &fakeAccountRepository{addIPAllowlistID: "entry-1"}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	id, err := svc.AddIPAllowlistEntry(context.Background(), "pa-1", "10.0.0.0/24", "pa-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "entry-1" {
+		t.Errorf("id = %q, want %q", id, "entry-1")
+	}
+	if repo.addedCIDR != "10.0.0.0/24" {
+		t.Errorf("addedCIDR = %q, want %q", repo.addedCIDR, "10.0.0.0/24")
+	}
+}
+
+func TestAccountService_DeleteIPAllowlistEntry_NotFound(t *testing.T) {
+	repo := &fakeAccountRepository{deleteIPAllowlistErr: domain.ErrIPAllowlistEntryNotFound}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	err := svc.DeleteIPAllowlistEntry(context.Background(), "pa-1", "entry-1", "pa-1")
+	if !errors.Is(err, domain.ErrIPAllowlistEntryNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrIPAllowlistEntryNotFound", err)
 	}
 }

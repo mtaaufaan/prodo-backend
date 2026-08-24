@@ -138,7 +138,7 @@ func run() error {
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
 	mfaSvc := service.NewMFAService(mfaRepo)
 	activationSvc := service.NewActivationService(accountRepo, kcAdmin, mfaSvc, logger)
-	sessionSvc := service.NewSessionService(sessionRepo, rdb, cfg.PASessionIdleTimeout)
+	sessionSvc := service.NewSessionService(sessionRepo, rdb)
 	authSvc := service.NewAuthService(accountRepo, oidcClient, kcAdmin, mfaSvc, sessionSvc, emailSvc, logger)
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
@@ -157,6 +157,7 @@ func run() error {
 	}
 
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
+	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, logger)
@@ -169,6 +170,15 @@ func run() error {
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
 	v1.Post("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Create)
 	v1.Post("/platform/group-admins/:id/resend-activation", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ResendActivation)
+	// S4P-02, US-067.
+	v1.Put("/platform/group-admins/:id/suspend", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Suspend)
+	v1.Put("/platform/group-admins/:id/reactivate", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Reactivate)
+	// S4P-18, US-070. Session timeout global (semua akun PA); IP allowlist
+	// self-service (per akun PA sendiri, lihat komentar PlatformSecurityHandler).
+	v1.Get("/platform/security-settings", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.Get)
+	v1.Put("/platform/security-settings/session-timeout", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.UpdateSessionTimeout)
+	v1.Post("/platform/security-settings/ip-allowlist", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.AddIPAllowlist)
+	v1.Delete("/platform/security-settings/ip-allowlist/:id", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.DeleteIPAllowlist)
 	v1.Post("/auth/activate", authHandler.Activate)
 	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
 	v1.Post("/auth/login", authHandler.Login)

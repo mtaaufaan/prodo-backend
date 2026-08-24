@@ -30,7 +30,7 @@ func (f *fakeSessionRepository) ListActiveSessions(_ context.Context, _ string) 
 func (f *fakeSessionRepository) TouchSession(_ context.Context, _ string, _ time.Duration) (bool, error) {
 	return true, nil
 }
-func (f *fakeSessionRepository) TouchSessionFixed(_ context.Context, _ string, _ time.Duration) (bool, error) {
+func (f *fakeSessionRepository) TouchSessionFixed(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
 func (f *fakeSessionRepository) RevokeSession(_ context.Context, _, _ string) (time.Duration, error) {
@@ -75,7 +75,7 @@ func (f *fakeCache) Del(_ context.Context, _ string) error                     {
 func (f *fakeCache) Close() error                                              { return nil }
 
 func newTestSessionService() *SessionService {
-	return NewSessionService(&fakeSessionRepository{}, &fakeCache{}, 10*time.Minute)
+	return NewSessionService(&fakeSessionRepository{}, &fakeCache{})
 }
 
 // testAccessTokenJWT membangun JWT well-formed (HS256, secret dummy)
@@ -232,6 +232,20 @@ func TestAuthService_LoginLocal_AccountInactive(t *testing.T) {
 	_, err := svc.LoginLocal(context.Background(), "pending@example.com", "whatever")
 	if !errors.Is(err, domain.ErrAccountInactive) {
 		t.Errorf("err = %v, want wrapped domain.ErrAccountInactive", err)
+	}
+}
+
+func TestAuthService_LoginLocal_AccountSuspended(t *testing.T) {
+	// S4P-02 (US-067): suspended_at TERISI harus ditolak dengan
+	// ErrAccountSuspended, BUKAN ErrAccountInactive -- meski IsActive juga
+	// TRUE (akun ini pernah aktif sebelum disuspend PA).
+	suspendedAt := time.Now().Add(-time.Hour)
+	repo := &fakeAuthRepository{user: &repository.LoginUserRecord{ID: "user-1", IsActive: true, SuspendedAt: &suspendedAt}}
+	svc := NewAuthService(repo, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
+
+	_, err := svc.LoginLocal(context.Background(), "suspended-ga@example.com", "whatever")
+	if !errors.Is(err, domain.ErrAccountSuspended) {
+		t.Errorf("err = %v, want wrapped domain.ErrAccountSuspended", err)
 	}
 }
 

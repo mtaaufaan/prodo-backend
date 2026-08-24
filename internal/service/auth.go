@@ -94,6 +94,13 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password string) (*
 		return nil, fmt.Errorf("service.LoginLocal: %w", err)
 	}
 
+	// S4P-02 (US-067): suspended_at dicek SEBELUM is_active -- akun yang
+	// pernah aktif lalu disuspend PA harus dapat pesan "hubungi Platform
+	// Admin", bukan "selesaikan aktivasi" (is_active tidak disentuh oleh
+	// suspend, jadi kalau urutannya dibalik pesan yang salah yang muncul).
+	if user.SuspendedAt != nil {
+		return nil, fmt.Errorf("service.LoginLocal: %w", domain.ErrAccountSuspended)
+	}
 	if !user.IsActive {
 		return nil, fmt.Errorf("service.LoginLocal: %w", domain.ErrAccountInactive)
 	}

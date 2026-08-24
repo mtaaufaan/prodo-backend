@@ -180,6 +180,59 @@ func (h *GroupAdminHandler) ResendActivation(c *fiber.Ctx) error {
 	}))
 }
 
+// Suspend menangani PUT /platform/group-admins/:id/suspend (S4P-02, US-067).
+func (h *GroupAdminHandler) Suspend(c *fiber.Ctx) error {
+	return h.setSuspension(c, true)
+}
+
+// Reactivate menangani PUT /platform/group-admins/:id/reactivate (S4P-02, US-067).
+func (h *GroupAdminHandler) Reactivate(c *fiber.Ctx) error {
+	return h.setSuspension(c, false)
+}
+
+// setSuspension -- logika bersama Suspend/Reactivate, cuma beda repo call
+// dan pesan sukses.
+func (h *GroupAdminHandler) setSuspension(c *fiber.Ctx, suspend bool) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+
+	targetUserID := c.Params("id")
+	if targetUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
+	}
+
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users",
+			zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+
+	status := "suspended"
+	if suspend {
+		err = h.accounts.SuspendGroupAdmin(c.Context(), targetUserID, actorUserID)
+	} else {
+		status = "active"
+		err = h.accounts.ReactivateGroupAdmin(c.Context(), targetUserID, actorUserID)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		default:
+			h.logger.Error("gagal mengubah status suspend Group Admin", zap.Bool("suspend", suspend), zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengubah status akun", nil))
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{
+		"id":     targetUserID,
+		"status": status,
+	}))
+}
+
 // sendActivationEmail mengirim email aktivasi -- dipakai Create (S1-05) dan
 // ResendActivation (S1-08). Gagal kirim TIDAK membatalkan aksi utama
 // (ponytail: akun/token sudah terlanjur dibuat/diterbitkan; kegagalan
