@@ -94,6 +94,13 @@ var (
 	// dari Platform Admin).
 	ErrStorageQuotaExceedsMax = errors.New("storage quota exceeds max allowed")
 
+	// ErrGroupStorageQuotaExceedsCeiling dikembalikan PUT
+	// /organizations/:id/storage-quota (S4P-12) saat total kuota seluruh
+	// organisasi dalam satu grup (termasuk perubahan yang diminta) akan
+	// melebihi plafon groups.storage_quota_gb milik grup itu -- menegakkan
+	// plafon yang sebelumnya cuma disimpan/ditampilkan (S4P-06/07).
+	ErrGroupStorageQuotaExceedsCeiling = errors.New("group storage quota ceiling exceeded")
+
 	// ErrOrganizationHasWorkspaces dikembalikan DELETE /organizations/:id
 	// (S3-05) saat masih ada workspace aktif (archived_at IS NULL) di
 	// organisasi tsb -- US-007 AC: "hanya bisa dihapus jika semua workspace
