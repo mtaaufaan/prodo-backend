@@ -48,7 +48,7 @@ type CreateGroupAdminInvitationParams struct {
 	JobTitle        string
 	Address         string
 	Phone           string
-	Tier            string
+	TierID          string
 	StorageQuotaGB  *int
 	KeycloakUserID  string
 	TokenHash       string
@@ -95,12 +95,29 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert platform_invitations: %w", err)
 	}
 
+	// S4P-11: tier harus ada dan masih assignable (belum nonaktif/archived)
+	// -- dicek di sini, bukan cuma di service, supaya atomik dalam tx yang
+	// sama dengan insert groups (menghindari race tier di-nonaktifkan PA
+	// lain di antara validasi dan insert).
+	var tierAssignable bool
+	if err = tx.QueryRow(ctx, `
+		SELECT deactivated_at IS NULL AND archived_at IS NULL FROM service_tiers WHERE id = $1
+	`, p.TierID).Scan(&tierAssignable); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.CreateGroupAdminInvitation: %w", domain.ErrInvalidTier)
+		}
+		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: cek tier: %w", err)
+	}
+	if !tierAssignable {
+		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: %w", domain.ErrInvalidTier)
+	}
+
 	var groupID string
 	if err = tx.QueryRow(ctx, `
-		INSERT INTO groups (name, tier, job_title, address, phone, storage_quota_gb)
+		INSERT INTO groups (name, tier_id, job_title, address, phone, storage_quota_gb)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id
-	`, p.GroupName, p.Tier, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB).Scan(&groupID); err != nil {
+	`, p.GroupName, p.TierID, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB).Scan(&groupID); err != nil {
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert groups: %w", err)
 	}
 
@@ -152,6 +169,7 @@ type GroupAdminSummary struct {
 	JobTitle        *string
 	Address         *string
 	Phone           *string
+	TierID          *string
 	Tier            *string
 	TierMaxOrg      int
 	TierMaxStorage  int
@@ -168,7 +186,7 @@ type GroupAdminSummary struct {
 // storage terpakai, jumlah member unik) di bawah grup itu.
 const groupAdminSummaryQuery = `
 	SELECT u.id, u.email, u.display_name, u.is_active, u.suspended_at, u.created_at,
-	       g.id, g.name, g.job_title, g.address, g.phone, g.tier, g.storage_quota_gb,
+	       g.id, g.name, g.job_title, g.address, g.phone, g.tier_id, st.name, g.storage_quota_gb,
 	       COALESCE(st.max_org, 0), COALESCE(st.max_storage_gb, 0), COALESCE(st.max_members, 0),
 	       COALESCE(org_agg.org_count, 0), COALESCE(org_agg.storage_used_mb, 0), COALESCE(mem_agg.member_count, 0)
 	FROM users u
@@ -177,7 +195,7 @@ const groupAdminSummaryQuery = `
 		WHERE gaa.user_id = u.id ORDER BY gaa.assigned_at LIMIT 1
 	) primary_group ON true
 	LEFT JOIN groups g ON g.id = primary_group.group_id
-	LEFT JOIN service_tiers st ON st.name = g.tier
+	LEFT JOIN service_tiers st ON st.id = g.tier_id
 	LEFT JOIN LATERAL (
 		SELECT count(*) AS org_count, COALESCE(sum(o.storage_used_mb), 0) AS storage_used_mb
 		FROM organizations o WHERE o.group_id = g.id
@@ -195,7 +213,7 @@ const groupAdminSummaryQuery = `
 func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSummary, error) {
 	var s GroupAdminSummary
 	err := row.Scan(&s.ID, &s.Email, &s.DisplayName, &s.IsActive, &s.SuspendedAt, &s.CreatedAt,
-		&s.GroupID, &s.GroupName, &s.JobTitle, &s.Address, &s.Phone, &s.Tier, &s.StorageQuotaGB,
+		&s.GroupID, &s.GroupName, &s.JobTitle, &s.Address, &s.Phone, &s.TierID, &s.Tier, &s.StorageQuotaGB,
 		&s.TierMaxOrg, &s.TierMaxStorage, &s.TierMaxMembers,
 		&s.UsedOrgCount, &s.UsedStorageMB, &s.UsedMemberCount)
 	return s, err
@@ -259,7 +277,7 @@ type UpdateGroupAdminParams struct {
 	JobTitle       string
 	Address        string
 	Phone          string
-	Tier           string
+	TierID         string
 	StorageQuotaGB *int
 	NewStatus      string // "", "AKTIF", atau "SUSPENDED"
 }
@@ -275,16 +293,36 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
-	var groupID string
+	var groupID, oldTierID string
 	if err := tx.QueryRow(ctx, `
-		SELECT gaa.group_id, g.tier FROM group_admin_assignments gaa
+		SELECT gaa.group_id, g.tier_id, st.name FROM group_admin_assignments gaa
 		JOIN groups g ON g.id = gaa.group_id
+		LEFT JOIN service_tiers st ON st.id = g.tier_id
 		WHERE gaa.user_id = $1 ORDER BY gaa.assigned_at LIMIT 1
-	`, targetUserID).Scan(&groupID, &oldTier); err != nil {
+	`, targetUserID).Scan(&groupID, &oldTierID, &oldTier); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
 		}
 		return "", fmt.Errorf("repository.UpdateGroupAdmin: cari grup: %w", err)
+	}
+
+	// S4P-11: tier cuma perlu assignable (belum nonaktif/archived) kalau
+	// BENAR-BENAR berubah -- GA yang tier-nya belakangan dinonaktifkan
+	// tetap boleh disimpan ulang selama field lain (bukan tier) yang diedit.
+	var newTierName string
+	if p.TierID != "" && p.TierID != oldTierID {
+		var tierAssignable bool
+		if err := tx.QueryRow(ctx, `
+			SELECT name, deactivated_at IS NULL AND archived_at IS NULL FROM service_tiers WHERE id = $1
+		`, p.TierID).Scan(&newTierName, &tierAssignable); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidTier)
+			}
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: cek tier: %w", err)
+		}
+		if !tierAssignable {
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidTier)
+		}
 	}
 
 	if tag, err := tx.Exec(ctx, `
@@ -296,10 +334,10 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE groups SET name = $2, tier = $3, job_title = $4, address = $5, phone = $6,
+		UPDATE groups SET name = $2, tier_id = $3, job_title = $4, address = $5, phone = $6,
 		       storage_quota_gb = $7, updated_at = NOW()
 		WHERE id = $1
-	`, groupID, p.GroupName, p.Tier, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB); err != nil {
+	`, groupID, p.GroupName, p.TierID, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB); err != nil {
 		return "", fmt.Errorf("repository.UpdateGroupAdmin: update groups: %w", err)
 	}
 
@@ -308,12 +346,12 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 	// workspace_member_repository.go, best-effort (bagian tx yang sama,
 	// tapi kegagalan notifikasi bukan skenario yang divalidasi terpisah --
 	// kalau tx gagal, seluruh update ikut rollback, konsisten).
-	if p.Tier != "" && p.Tier != oldTier {
+	if p.TierID != "" && p.TierID != oldTierID {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
 			VALUES ($1, $2, 'tier_changed', 'group', $3, 'Tier Grup Berubah', $4)
 		`, targetUserID, actorUserID, groupID,
-			fmt.Sprintf("Tier grup Anda diubah dari %s menjadi %s oleh Platform Admin.", oldTier, p.Tier)); err != nil {
+			fmt.Sprintf("Tier grup Anda diubah dari %s menjadi %s oleh Platform Admin.", oldTier, newTierName)); err != nil {
 			return "", fmt.Errorf("repository.UpdateGroupAdmin: insert notifikasi tier_changed: %w", err)
 		}
 	}
@@ -354,9 +392,88 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 	return oldTier, nil
 }
 
-// ServiceTier -- satu baris katalog tier (S4P-07) untuk dropdown Tier +
-// panel "Paket Tier (Otomatis)" di form Group Admin.
+// ServiceTier -- satu baris katalog tier (S4P-07, diperluas S4P-11 dengan
+// lifecycle nonaktif/archive + tier custom). ID adalah PK sejak S4P-11 --
+// name berhenti jadi PK supaya rename tier tidak memutus referensi
+// groups.tier_id yang sudah ada (lihat migration
+// 20260903090000_service_tiers_lifecycle_and_uuid_pk).
 type ServiceTier struct {
+	ID               string
+	Name             string
+	MinRetentionDays int
+	MaxRetentionDays int
+	WebhookRate      int
+	SSOEnabled       bool
+	MaxOrg           int
+	MaxStorageGB     int
+	MaxMembers       int
+	IsCustom         bool
+	DeactivatedAt    *time.Time
+	ArchivedAt       *time.Time
+}
+
+const serviceTierColumns = `id, name, min_retention_days, max_retention_days, webhook_rate, sso_enabled,
+	       max_org, max_storage_gb, max_members, is_custom, deactivated_at, archived_at`
+
+func scanServiceTier(row interface{ Scan(...any) error }) (ServiceTier, error) {
+	var t ServiceTier
+	err := row.Scan(&t.ID, &t.Name, &t.MinRetentionDays, &t.MaxRetentionDays, &t.WebhookRate, &t.SSOEnabled,
+		&t.MaxOrg, &t.MaxStorageGB, &t.MaxMembers, &t.IsCustom, &t.DeactivatedAt, &t.ArchivedAt)
+	return t, err
+}
+
+// ListServiceTiers mengembalikan katalog tier. includeArchived=false
+// (dropdown assign tier ke GA) cuma mengembalikan tier yang masih
+// assignable (belum nonaktif/archived); includeArchived=true (halaman admin
+// "Tier & Kuota Global") mengembalikan SEMUA tier termasuk yang
+// nonaktif/archived, supaya PA bisa memulihkannya. Urutan: tier standar
+// dulu (starter < business < enterprise), baru tier custom (alfabet).
+func (r *AccountRepository) ListServiceTiers(ctx context.Context, includeArchived bool) ([]ServiceTier, error) {
+	query := `SELECT ` + serviceTierColumns + ` FROM service_tiers`
+	if !includeArchived {
+		query += ` WHERE deactivated_at IS NULL AND archived_at IS NULL`
+	}
+	query += ` ORDER BY is_custom, CASE name WHEN 'starter' THEN 1 WHEN 'business' THEN 2 WHEN 'enterprise' THEN 3 ELSE 4 END, name`
+
+	rows, err := r.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListServiceTiers: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ServiceTier
+	for rows.Next() {
+		t, err := scanServiceTier(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repository.ListServiceTiers: scan: %w", err)
+		}
+		result = append(result, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListServiceTiers: rows: %w", err)
+	}
+	return result, nil
+}
+
+// FindActiveServiceTierIDByName -- dipakai CreateGroupAdmin untuk resolve
+// default tier "starter" saat request tidak menyertakan tier_id (S4P-11).
+func (r *AccountRepository) FindActiveServiceTierIDByName(ctx context.Context, name string) (string, error) {
+	var id string
+	err := r.db.QueryRow(ctx, `
+		SELECT id FROM service_tiers WHERE name = $1 AND deactivated_at IS NULL AND archived_at IS NULL
+	`, name).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.FindActiveServiceTierIDByName: %w", domain.ErrTierNotFound)
+		}
+		return "", fmt.Errorf("repository.FindActiveServiceTierIDByName: %w", err)
+	}
+	return id, nil
+}
+
+// ServiceTierParams -- field yang bisa diisi PA lewat form Tambah/Kelola
+// Tier (S4P-11).
+type ServiceTierParams struct {
 	Name             string
 	MinRetentionDays int
 	MaxRetentionDays int
@@ -367,31 +484,168 @@ type ServiceTier struct {
 	MaxMembers       int
 }
 
-// ListServiceTiers mengembalikan katalog tier, urutan tetap (starter <
-// business < enterprise) via CASE eksplisit -- bukan alfabet.
-func (r *AccountRepository) ListServiceTiers(ctx context.Context) ([]ServiceTier, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT name, min_retention_days, max_retention_days, webhook_rate, sso_enabled, max_org, max_storage_gb, max_members
-		FROM service_tiers
-		ORDER BY CASE name WHEN 'starter' THEN 1 WHEN 'business' THEN 2 WHEN 'enterprise' THEN 3 ELSE 4 END
-	`)
+// CreateServiceTier menambah tier CUSTOM baru ke katalog (is_custom=true --
+// 3 tier standar sudah di-seed lewat migration, tidak dibuat lewat sini).
+func (r *AccountRepository) CreateServiceTier(ctx context.Context, p *ServiceTierParams, actorUserID string) (id string, err error) {
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("repository.ListServiceTiers: %w", err)
+		return "", fmt.Errorf("repository.CreateServiceTier: begin tx: %w", err)
 	}
-	defer rows.Close()
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
-	var result []ServiceTier
-	for rows.Next() {
-		var t ServiceTier
-		if err := rows.Scan(&t.Name, &t.MinRetentionDays, &t.MaxRetentionDays, &t.WebhookRate, &t.SSOEnabled, &t.MaxOrg, &t.MaxStorageGB, &t.MaxMembers); err != nil {
-			return nil, fmt.Errorf("repository.ListServiceTiers: scan: %w", err)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO service_tiers (name, min_retention_days, max_retention_days, webhook_rate, sso_enabled, max_org, max_storage_gb, max_members, is_custom)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
+		RETURNING id
+	`, p.Name, p.MinRetentionDays, p.MaxRetentionDays, p.WebhookRate, p.SSOEnabled, p.MaxOrg, p.MaxStorageGB, p.MaxMembers).Scan(&id)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return "", fmt.Errorf("repository.CreateServiceTier: %w", domain.ErrTierNameAlreadyExists)
 		}
-		result = append(result, t)
+		return "", fmt.Errorf("repository.CreateServiceTier: insert: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("repository.ListServiceTiers: rows: %w", err)
+
+	if err := logTierAudit(ctx, tx, actorUserID, "tier.created", id); err != nil {
+		return "", fmt.Errorf("repository.CreateServiceTier: %w", err)
 	}
-	return result, nil
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("repository.CreateServiceTier: commit tx: %w", err)
+	}
+	return id, nil
+}
+
+// UpdateServiceTier mengubah definisi tier (S4P-11) -- termasuk rename,
+// aman sejak name berhenti jadi PK.
+func (r *AccountRepository) UpdateServiceTier(ctx context.Context, id string, p *ServiceTierParams, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateServiceTier: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE service_tiers SET name = $2, min_retention_days = $3, max_retention_days = $4,
+		       webhook_rate = $5, sso_enabled = $6, max_org = $7, max_storage_gb = $8, max_members = $9,
+		       updated_at = NOW()
+		WHERE id = $1
+	`, id, p.Name, p.MinRetentionDays, p.MaxRetentionDays, p.WebhookRate, p.SSOEnabled, p.MaxOrg, p.MaxStorageGB, p.MaxMembers)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("repository.UpdateServiceTier: %w", domain.ErrTierNameAlreadyExists)
+		}
+		return fmt.Errorf("repository.UpdateServiceTier: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.UpdateServiceTier: %w", domain.ErrTierNotFound)
+	}
+
+	if err := logTierAudit(ctx, tx, actorUserID, "tier.updated", id); err != nil {
+		return fmt.Errorf("repository.UpdateServiceTier: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.UpdateServiceTier: commit tx: %w", err)
+	}
+	return nil
+}
+
+// updateTierLifecycleColumn -- helper bersama 4 aksi lifecycle tier
+// (nonaktifkan/aktifkan/archive/pulihkan, S4P-11): masing-masing sekadar
+// toggle satu kolom timestamp + audit log. sqlStatement SELALU konstanta
+// yang di-hardcode caller (lihat 4 fungsi di bawah) -- tidak pernah dari
+// input pengguna.
+func (r *AccountRepository) updateTierLifecycleColumn(ctx context.Context, id, actorUserID, auditAction, sqlStatement string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.%s: begin tx: %w", auditAction, err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, sqlStatement, id)
+	if err != nil {
+		return fmt.Errorf("repository.%s: update: %w", auditAction, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.%s: %w", auditAction, domain.ErrTierNotFound)
+	}
+	if err := logTierAudit(ctx, tx, actorUserID, auditAction, id); err != nil {
+		return fmt.Errorf("repository.%s: %w", auditAction, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.%s: commit tx: %w", auditAction, err)
+	}
+	return nil
+}
+
+// DeactivateServiceTier/ReactivateServiceTier -- toggle deactivated_at.
+// Tier nonaktif tetap tampil di daftar utama tapi tidak bisa di-assign ke
+// GA baru; GA yang sudah memakainya tidak terpengaruh.
+func (r *AccountRepository) DeactivateServiceTier(ctx context.Context, id, actorUserID string) error {
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.deactivated",
+		`UPDATE service_tiers SET deactivated_at = NOW(), updated_at = NOW() WHERE id = $1`)
+}
+
+func (r *AccountRepository) ReactivateServiceTier(ctx context.Context, id, actorUserID string) error {
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.reactivated",
+		`UPDATE service_tiers SET deactivated_at = NULL, updated_at = NOW() WHERE id = $1`)
+}
+
+// ArchiveServiceTier/UnarchiveServiceTier -- toggle archived_at, independen
+// dari deactivated_at. Tier archived disembunyikan dari daftar utama
+// (perlu toggle "Tampilkan Arsip"), langkah administratif sebelum tier itu
+// aman dihapus permanen.
+func (r *AccountRepository) ArchiveServiceTier(ctx context.Context, id, actorUserID string) error {
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.archived",
+		`UPDATE service_tiers SET archived_at = NOW(), updated_at = NOW() WHERE id = $1`)
+}
+
+func (r *AccountRepository) UnarchiveServiceTier(ctx context.Context, id, actorUserID string) error {
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.unarchived",
+		`UPDATE service_tiers SET archived_at = NULL, updated_at = NOW() WHERE id = $1`)
+}
+
+// DeleteServiceTier menghapus tier permanen (S4P-11) -- HANYA tier custom
+// (is_custom=true) yang sudah tidak dipakai grup manapun. Tier standar
+// (starter/business/enterprise) tidak pernah bisa dihapus, cuma
+// dinonaktifkan/archived.
+func (r *AccountRepository) DeleteServiceTier(ctx context.Context, id, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.DeleteServiceTier: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var isCustom bool
+	if err := tx.QueryRow(ctx, `SELECT is_custom FROM service_tiers WHERE id = $1`, id).Scan(&isCustom); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.DeleteServiceTier: %w", domain.ErrTierNotFound)
+		}
+		return fmt.Errorf("repository.DeleteServiceTier: cek is_custom: %w", err)
+	}
+	if !isCustom {
+		return fmt.Errorf("repository.DeleteServiceTier: %w", domain.ErrTierNotDeletable)
+	}
+
+	var inUseCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM groups WHERE tier_id = $1`, id).Scan(&inUseCount); err != nil {
+		return fmt.Errorf("repository.DeleteServiceTier: cek pemakaian: %w", err)
+	}
+	if inUseCount > 0 {
+		return fmt.Errorf("repository.DeleteServiceTier: %w", domain.ErrTierInUse)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM service_tiers WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("repository.DeleteServiceTier: delete: %w", err)
+	}
+
+	if err := logTierAudit(ctx, tx, actorUserID, "tier.deleted", id); err != nil {
+		return fmt.Errorf("repository.DeleteServiceTier: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.DeleteServiceTier: commit tx: %w", err)
+	}
+	return nil
 }
 
 // FindUserIDByProviderSub resolve Keycloak subject (JWT "sub" claim) jadi
@@ -1137,6 +1391,19 @@ func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, enti
 		VALUES ($1, $2, $3, 'user', $4)
 	`, actorID, actorRole, action, entityID); err != nil {
 		return fmt.Errorf("logAudit: %w", err)
+	}
+	return nil
+}
+
+// logTierAudit -- sama seperti logAudit tapi entity_type='tier' (S4P-11).
+// actor_role selalu 'platform_admin' -- katalog tier cuma bisa diubah
+// Platform Admin, beda dari logAudit yang dipakai lintas role.
+func logTierAudit(ctx context.Context, exec execer, actorID, action, entityID string) error {
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		VALUES ($1, 'platform_admin', $2, 'tier', $3)
+	`, actorID, action, entityID); err != nil {
+		return fmt.Errorf("logTierAudit: %w", err)
 	}
 	return nil
 }
