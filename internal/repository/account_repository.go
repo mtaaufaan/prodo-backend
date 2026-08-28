@@ -11,14 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	rlsdb "github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 )
 
-// AccountRepository menyimpan data akun -- tabel platform-level (users,
-// user_auth_providers, platform_invitations, audit_logs), bukan tabel
-// tenant-scoped, jadi TIDAK melewati RLS (lihat docs/RLS_DESIGN.md §8: tabel
-// ini sengaja tidak di-RLS karena belum terikat org_id/workspace_id).
+// AccountRepository menyimpan data akun -- tabel platform-level inti (users,
+// user_auth_providers, platform_invitations, audit_logs/platform_audit_logs)
+// sengaja TIDAK di-RLS (docs/RLS_DESIGN.md §8: belum terikat org_id/
+// workspace_id). TAPI beberapa query (groupAdminSummaryQuery, katalog
+// audit S4P-22) JOIN ke tabel yang KENA RLS (organizations, workspace_members,
+// platform_audit_logs sendiri) -- pemanggil query semacam itu WAJIB lewat
+// withPlatformAdminRLS (rls_helpers.go), bukan r.db langsung, kalau tidak
+// hasilnya diam-diam 0 baris (IG-24).
 type AccountRepository struct {
 	db *pgxpool.Pool
 }
@@ -139,10 +142,10 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 	}
 
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
 		VALUES ($1, 'platform_admin', 'user.invited', 'user', $2, $3::jsonb)
 	`, p.InvitedByUserID, userID, string(metadata)); err != nil {
-		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert audit_logs: %w", err)
+		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert platform_audit_logs: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -225,7 +228,7 @@ func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSumma
 func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset int) ([]GroupAdminSummary, int, error) {
 	var total int
 	var result []GroupAdminSummary
-	err := r.withPlatformAdminRLS(ctx, func(tx pgx.Tx) error {
+	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			SELECT count(*) FROM users WHERE platform_role = 'group_admin' AND deleted_at IS NULL
 		`).Scan(&total); err != nil {
@@ -256,34 +259,11 @@ func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset i
 	return result, total, nil
 }
 
-// withPlatformAdminRLS -- IG-23/IG-10: groupAdminSummaryQuery JOIN ke
-// organizations/workspace_members yang ber-RLS (org_agg/mem_agg di dalam
-// query), tapi route /platform/group-admins/* TIDAK melewati
-// DBContextMiddleware (middleware itu baru dipasang di /workspaces/...,
-// lihat komentar db_context.go) -- akibatnya session variable
-// app.current_platform_role tidak pernah ke-set untuk koneksi
-// prodo_app_user (APP_DATABASE_URL, RLS_DESIGN.md §5.2) yang benar-benar
-// kena RLS, dan policy orgs_select diam-diam mengembalikan 0 baris (bukan
-// error) alih-alih 403 -- used_org_count/used_storage_mb/used_member_count
-// SELALU 0 tanpa terlihat ada yang salah. Ditemukan lewat verifikasi live
-// IG-23 (2026-08-28) dengan organisasi sungguhan berisi storage_used_mb,
-// bukan dugaan. Route ini sudah digerbangi RequirePlatformAdmin(), jadi
-// aman meng-hardcode 'platform_admin' di sini tanpa perlu actorUserID
-// (prodo_is_platform_admin() cuma memeriksa role, bukan user_id).
-func (r *AccountRepository) withPlatformAdminRLS(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := rlsdb.SetRLSContext(ctx, r.db, "", "platform_admin")
-	if err != nil {
-		return fmt.Errorf("withPlatformAdminRLS: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // read-only, rollback cukup
-	return fn(tx)
-}
-
 // GetGroupAdminDetail mengembalikan satu Group Admin + grup pertamanya
 // untuk mode Lihat/Ubah (S4P-06). domain.ErrUserNotFound kalau tidak ada.
 func (r *AccountRepository) GetGroupAdminDetail(ctx context.Context, targetUserID string) (*GroupAdminSummary, error) {
 	var s GroupAdminSummary
-	err := r.withPlatformAdminRLS(ctx, func(tx pgx.Tx) error {
+	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, groupAdminSummaryQuery+` AND u.id = $1`, targetUserID)
 		scanned, err := scanGroupAdminSummary(row)
 		if err != nil {
@@ -1203,7 +1183,7 @@ func (r *AccountRepository) TransferGroup(ctx context.Context, fromUserID, toUse
 		return 0, fmt.Errorf("repository.TransferGroup: encode metadata: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
 		VALUES ($1, 'platform_admin', 'group.transferred', 'user', $2, $3::jsonb)
 	`, actorUserID, fromUserID, string(metadata)); err != nil {
 		return 0, fmt.Errorf("repository.TransferGroup: audit: %w", err)
@@ -1291,7 +1271,7 @@ func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, 
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
 		VALUES ($1, 'platform_admin', 'platform_settings.session_timeout_changed', 'platform_settings', NULL)
 	`, actorUserID); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: audit: %w", err)
@@ -1363,7 +1343,7 @@ func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, userID, cid
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
 		VALUES ($1, 'platform_admin', 'ip_allowlist.added', 'ip_allowlist', $2)
 	`, actorUserID, id); err != nil {
 		return "", fmt.Errorf("repository.AddIPAllowlistEntry: audit: %w", err)
@@ -1397,7 +1377,7 @@ func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, userID, 
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
 		VALUES ($1, 'platform_admin', 'ip_allowlist.removed', 'ip_allowlist', $2)
 	`, actorUserID, entryID); err != nil {
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: audit: %w", err)
@@ -1416,26 +1396,32 @@ type execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// logAudit menulis satu baris audit_logs (US-073 AC: seluruh aksi onboarding
+// logAudit menulis satu baris audit trail (US-073 AC: seluruh aksi onboarding
 // dicatat). metadata kosong untuk entry sesederhana ini -- entity_id dipakai
 // sebagai referensi utama. entity_type selalu 'user' -- seluruh pemanggil
 // saat ini mencatat aksi atas entitas user (lint unparam).
+//
+// S4P-20/21, US-071: aksi ber-actor_role 'platform_admin' masuk ke
+// platform_audit_logs (tabel terpisah, RLS SELECT-only untuk PA) alih-alih
+// audit_logs biasa -- pemanggil TIDAK perlu berubah, cuma tabel tujuan yang
+// beda tergantung actorRole. Lihat juga logTierAudit (selalu platform_admin).
 func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, entityID string) error {
-	if _, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, $2, $3, 'user', $4)
-	`, actorID, actorRole, action, entityID); err != nil {
+	query := `INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id) VALUES ($1, $2, $3, 'user', $4)`
+	if actorRole == "platform_admin" {
+		query = `INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id) VALUES ($1, $2, $3, 'user', $4)`
+	}
+	if _, err := exec.Exec(ctx, query, actorID, actorRole, action, entityID); err != nil {
 		return fmt.Errorf("logAudit: %w", err)
 	}
 	return nil
 }
 
-// logTierAudit -- sama seperti logAudit tapi entity_type='tier' (S4P-11).
-// actor_role selalu 'platform_admin' -- katalog tier cuma bisa diubah
-// Platform Admin, beda dari logAudit yang dipakai lintas role.
+// logTierAudit -- sama seperti logAudit tapi entity_type='tier' (S4P-11),
+// ke platform_audit_logs (S4P-20/21) karena actor_role selalu
+// 'platform_admin' -- katalog tier cuma bisa diubah Platform Admin.
 func logTierAudit(ctx context.Context, exec execer, actorID, action, entityID string) error {
 	if _, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
 		VALUES ($1, 'platform_admin', $2, 'tier', $3)
 	`, actorID, action, entityID); err != nil {
 		return fmt.Errorf("logTierAudit: %w", err)
