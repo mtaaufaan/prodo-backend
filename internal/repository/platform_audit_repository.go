@@ -13,6 +13,12 @@ import (
 // PlatformAuditLogEntry -- satu baris platform_audit_logs untuk respons
 // GET /platform/audit-logs (S4P-22), dengan actor_email/actor_display_name
 // hasil JOIN ke users supaya FE tidak perlu resolve UUID sendiri.
+//
+// TargetUserName/TargetTierName (feedback user 2026-08-28, kalimat
+// naratif audit trail) -- entity_id merujuk ke BARIS BERBEDA tergantung
+// entity_type (user yang di-suspend/diundang, ATAU tier yang diubah),
+// bukan actor_id. Resolusi nama di sini (bukan di FE) supaya FE tidak
+// perlu request tambahan per baris.
 type PlatformAuditLogEntry struct {
 	ID               string
 	ActorID          *string
@@ -22,6 +28,8 @@ type PlatformAuditLogEntry struct {
 	Action           string
 	EntityType       string
 	EntityID         *string
+	TargetUserName   *string
+	TargetTierName   *string
 	Metadata         []byte
 	LoggedAt         time.Time
 }
@@ -92,9 +100,12 @@ func (r *PlatformAuditRepository) List(ctx context.Context, f PlatformAuditLogFi
 		listArgs = append(listArgs, f.Limit, f.Offset)
 		rows, err := tx.Query(ctx, `
 			SELECT pal.id, pal.actor_id, u.email, u.display_name, pal.actor_role,
-			       pal.action, pal.entity_type, pal.entity_id, pal.metadata, pal.logged_at
+			       pal.action, pal.entity_type, pal.entity_id, target_u.display_name, target_t.name,
+			       pal.metadata, pal.logged_at
 			FROM platform_audit_logs pal
 			LEFT JOIN users u ON u.id = pal.actor_id
+			LEFT JOIN users target_u ON pal.entity_type = 'user' AND target_u.id = pal.entity_id
+			LEFT JOIN service_tiers target_t ON pal.entity_type = 'tier' AND target_t.id = pal.entity_id
 			WHERE `+listWhere+fmt.Sprintf(`
 			ORDER BY pal.logged_at DESC
 			LIMIT $%d OFFSET $%d
@@ -107,7 +118,8 @@ func (r *PlatformAuditRepository) List(ctx context.Context, f PlatformAuditLogFi
 		for rows.Next() {
 			var e PlatformAuditLogEntry
 			if err := rows.Scan(&e.ID, &e.ActorID, &e.ActorEmail, &e.ActorDisplayName, &e.ActorRole,
-				&e.Action, &e.EntityType, &e.EntityID, &e.Metadata, &e.LoggedAt); err != nil {
+				&e.Action, &e.EntityType, &e.EntityID, &e.TargetUserName, &e.TargetTierName,
+				&e.Metadata, &e.LoggedAt); err != nil {
 				return fmt.Errorf("scan: %w", err)
 			}
 			entries = append(entries, e)
