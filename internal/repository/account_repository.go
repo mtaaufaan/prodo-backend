@@ -265,31 +265,34 @@ type UpdateGroupAdminParams struct {
 }
 
 // UpdateGroupAdmin memperbarui data GA + grup pertamanya, dan status kalau
-// diminta (S4P-06). Semua dalam satu transaksi + audit log.
-func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *UpdateGroupAdminParams, actorUserID string) error {
+// diminta (S4P-06). Semua dalam satu transaksi + audit log. Mengembalikan
+// tier SEBELUM update (S4P-09) supaya caller tahu apakah tier benar-benar
+// berubah (notifikasi/email tier_changed cuma dikirim kalau berubah).
+func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *UpdateGroupAdminParams, actorUserID string) (oldTier string, err error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("repository.UpdateGroupAdmin: begin tx: %w", err)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
 	var groupID string
 	if err := tx.QueryRow(ctx, `
-		SELECT gaa.group_id FROM group_admin_assignments gaa
+		SELECT gaa.group_id, g.tier FROM group_admin_assignments gaa
+		JOIN groups g ON g.id = gaa.group_id
 		WHERE gaa.user_id = $1 ORDER BY gaa.assigned_at LIMIT 1
-	`, targetUserID).Scan(&groupID); err != nil {
+	`, targetUserID).Scan(&groupID, &oldTier); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
 		}
-		return fmt.Errorf("repository.UpdateGroupAdmin: cari grup: %w", err)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: cari grup: %w", err)
 	}
 
 	if tag, err := tx.Exec(ctx, `
 		UPDATE users SET display_name = $2, updated_at = NOW() WHERE id = $1 AND platform_role = 'group_admin'
 	`, targetUserID, p.DisplayName); err != nil {
-		return fmt.Errorf("repository.UpdateGroupAdmin: update users: %w", err)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: update users: %w", err)
 	} else if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -297,7 +300,22 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 		       storage_quota_gb = $7, updated_at = NOW()
 		WHERE id = $1
 	`, groupID, p.GroupName, p.Tier, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB); err != nil {
-		return fmt.Errorf("repository.UpdateGroupAdmin: update groups: %w", err)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: update groups: %w", err)
+	}
+
+	// S4P-09: notifikasi in-app ke GA saat tier grupnya berubah -- pola
+	// insert inline sama seperti project_member_repository.go/
+	// workspace_member_repository.go, best-effort (bagian tx yang sama,
+	// tapi kegagalan notifikasi bukan skenario yang divalidasi terpisah --
+	// kalau tx gagal, seluruh update ikut rollback, konsisten).
+	if p.Tier != "" && p.Tier != oldTier {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+			VALUES ($1, $2, 'tier_changed', 'group', $3, 'Tier Grup Berubah', $4)
+		`, targetUserID, actorUserID, groupID,
+			fmt.Sprintf("Tier grup Anda diubah dari %s menjadi %s oleh Platform Admin.", oldTier, p.Tier)); err != nil {
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: insert notifikasi tier_changed: %w", err)
+		}
 	}
 
 	switch p.NewStatus {
@@ -311,29 +329,29 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 		// lewat verifikasi live, bukan dugaan.
 		tag, err := tx.Exec(ctx, `UPDATE users SET suspended_at = NULL WHERE id = $1 AND is_active = TRUE`, targetUserID)
 		if err != nil {
-			return fmt.Errorf("repository.UpdateGroupAdmin: reactivate: %w", err)
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: reactivate: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
-			return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
 		}
 	case "SUSPENDED":
 		if _, err := tx.Exec(ctx, `UPDATE users SET suspended_at = NOW() WHERE id = $1`, targetUserID); err != nil {
-			return fmt.Errorf("repository.UpdateGroupAdmin: suspend: %w", err)
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: suspend: %w", err)
 		}
 	case "":
 		// status tidak diubah
 	default:
-		return fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
 	}
 
 	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.updated", targetUserID); err != nil {
-		return fmt.Errorf("repository.UpdateGroupAdmin: %w", err)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("repository.UpdateGroupAdmin: commit tx: %w", err)
+		return "", fmt.Errorf("repository.UpdateGroupAdmin: commit tx: %w", err)
 	}
-	return nil
+	return oldTier, nil
 }
 
 // ServiceTier -- satu baris katalog tier (S4P-07) untuk dropdown Tier +

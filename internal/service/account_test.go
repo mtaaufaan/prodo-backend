@@ -49,23 +49,27 @@ type fakeAccountRepository struct {
 	deleteGroupAdminErr error
 	deletedGroupAdminID string
 
-	groupAdminDetail       *repository.GroupAdminSummary
-	groupAdminDetailErr    error
-	updateGroupAdminErr    error
-	updatedGroupAdminID    string
-	updatedGroupAdminParam *repository.UpdateGroupAdminParams
-	tiers                  []repository.ServiceTier
-	tiersErr               error
+	groupAdminDetail        *repository.GroupAdminSummary
+	groupAdminDetailErr     error
+	updateGroupAdminErr     error
+	updateGroupAdminOldTier string
+	updatedGroupAdminID     string
+	updatedGroupAdminParam  *repository.UpdateGroupAdminParams
+	tiers                   []repository.ServiceTier
+	tiersErr                error
 }
 
 func (f *fakeAccountRepository) GetGroupAdminDetail(_ context.Context, _ string) (*repository.GroupAdminSummary, error) {
 	return f.groupAdminDetail, f.groupAdminDetailErr
 }
 
-func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, _ string) error {
+func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, _ string) (string, error) {
 	f.updatedGroupAdminID = targetUserID
 	f.updatedGroupAdminParam = p
-	return f.updateGroupAdminErr
+	if f.updateGroupAdminErr != nil {
+		return "", f.updateGroupAdminErr
+	}
+	return f.updateGroupAdminOldTier, nil
 }
 
 func (f *fakeAccountRepository) ListServiceTiers(_ context.Context) ([]repository.ServiceTier, error) {
@@ -515,7 +519,7 @@ func TestAccountService_GetGroupAdminDetail_Success(t *testing.T) {
 func TestAccountService_UpdateGroupAdmin_InvalidInput(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{Tier: "starter"}, "pa-1")
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{Tier: "starter"}, "pa-1")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
 	}
@@ -524,7 +528,7 @@ func TestAccountService_UpdateGroupAdmin_InvalidInput(t *testing.T) {
 func TestAccountService_UpdateGroupAdmin_InvalidTier(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", Tier: "gold",
 	}, "pa-1")
 	if !errors.Is(err, domain.ErrInvalidTier) {
@@ -535,7 +539,7 @@ func TestAccountService_UpdateGroupAdmin_InvalidTier(t *testing.T) {
 func TestAccountService_UpdateGroupAdmin_InvalidStatusTransition(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", Tier: "starter", NewStatus: "TIDAK AKTIF",
 	}, "pa-1")
 	if !errors.Is(err, domain.ErrInvalidStatusTransition) {
@@ -547,7 +551,7 @@ func TestAccountService_UpdateGroupAdmin_Success(t *testing.T) {
 	repo := &fakeAccountRepository{}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA Baru", GroupName: "PT Contoh Baru", Tier: "business", NewStatus: "SUSPENDED",
 	}, "pa-1")
 	if err != nil {
@@ -558,6 +562,24 @@ func TestAccountService_UpdateGroupAdmin_Success(t *testing.T) {
 	}
 	if repo.updatedGroupAdminParam.NewStatus != "SUSPENDED" {
 		t.Errorf("NewStatus = %q, want %q", repo.updatedGroupAdminParam.NewStatus, "SUSPENDED")
+	}
+}
+
+// TestAccountService_UpdateGroupAdmin_ReturnsOldTier -- S4P-09: handler
+// pakai nilai balik ini untuk memutuskan apakah notifikasi/email
+// tier_changed perlu dikirim (cuma kalau tier lama != tier baru).
+func TestAccountService_UpdateGroupAdmin_ReturnsOldTier(t *testing.T) {
+	repo := &fakeAccountRepository{updateGroupAdminOldTier: "starter"}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	oldTier, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+		DisplayName: "GA", GroupName: "PT Contoh", Tier: "enterprise",
+	}, "pa-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if oldTier != "starter" {
+		t.Errorf("oldTier = %q, want %q", oldTier, "starter")
 	}
 }
 

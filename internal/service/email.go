@@ -72,6 +72,39 @@ func (e *EmailService) SendPlatformAdminLoginAlertEmail(_ context.Context, to, d
 	return nil
 }
 
+// SendTierChangedEmail memberitahu Group Admin saat tier grupnya diubah
+// Platform Admin (S4P-09). Best-effort seperti email lain -- gagal kirim
+// TIDAK menggagalkan perubahan tier itu sendiri (sudah tersimpan lewat
+// AccountService.UpdateGroupAdmin sebelum email ini dipanggil).
+func (e *EmailService) SendTierChangedEmail(_ context.Context, to, displayName, oldTier, newTier string) error {
+	msg := buildTierChangedEmailMessage(e.from, to, displayName, oldTier, newTier)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendTierChangedEmail: %w", err)
+	}
+	return nil
+}
+
+// buildTierChangedEmailMessage -- dipisah dari SendTierChangedEmail supaya
+// bisa di-unit-test tanpa koneksi SMTP nyata (pola sama dengan
+// buildActivationEmailMessage).
+func buildTierChangedEmailMessage(from, to, displayName, oldTier, newTier string) []byte {
+	subject := "Tier Grup Anda Berubah - PRODO"
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Tier grup Anda di PRODO diubah oleh Platform Admin, dari %s menjadi %s.\r\n"+
+			"Batas fitur, kuota, dan retensi data grup Anda kini mengikuti tier baru.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, oldTier, newTier,
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
 // buildPlatformAdminLoginAlertMessage -- dipisah dari
 // SendPlatformAdminLoginAlertEmail supaya bisa di-unit-test tanpa koneksi
 // SMTP nyata (pola sama dengan buildActivationEmailMessage).
