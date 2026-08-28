@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -36,13 +37,14 @@ type createGroupAdminRequest struct {
 	// Perusahaan / Grup"). Wajib -- setiap GA baru langsung mengelola satu
 	// grup baru.
 	GroupName string `json:"group_name"`
-	// JobTitle/Address/Phone/Tier/StorageQuotaGB -- S4P-06/07, field
+	// JobTitle/Address/Phone/TierID/StorageQuotaGB -- S4P-06/07, field
 	// lengkap sesuai desain "PA Group Admin Form". Semua opsional kecuali
-	// yang di atas -- Tier default "starter" kalau kosong.
+	// yang di atas -- TierID default tier "starter" kalau kosong. TierID
+	// (bukan nama, S4P-11) -- diambil dari GET /platform/tiers.
 	JobTitle       string `json:"job_title"`
 	Address        string `json:"address"`
 	Phone          string `json:"phone"`
-	Tier           string `json:"tier"`
+	TierID         string `json:"tier_id"`
 	StorageQuotaGB *int   `json:"storage_quota_gb"`
 }
 
@@ -82,7 +84,7 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		JobTitle:        req.JobTitle,
 		Address:         req.Address,
 		Phone:           req.Phone,
-		Tier:            req.Tier,
+		TierID:          req.TierID,
 		StorageQuotaGB:  req.StorageQuotaGB,
 		InvitedByUserID: actorUserID,
 	})
@@ -361,6 +363,7 @@ func groupAdminSummaryToMap(s *repository.GroupAdminSummary) fiber.Map {
 		"job_title":           s.JobTitle,
 		"address":             s.Address,
 		"phone":               s.Phone,
+		"tier_id":             s.TierID,
 		"tier":                s.Tier,
 		"storage_quota_gb":    s.StorageQuotaGB,
 		"tier_max_org":        s.TierMaxOrg,
@@ -401,7 +404,7 @@ type updateGroupAdminRequest struct {
 	JobTitle       string `json:"job_title"`
 	Address        string `json:"address"`
 	Phone          string `json:"phone"`
-	Tier           string `json:"tier"`
+	TierID         string `json:"tier_id"`
 	StorageQuotaGB *int   `json:"storage_quota_gb"`
 	// Status -- "", "AKTIF", atau "SUSPENDED". "TIDAK AKTIF" tidak bisa
 	// diset manual, lihat domain.ErrInvalidStatusTransition.
@@ -444,7 +447,7 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		JobTitle:       req.JobTitle,
 		Address:        req.Address,
 		Phone:          req.Phone,
-		Tier:           req.Tier,
+		TierID:         req.TierID,
 		StorageQuotaGB: req.StorageQuotaGB,
 		NewStatus:      req.Status,
 	}, actorUserID)
@@ -483,29 +486,190 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 	return c.JSON(response.Success(groupAdminSummaryToMap(detail)))
 }
 
-// ListTiers menangani GET /platform/tiers (S4P-07) -- katalog tier untuk
-// dropdown Tier + panel "Paket Tier (Otomatis)" di form Group Admin.
+// tierToMap -- bentuk JSON bersama ListTiers/CreateTier/UpdateTier (S4P-07/11).
+func tierToMap(t *repository.ServiceTier) fiber.Map {
+	return fiber.Map{
+		"id":                 t.ID,
+		"name":               t.Name,
+		"min_retention_days": t.MinRetentionDays,
+		"max_retention_days": t.MaxRetentionDays,
+		"webhook_rate":       t.WebhookRate,
+		"sso_enabled":        t.SSOEnabled,
+		"max_org":            t.MaxOrg,
+		"max_storage_gb":     t.MaxStorageGB,
+		"max_members":        t.MaxMembers,
+		"is_custom":          t.IsCustom,
+		"deactivated_at":     t.DeactivatedAt,
+		"archived_at":        t.ArchivedAt,
+	}
+}
+
+// ListTiers menangani GET /platform/tiers (S4P-07/11) -- default
+// (?all tidak diisi) cuma tier assignable, dipakai dropdown Tier di form
+// Group Admin. ?all=true mengembalikan SEMUA tier termasuk nonaktif/
+// archived, dipakai halaman admin "Tier & Kuota Global".
 func (h *GroupAdminHandler) ListTiers(c *fiber.Ctx) error {
-	tiers, err := h.accounts.ListServiceTiers(c.Context())
+	tiers, err := h.accounts.ListServiceTiers(c.Context(), c.QueryBool("all", false))
 	if err != nil {
 		h.logger.Error("gagal mengambil katalog tier", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil katalog tier", nil))
 	}
 
 	data := make([]fiber.Map, len(tiers))
-	for i, t := range tiers {
-		data[i] = fiber.Map{
-			"name":               t.Name,
-			"min_retention_days": t.MinRetentionDays,
-			"max_retention_days": t.MaxRetentionDays,
-			"webhook_rate":       t.WebhookRate,
-			"sso_enabled":        t.SSOEnabled,
-			"max_org":            t.MaxOrg,
-			"max_storage_gb":     t.MaxStorageGB,
-			"max_members":        t.MaxMembers,
-		}
+	for i := range tiers {
+		data[i] = tierToMap(&tiers[i])
 	}
 	return c.JSON(response.Success(data))
+}
+
+type serviceTierRequest struct {
+	Name             string `json:"name"`
+	MinRetentionDays int    `json:"min_retention_days"`
+	MaxRetentionDays int    `json:"max_retention_days"`
+	WebhookRate      int    `json:"webhook_rate"`
+	SSOEnabled       bool   `json:"sso_enabled"`
+	MaxOrg           int    `json:"max_org"`
+	MaxStorageGB     int    `json:"max_storage_gb"`
+	MaxMembers       int    `json:"max_members"`
+}
+
+func (r *serviceTierRequest) toParams() *repository.ServiceTierParams {
+	return &repository.ServiceTierParams{
+		Name:             strings.TrimSpace(r.Name),
+		MinRetentionDays: r.MinRetentionDays,
+		MaxRetentionDays: r.MaxRetentionDays,
+		WebhookRate:      r.WebhookRate,
+		SSOEnabled:       r.SSOEnabled,
+		MaxOrg:           r.MaxOrg,
+		MaxStorageGB:     r.MaxStorageGB,
+		MaxMembers:       r.MaxMembers,
+	}
+}
+
+func mapTierError(c *fiber.Ctx, err error, logger *zap.Logger, fallbackMsg string) error {
+	switch {
+	case errors.Is(err, domain.ErrInvalidInput):
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR",
+			"Nama wajib diisi, semua batas numerik harus > 0, retensi minimum >= 30 hari, retensi maksimum <= 3650 hari dan >= retensi minimum", nil))
+	case errors.Is(err, domain.ErrTierNameAlreadyExists):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("TIER_NAME_ALREADY_EXISTS", "Nama tier sudah dipakai", nil))
+	case errors.Is(err, domain.ErrTierNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Tier tidak ditemukan", nil))
+	case errors.Is(err, domain.ErrTierInUse):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TIER_IN_USE",
+			"Tier masih dipakai satu atau lebih grup -- archive dulu dan pindahkan grup yang memakainya", nil))
+	case errors.Is(err, domain.ErrTierNotDeletable):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TIER_NOT_DELETABLE",
+			"Tier standar tidak bisa dihapus, cuma bisa dinonaktifkan/di-archive", nil))
+	default:
+		logger.Error(fallbackMsg, zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMsg, nil))
+	}
+}
+
+// CreateTier menangani POST /platform/tiers (S4P-11) -- tambah tier custom
+// baru ke katalog.
+func (h *GroupAdminHandler) CreateTier(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	var req serviceTierRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users", zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+	id, err := h.accounts.CreateServiceTier(c.Context(), req.toParams(), actorUserID)
+	if err != nil {
+		return mapTierError(c, err, h.logger, "Gagal menambah tier")
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": id}))
+}
+
+// UpdateTier menangani PUT /platform/tiers/:id (S4P-11) -- ubah definisi
+// tier, termasuk rename.
+func (h *GroupAdminHandler) UpdateTier(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	tierID := c.Params("id")
+	var req serviceTierRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users", zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+	if err := h.accounts.UpdateServiceTier(c.Context(), tierID, req.toParams(), actorUserID); err != nil {
+		return mapTierError(c, err, h.logger, "Gagal mengubah tier")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": tierID}))
+}
+
+// tierLifecycleAction -- logika bersama 4 endpoint lifecycle tier
+// (nonaktifkan/aktifkan/archive/pulihkan, S4P-11): resolve actor lalu
+// panggil repo call yang sesuai.
+func (h *GroupAdminHandler) tierLifecycleAction(c *fiber.Ctx, action func(ctx context.Context, id, actorUserID string) error, fallbackMsg string) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	tierID := c.Params("id")
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users", zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+	if err := action(c.Context(), tierID, actorUserID); err != nil {
+		return mapTierError(c, err, h.logger, fallbackMsg)
+	}
+	return c.JSON(response.Success(fiber.Map{"id": tierID}))
+}
+
+// DeactivateTier/ReactivateTier menangani PUT /platform/tiers/:id/deactivate
+// dan /reactivate (S4P-11).
+func (h *GroupAdminHandler) DeactivateTier(c *fiber.Ctx) error {
+	return h.tierLifecycleAction(c, h.accounts.DeactivateServiceTier, "Gagal menonaktifkan tier")
+}
+
+func (h *GroupAdminHandler) ReactivateTier(c *fiber.Ctx) error {
+	return h.tierLifecycleAction(c, h.accounts.ReactivateServiceTier, "Gagal mengaktifkan tier")
+}
+
+// ArchiveTier/UnarchiveTier menangani PUT /platform/tiers/:id/archive dan
+// /unarchive (S4P-11).
+func (h *GroupAdminHandler) ArchiveTier(c *fiber.Ctx) error {
+	return h.tierLifecycleAction(c, h.accounts.ArchiveServiceTier, "Gagal meng-archive tier")
+}
+
+func (h *GroupAdminHandler) UnarchiveTier(c *fiber.Ctx) error {
+	return h.tierLifecycleAction(c, h.accounts.UnarchiveServiceTier, "Gagal memulihkan tier dari arsip")
+}
+
+// DeleteTier menangani DELETE /platform/tiers/:id (S4P-11) -- HANYA tier
+// custom yang sudah tidak dipakai grup manapun.
+func (h *GroupAdminHandler) DeleteTier(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	tierID := c.Params("id")
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users", zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+	if err := h.accounts.DeleteServiceTier(c.Context(), tierID, actorUserID); err != nil {
+		return mapTierError(c, err, h.logger, "Gagal menghapus tier")
+	}
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // sendActivationEmail mengirim email aktivasi -- dipakai Create (S1-05) dan

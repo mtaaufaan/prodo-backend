@@ -181,6 +181,15 @@ func run() error {
 	v1.Get("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Get)
 	v1.Put("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Update)
 	v1.Get("/platform/tiers", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ListTiers)
+	// S4P-11: katalog tier CRUD + lifecycle (nonaktif/archive, keduanya
+	// reversible independen) -- halaman "Tier & Kuota Global".
+	v1.Post("/platform/tiers", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.CreateTier)
+	v1.Put("/platform/tiers/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.UpdateTier)
+	v1.Put("/platform/tiers/:id/deactivate", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.DeactivateTier)
+	v1.Put("/platform/tiers/:id/reactivate", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ReactivateTier)
+	v1.Put("/platform/tiers/:id/archive", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ArchiveTier)
+	v1.Put("/platform/tiers/:id/unarchive", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.UnarchiveTier)
+	v1.Delete("/platform/tiers/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.DeleteTier)
 	// S4P-18, US-070. Session timeout global (semua akun PA); IP allowlist
 	// self-service (per akun PA sendiri, lihat komentar PlatformSecurityHandler).
 	v1.Get("/platform/security-settings", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.Get)

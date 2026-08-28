@@ -165,7 +165,27 @@ var (
 	// alur onboarding yang belum selesai, tidak bisa diset manual mundur.
 	ErrInvalidStatusTransition = errors.New("invalid group admin status transition")
 
-	// ErrInvalidTier dikembalikan saat tier yang diminta (S4P-06/07) bukan
-	// salah satu dari starter/business/enterprise.
+	// ErrInvalidTier dikembalikan saat tier_id yang diminta (S4P-06/07)
+	// tidak ditemukan, atau nonaktif/archived (S4P-11 -- tier nonaktif/
+	// archived tidak bisa di-assign ke GA baru).
 	ErrInvalidTier = errors.New("invalid service tier")
+
+	// ErrTierNameAlreadyExists dikembalikan POST/PUT /platform/tiers
+	// (S4P-11) saat nama tier bentrok UNIQUE constraint dengan tier lain.
+	ErrTierNameAlreadyExists = errors.New("service tier name already exists")
+
+	// ErrTierNotFound dikembalikan saat tier_id tidak ditemukan di
+	// service_tiers (S4P-11).
+	ErrTierNotFound = errors.New("service tier not found")
+
+	// ErrTierInUse dikembalikan DELETE /platform/tiers/:id (S4P-11) saat
+	// masih ada grup yang mereferensikan tier ini -- harus di-archive dan
+	// menunggu seluruh GA pindah tier dulu sebelum bisa dihapus permanen.
+	ErrTierInUse = errors.New("service tier still in use by one or more groups")
+
+	// ErrTierNotDeletable dikembalikan DELETE /platform/tiers/:id (S4P-11)
+	// untuk tier standar (starter/business/enterprise, is_custom=false) --
+	// tier standar bisa dinonaktifkan/archived tapi tidak pernah bisa
+	// dihapus permanen, beda dari tier custom yang PA tambahkan sendiri.
+	ErrTierNotDeletable = errors.New("standard service tier cannot be deleted")
 )
