@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/mtaaufaan/prodo-backend/internal/db"
+	rlsdb "github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 )
 
@@ -271,7 +271,7 @@ func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset i
 // aman meng-hardcode 'platform_admin' di sini tanpa perlu actorUserID
 // (prodo_is_platform_admin() cuma memeriksa role, bukan user_id).
 func (r *AccountRepository) withPlatformAdminRLS(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := db.SetRLSContext(ctx, r.db, "", "platform_admin")
+	tx, err := rlsdb.SetRLSContext(ctx, r.db, "", "platform_admin")
 	if err != nil {
 		return fmt.Errorf("withPlatformAdminRLS: %w", err)
 	}
