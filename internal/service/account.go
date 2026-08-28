@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"time"
 
@@ -317,6 +318,20 @@ func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID stri
 	}
 	if p.NewStatus != "" && p.NewStatus != "AKTIF" && p.NewStatus != "SUSPENDED" {
 		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+	}
+	// IG-23: aturan plafonError() dari desain "PA Group Admin Form" --
+	// plafon storage tidak boleh diturunkan di bawah pemakaian grup saat
+	// ini. Baca ulang UsedStorageMB (query yang sama dipakai GetGroupAdminDetail)
+	// alih-alih menduplikasi agregat SQL-nya di repository.
+	if p.StorageQuotaGB != nil {
+		detail, err := s.repo.GetGroupAdminDetail(ctx, targetUserID)
+		if err != nil {
+			return "", fmt.Errorf("service.UpdateGroupAdmin: cek pemakaian: %w", err)
+		}
+		usedGB := int(math.Ceil(float64(detail.UsedStorageMB) / 1024))
+		if *p.StorageQuotaGB < usedGB {
+			return "", fmt.Errorf("service.UpdateGroupAdmin: %w", &domain.StorageQuotaBelowUsageError{MinimumGB: usedGB})
+		}
 	}
 	oldTier, err := s.repo.UpdateGroupAdmin(ctx, targetUserID, p, actorUserID)
 	if err != nil {

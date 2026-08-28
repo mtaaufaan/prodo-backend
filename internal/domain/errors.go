@@ -1,6 +1,9 @@
 package domain
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrInvalidInput dikembalikan saat field wajib pada request kosong.
@@ -189,3 +192,18 @@ var (
 	// dihapus permanen, beda dari tier custom yang PA tambahkan sendiri.
 	ErrTierNotDeletable = errors.New("standard service tier cannot be deleted")
 )
+
+// StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
+// (IG-23) saat storage_quota_gb yang diminta lebih kecil dari pemakaian
+// grup saat ini -- meniru aturan plafonError() di desain "PA Group Admin
+// Form" yang sebelumnya tidak ditegakkan sama sekali (FE cuma cek > 0, BE
+// cuma cek field wajib tidak kosong). Butuh tipe error sendiri (bukan
+// sentinel biasa) karena pesannya perlu menyertakan angka pemakaian
+// aktual, bukan cuma pesan statis.
+type StorageQuotaBelowUsageError struct {
+	MinimumGB int
+}
+
+func (e *StorageQuotaBelowUsageError) Error() string {
+	return fmt.Sprintf("storage quota must be at least %d GB (current usage)", e.MinimumGB)
+}
