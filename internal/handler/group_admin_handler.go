@@ -452,6 +452,7 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		NewStatus:      req.Status,
 	}, actorUserID)
 	if err != nil {
+		var quotaErr *domain.StorageQuotaBelowUsageError
 		switch {
 		case errors.Is(err, domain.ErrInvalidInput):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "display_name dan group_name wajib diisi", nil))
@@ -462,6 +463,10 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 				`Status hanya bisa diubah ke "AKTIF" atau "SUSPENDED"`, nil))
 		case errors.Is(err, domain.ErrUserNotFound):
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		case errors.As(err, &quotaErr):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STORAGE_QUOTA_BELOW_USAGE",
+				fmt.Sprintf("Plafon minimal %d GB — grup ini sudah memakai %d GB. Turunkan alokasi organisasinya terlebih dahulu.", quotaErr.MinimumGB, quotaErr.MinimumGB),
+				fiber.Map{"minimum_gb": quotaErr.MinimumGB}))
 		default:
 			h.logger.Error("gagal mengubah data Group Admin", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengubah data Group Admin", nil))

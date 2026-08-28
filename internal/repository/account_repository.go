@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 )
 
@@ -223,40 +224,74 @@ func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSumma
 // terbaru dulu, dengan pagination sederhana (docs/coding-conventions.md §7.1).
 func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset int) ([]GroupAdminSummary, int, error) {
 	var total int
-	if err := r.db.QueryRow(ctx, `
-		SELECT count(*) FROM users WHERE platform_role = 'group_admin' AND deleted_at IS NULL
-	`).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: count: %w", err)
-	}
-
-	rows, err := r.db.Query(ctx, groupAdminSummaryQuery+`
-		ORDER BY u.created_at DESC
-		LIMIT $1 OFFSET $2
-	`, limit, offset)
-	if err != nil {
-		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: query: %w", err)
-	}
-	defer rows.Close()
-
 	var result []GroupAdminSummary
-	for rows.Next() {
-		s, err := scanGroupAdminSummary(rows)
-		if err != nil {
-			return nil, 0, fmt.Errorf("repository.ListGroupAdmins: scan: %w", err)
+	err := r.withPlatformAdminRLS(ctx, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM users WHERE platform_role = 'group_admin' AND deleted_at IS NULL
+		`).Scan(&total); err != nil {
+			return fmt.Errorf("count: %w", err)
 		}
-		result = append(result, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: rows: %w", err)
+
+		rows, err := tx.Query(ctx, groupAdminSummaryQuery+`
+			ORDER BY u.created_at DESC
+			LIMIT $1 OFFSET $2
+		`, limit, offset)
+		if err != nil {
+			return fmt.Errorf("query: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			s, err := scanGroupAdminSummary(rows)
+			if err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+			result = append(result, s)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("repository.ListGroupAdmins: %w", err)
 	}
 	return result, total, nil
+}
+
+// withPlatformAdminRLS -- IG-23/IG-10: groupAdminSummaryQuery JOIN ke
+// organizations/workspace_members yang ber-RLS (org_agg/mem_agg di dalam
+// query), tapi route /platform/group-admins/* TIDAK melewati
+// DBContextMiddleware (middleware itu baru dipasang di /workspaces/...,
+// lihat komentar db_context.go) -- akibatnya session variable
+// app.current_platform_role tidak pernah ke-set untuk koneksi
+// prodo_app_user (APP_DATABASE_URL, RLS_DESIGN.md §5.2) yang benar-benar
+// kena RLS, dan policy orgs_select diam-diam mengembalikan 0 baris (bukan
+// error) alih-alih 403 -- used_org_count/used_storage_mb/used_member_count
+// SELALU 0 tanpa terlihat ada yang salah. Ditemukan lewat verifikasi live
+// IG-23 (2026-08-28) dengan organisasi sungguhan berisi storage_used_mb,
+// bukan dugaan. Route ini sudah digerbangi RequirePlatformAdmin(), jadi
+// aman meng-hardcode 'platform_admin' di sini tanpa perlu actorUserID
+// (prodo_is_platform_admin() cuma memeriksa role, bukan user_id).
+func (r *AccountRepository) withPlatformAdminRLS(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	tx, err := db.SetRLSContext(ctx, r.db, "", "platform_admin")
+	if err != nil {
+		return fmt.Errorf("withPlatformAdminRLS: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only, rollback cukup
+	return fn(tx)
 }
 
 // GetGroupAdminDetail mengembalikan satu Group Admin + grup pertamanya
 // untuk mode Lihat/Ubah (S4P-06). domain.ErrUserNotFound kalau tidak ada.
 func (r *AccountRepository) GetGroupAdminDetail(ctx context.Context, targetUserID string) (*GroupAdminSummary, error) {
-	row := r.db.QueryRow(ctx, groupAdminSummaryQuery+` AND u.id = $1`, targetUserID)
-	s, err := scanGroupAdminSummary(row)
+	var s GroupAdminSummary
+	err := r.withPlatformAdminRLS(ctx, func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, groupAdminSummaryQuery+` AND u.id = $1`, targetUserID)
+		scanned, err := scanGroupAdminSummary(row)
+		if err != nil {
+			return err
+		}
+		s = scanned
+		return nil
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.GetGroupAdminDetail: %w", domain.ErrUserNotFound)
