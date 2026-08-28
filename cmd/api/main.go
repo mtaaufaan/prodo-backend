@@ -123,6 +123,7 @@ func run() error {
 	}
 
 	accountRepo := repository.NewAccountRepository(pool)
+	platformAuditRepo := repository.NewPlatformAuditRepository(pool)
 	mfaRepo, err := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("setup MFA repository: %w", err)
@@ -147,6 +148,7 @@ func run() error {
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
+	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -157,6 +159,7 @@ func run() error {
 	}
 
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
+	platformAuditHandler := handler.NewPlatformAuditHandler(platformAuditSvc, logger)
 	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
@@ -190,6 +193,10 @@ func run() error {
 	v1.Put("/platform/tiers/:id/archive", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ArchiveTier)
 	v1.Put("/platform/tiers/:id/unarchive", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.UnarchiveTier)
 	v1.Delete("/platform/tiers/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.DeleteTier)
+	// S4P-22, US-071: jejak audit level platform (RLS SELECT-only untuk PA,
+	// lihat migrations/20260904090000_platform_audit_logs) -- filter
+	// action_type/actor_id/from/to, atau ?export=csv.
+	v1.Get("/platform/audit-logs", jwtAuth, middleware.RequirePlatformAdmin(), platformAuditHandler.List)
 	// S4P-18, US-070. Session timeout global (semua akun PA); IP allowlist
 	// self-service (per akun PA sendiri, lihat komentar PlatformSecurityHandler).
 	v1.Get("/platform/security-settings", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.Get)
