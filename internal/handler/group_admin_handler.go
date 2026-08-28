@@ -438,7 +438,7 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
 	}
 
-	if err := h.accounts.UpdateGroupAdmin(c.Context(), targetUserID, &repository.UpdateGroupAdminParams{
+	oldTier, err := h.accounts.UpdateGroupAdmin(c.Context(), targetUserID, &repository.UpdateGroupAdminParams{
 		DisplayName:    req.DisplayName,
 		GroupName:      req.GroupName,
 		JobTitle:       req.JobTitle,
@@ -447,7 +447,8 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		Tier:           req.Tier,
 		StorageQuotaGB: req.StorageQuotaGB,
 		NewStatus:      req.Status,
-	}, actorUserID); err != nil {
+	}, actorUserID)
+	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidInput):
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "display_name dan group_name wajib diisi", nil))
@@ -469,6 +470,16 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		h.logger.Error("Group Admin berhasil diubah tapi gagal membaca ulang detailnya", zap.Error(err))
 		return c.JSON(response.Success(fiber.Map{"id": targetUserID}))
 	}
+
+	// S4P-09: email tier_changed, best-effort, cuma kalau tier benar-benar
+	// berubah -- notifikasi in-app-nya sudah di-insert di repository
+	// (tx yang sama dengan update) begitu tier terdeteksi berubah.
+	if detail.Tier != nil && oldTier != "" && *detail.Tier != oldTier {
+		if err := h.email.SendTierChangedEmail(c.Context(), detail.Email, detail.DisplayName, oldTier, *detail.Tier); err != nil {
+			h.logger.Error("gagal mengirim email tier_changed", zap.String("user_id", targetUserID), zap.Error(err))
+		}
+	}
+
 	return c.JSON(response.Success(groupAdminSummaryToMap(detail)))
 }
 

@@ -310,6 +310,8 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusConflict).JSON(response.Error("SLUG_ALREADY_EXISTS", "Slug sudah dipakai organisasi lain", nil))
 	case errors.Is(err, domain.ErrStorageQuotaExceedsMax):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STORAGE_QUOTA_EXCEEDS_MAX", "Kuota melebihi batas maksimum yang ditetapkan Platform Admin", nil))
+	case errors.Is(err, domain.ErrGroupStorageQuotaExceedsCeiling):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("GROUP_STORAGE_QUOTA_EXCEEDS_CEILING", "Total kuota seluruh organisasi dalam grup akan melebihi plafon storage grup", nil))
 	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
 	default:

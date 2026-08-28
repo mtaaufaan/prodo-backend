@@ -81,3 +81,21 @@ func TestBuildPlatformAdminLoginAlertMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildTierChangedEmailMessage(t *testing.T) {
+	msg := string(buildTierChangedEmailMessage("noreply@prodo.local", "ga@example.com", "GA Demo", "starter", "business"))
+
+	checks := []string{
+		"From: noreply@prodo.local",
+		"To: ga@example.com",
+		"Subject: Tier Grup Anda Berubah - PRODO",
+		"Halo GA Demo,",
+		"starter",
+		"business",
+	}
+	for _, want := range checks {
+		if !strings.Contains(msg, want) {
+			t.Errorf("pesan email tidak mengandung %q\n---\n%s", want, msg)
+		}
+	}
+}

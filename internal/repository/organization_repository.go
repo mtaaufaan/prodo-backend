@@ -136,7 +136,8 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 // violation mentah).
 func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error {
 	var maxBytes int64
-	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes); err != nil {
+	var groupID string
+	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes, &groupID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrOrganizationNotFound)
 		}
@@ -144,6 +145,27 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 	}
 	if quotaBytes > maxBytes {
 		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrStorageQuotaExceedsMax)
+	}
+
+	// S4P-12: tegakkan plafon groups.storage_quota_gb (fallback ke
+	// service_tiers.max_storage_gb kalau grup belum override manual) sebagai
+	// ceiling GABUNGAN seluruh organisasi dalam grup itu -- sebelumnya cuma
+	// disimpan/ditampilkan di form Group Admin (S4P-06/07), belum ditegakkan.
+	var groupCeilingGB int
+	var otherOrgsBytes int64
+	if err := exec.QueryRow(ctx, `
+		SELECT COALESCE(g.storage_quota_gb, st.max_storage_gb, 0),
+		       COALESCE((SELECT sum(o.storage_quota_bytes) FROM organizations o
+		                 WHERE o.group_id = g.id AND o.id != $2), 0)
+		FROM groups g
+		LEFT JOIN service_tiers st ON st.name = g.tier
+		WHERE g.id = $1
+	`, groupID, orgID).Scan(&groupCeilingGB, &otherOrgsBytes); err != nil {
+		return fmt.Errorf("repository.UpdateStorageQuota: cek plafon grup: %w", err)
+	}
+	groupCeilingBytes := int64(groupCeilingGB) * 1024 * 1024 * 1024
+	if groupCeilingGB > 0 && otherOrgsBytes+quotaBytes > groupCeilingBytes {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrGroupStorageQuotaExceedsCeiling)
 	}
 
 	if _, err := exec.Exec(ctx, `

@@ -42,7 +42,7 @@ type accountRepository interface {
 	// GetGroupAdminDetail/UpdateGroupAdmin/ListServiceTiers -- S4P-06/07,
 	// form "Lihat"/"Ubah" Group Admin lengkap sesuai desain.
 	GetGroupAdminDetail(ctx context.Context, targetUserID string) (*repository.GroupAdminSummary, error)
-	UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) error
+	UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) (oldTier string, err error)
 	ListServiceTiers(ctx context.Context) ([]repository.ServiceTier, error)
 
 	// GetPASessionIdleTimeoutSeconds/SetPASessionIdleTimeoutSeconds --
@@ -297,20 +297,21 @@ func (s *AccountService) GetGroupAdminDetail(ctx context.Context, targetUserID s
 // UpdateGroupAdmin -- S4P-06, form "Ubah Group Admin". Validasi tier dan
 // status di sini (bukan cuma di repository) supaya pesan error konsisten
 // dengan CreateGroupAdmin.
-func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) error {
+func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) (string, error) {
 	if p.DisplayName == "" || p.GroupName == "" {
-		return fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidInput)
+		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidInput)
 	}
 	if !validServiceTiers[p.Tier] {
-		return fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidTier)
+		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidTier)
 	}
 	if p.NewStatus != "" && p.NewStatus != "AKTIF" && p.NewStatus != "SUSPENDED" {
-		return fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
+		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidStatusTransition)
 	}
-	if err := s.repo.UpdateGroupAdmin(ctx, targetUserID, p, actorUserID); err != nil {
-		return fmt.Errorf("service.UpdateGroupAdmin: %w", err)
+	oldTier, err := s.repo.UpdateGroupAdmin(ctx, targetUserID, p, actorUserID)
+	if err != nil {
+		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", err)
 	}
-	return nil
+	return oldTier, nil
 }
 
 // ListServiceTiers -- S4P-07, katalog tier untuk dropdown Tier + panel
