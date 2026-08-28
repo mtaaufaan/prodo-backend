@@ -632,6 +632,39 @@ func TestAccountService_UpdateGroupAdmin_Success(t *testing.T) {
 	}
 }
 
+// TestAccountService_UpdateGroupAdmin_RejectsStorageQuotaBelowUsage --
+// IG-23: plafon baru tidak boleh lebih kecil dari pemakaian grup saat ini
+// (UsedStorageMB dari GetGroupAdminDetail, dibulatkan ke atas per GB).
+func TestAccountService_UpdateGroupAdmin_RejectsStorageQuotaBelowUsage(t *testing.T) {
+	repo := &fakeAccountRepository{groupAdminDetail: &repository.GroupAdminSummary{UsedStorageMB: 51200}} // 50 GB
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	newQuota := 40
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-1", StorageQuotaGB: &newQuota,
+	}, "pa-1")
+	var quotaErr *domain.StorageQuotaBelowUsageError
+	if !errors.As(err, &quotaErr) {
+		t.Fatalf("err = %v, want wrapped *domain.StorageQuotaBelowUsageError", err)
+	}
+	if quotaErr.MinimumGB != 50 {
+		t.Errorf("MinimumGB = %d, want 50", quotaErr.MinimumGB)
+	}
+}
+
+func TestAccountService_UpdateGroupAdmin_AllowsStorageQuotaAtOrAboveUsage(t *testing.T) {
+	repo := &fakeAccountRepository{groupAdminDetail: &repository.GroupAdminSummary{UsedStorageMB: 51200}} // 50 GB
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	newQuota := 50
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-1", StorageQuotaGB: &newQuota,
+	}, "pa-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // TestAccountService_UpdateGroupAdmin_ReturnsOldTier -- S4P-09: handler
 // pakai nilai balik ini untuk memutuskan apakah notifikasi/email
 // tier_changed perlu dikirim (cuma kalau tier lama != tier baru).

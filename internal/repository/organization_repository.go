@@ -158,7 +158,7 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 		       COALESCE((SELECT sum(o.storage_quota_bytes) FROM organizations o
 		                 WHERE o.group_id = g.id AND o.id != $2), 0)
 		FROM groups g
-		LEFT JOIN service_tiers st ON st.name = g.tier
+		LEFT JOIN service_tiers st ON st.id = g.tier_id
 		WHERE g.id = $1
 	`, groupID, orgID).Scan(&groupCeilingGB, &otherOrgsBytes); err != nil {
 		return fmt.Errorf("repository.UpdateStorageQuota: cek plafon grup: %w", err)
