@@ -124,6 +124,7 @@ func run() error {
 
 	accountRepo := repository.NewAccountRepository(pool)
 	platformAuditRepo := repository.NewPlatformAuditRepository(pool)
+	platformDashboardRepo := repository.NewPlatformDashboardRepository(pool)
 	mfaRepo, err := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("setup MFA repository: %w", err)
@@ -149,6 +150,7 @@ func run() error {
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
+	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -160,6 +162,7 @@ func run() error {
 
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
 	platformAuditHandler := handler.NewPlatformAuditHandler(platformAuditSvc, logger)
+	platformDashboardHandler := handler.NewPlatformDashboardHandler(platformDashboardSvc, logger)
 	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
@@ -197,6 +200,13 @@ func run() error {
 	// lihat migrations/20260904090000_platform_audit_logs) -- filter
 	// action_type/actor_id/from/to, atau ?export=csv.
 	v1.Get("/platform/audit-logs", jwtAuth, middleware.RequirePlatformAdmin(), platformAuditHandler.List)
+	// S4P-24/25/26, US-072: KPI, tren, deteksi anomali untuk "Dashboard
+	// Kesehatan Platform". /platform/anomalies BUKAN endpoint literal AC
+	// sprint_backlog.md (yang cuma sebut "Service AnomalyDetector") --
+	// ditambahkan supaya FE (S4P-27) punya cara membaca hasilnya.
+	v1.Get("/platform/health-metrics", jwtAuth, middleware.RequirePlatformAdmin(), platformDashboardHandler.HealthMetrics)
+	v1.Get("/platform/trends", jwtAuth, middleware.RequirePlatformAdmin(), platformDashboardHandler.Trends)
+	v1.Get("/platform/anomalies", jwtAuth, middleware.RequirePlatformAdmin(), platformDashboardHandler.Anomalies)
 	// S4P-18, US-070. Session timeout global (semua akun PA); IP allowlist
 	// self-service (per akun PA sendiri, lihat komentar PlatformSecurityHandler).
 	v1.Get("/platform/security-settings", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.Get)
