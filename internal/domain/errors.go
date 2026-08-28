@@ -191,6 +191,22 @@ var (
 	// tier standar bisa dinonaktifkan/archived tapi tidak pernah bisa
 	// dihapus permanen, beda dari tier custom yang PA tambahkan sendiri.
 	ErrTierNotDeletable = errors.New("standard service tier cannot be deleted")
+
+	// ErrErasureRequestNotFound dikembalikan saat erasure_requests.id yang
+	// dituju (execute/reject, S4P-31) tidak ditemukan.
+	ErrErasureRequestNotFound = errors.New("erasure request not found")
+
+	// ErrErasureRequestAlreadyProcessed dikembalikan saat execute/reject
+	// (S4P-31) dipanggil pada request yang statusnya sudah DONE/REJECTED --
+	// tidak boleh diproses dua kali.
+	ErrErasureRequestAlreadyProcessed = errors.New("erasure request already processed")
+
+	// ErrErasureConfirmationRequired dikembalikan POST .../execute (S4P-31)
+	// saat body confirmation tidak persis "KONFIRMASI" -- konfirmasi dua
+	// langkah untuk aksi pseudonymization yang irreversible (AC sprint_backlog
+	// S4P-31; desain "PA Erasure Confirm" cuma modal 1 klik, lihat
+	// implementation_gaps.md untuk gap ini).
+	ErrErasureConfirmationRequired = errors.New("typed confirmation required to execute erasure")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id

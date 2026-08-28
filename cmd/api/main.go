@@ -125,6 +125,7 @@ func run() error {
 	accountRepo := repository.NewAccountRepository(pool)
 	platformAuditRepo := repository.NewPlatformAuditRepository(pool)
 	platformDashboardRepo := repository.NewPlatformDashboardRepository(pool)
+	erasureRepo := repository.NewErasureRepository(pool)
 	mfaRepo, err := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("setup MFA repository: %w", err)
@@ -151,6 +152,7 @@ func run() error {
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
+	erasureSvc := service.NewErasureService(erasureRepo)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -163,6 +165,7 @@ func run() error {
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
 	platformAuditHandler := handler.NewPlatformAuditHandler(platformAuditSvc, logger)
 	platformDashboardHandler := handler.NewPlatformDashboardHandler(platformDashboardSvc, logger)
+	erasureHandler := handler.NewErasureHandler(erasureSvc, accountSvc, logger)
 	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
@@ -213,6 +216,14 @@ func run() error {
 	v1.Put("/platform/security-settings/session-timeout", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.UpdateSessionTimeout)
 	v1.Post("/platform/security-settings/ip-allowlist", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.AddIPAllowlist)
 	v1.Delete("/platform/security-settings/ip-allowlist/:id", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.DeleteIPAllowlist)
+	// S4P-28-33, US-060: Right to Erasure. Create SENGAJA TANPA
+	// RequirePlatformAdmin() -- user/AW/PM mengajukan, otorisasi per-request
+	// di service (lihat komentar ErasureHandler.Create). List/Execute/Reject
+	// khusus Platform Admin.
+	v1.Post("/platform/erasure-requests", jwtAuth, erasureHandler.Create)
+	v1.Get("/platform/erasure-requests", jwtAuth, middleware.RequirePlatformAdmin(), erasureHandler.List)
+	v1.Post("/platform/erasure-requests/:id/execute", jwtAuth, middleware.RequirePlatformAdmin(), erasureHandler.Execute)
+	v1.Post("/platform/erasure-requests/:id/reject", jwtAuth, middleware.RequirePlatformAdmin(), erasureHandler.Reject)
 	v1.Post("/auth/activate", authHandler.Activate)
 	v1.Post("/auth/activate/mfa-verify", authHandler.VerifyMFA)
 	v1.Post("/auth/login", authHandler.Login)
