@@ -49,14 +49,14 @@ type fakeAccountRepository struct {
 	deleteGroupAdminErr error
 	deletedGroupAdminID string
 
-	groupAdminDetail        *repository.GroupAdminSummary
-	groupAdminDetailErr     error
-	updateGroupAdminErr     error
-	updateGroupAdminOldTier string
-	updatedGroupAdminID     string
-	updatedGroupAdminParam  *repository.UpdateGroupAdminParams
-	tiers                   []repository.ServiceTier
-	tiersErr                error
+	groupAdminDetail         *repository.GroupAdminSummary
+	groupAdminDetailErr      error
+	updateGroupAdminErr      error
+	updateGroupAdminOldTier  string
+	updatedGroupAdminID      string
+	updatedGroupAdminParam   *repository.UpdateGroupAdminParams
+	tiers                    []repository.ServiceTier
+	tiersErr                 error
 	listTiersIncludeArchived bool
 
 	defaultTierID       string
