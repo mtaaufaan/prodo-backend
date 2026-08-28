@@ -25,9 +25,18 @@ import (
 // 'platform_admin' di sini tanpa perlu actorUserID (prodo_is_platform_admin()
 // cuma memeriksa role, bukan user_id).
 func withPlatformAdminRLS(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
-	tx, err := rlsdb.SetRLSContext(ctx, pool, "", "platform_admin")
+	return withRLSContext(ctx, pool, "", "platform_admin", fn)
+}
+
+// withRLSContext -- versi umum withPlatformAdminRLS (S4P-29,
+// ErasureRepository.HasSharedWorkspaceAdminRole): dipakai saat query butuh
+// app.current_user_id SUNGGUHAN (bukan cuma role), mis. helper
+// prodo_is_workspace_member() yang membaca app.current_user_id, bukan
+// app.current_platform_role saja.
+func withRLSContext(ctx context.Context, pool *pgxpool.Pool, userID, platformRole string, fn func(tx pgx.Tx) error) error {
+	tx, err := rlsdb.SetRLSContext(ctx, pool, userID, platformRole)
 	if err != nil {
-		return fmt.Errorf("withPlatformAdminRLS: %w", err)
+		return fmt.Errorf("withRLSContext: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // read-only, rollback cukup
 	return fn(tx)
