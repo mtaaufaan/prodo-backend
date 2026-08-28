@@ -86,7 +86,8 @@ func (h *ErasureHandler) List(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil antrian erasure", nil))
 	}
 	data := make([]fiber.Map, len(rows))
-	for i, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		m := fiber.Map{
 			"id":           r.ID,
 			"subject":      r.Subject,

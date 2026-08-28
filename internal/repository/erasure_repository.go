@@ -118,7 +118,7 @@ func (r *ErasureRepository) Execute(ctx context.Context, requestID, processedBy 
 	if err != nil {
 		return fmt.Errorf("repository.ErasureRepository.Execute: begin: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer tx.Rollback(ctx) //nolint:errcheck // sudah commit di jalur sukses, rollback di jalur gagal cukup best-effort
 
 	var userID, status string
 	if err := tx.QueryRow(ctx, `SELECT user_id, status::text FROM erasure_requests WHERE id = $1 FOR UPDATE`, requestID).
@@ -172,7 +172,7 @@ func (r *ErasureRepository) Reject(ctx context.Context, requestID, processedBy s
 	if err != nil {
 		return fmt.Errorf("repository.ErasureRepository.Reject: begin: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer tx.Rollback(ctx) //nolint:errcheck // sudah commit di jalur sukses, rollback di jalur gagal cukup best-effort
 
 	var userID, status string
 	if err := tx.QueryRow(ctx, `SELECT user_id, status::text FROM erasure_requests WHERE id = $1 FOR UPDATE`, requestID).
