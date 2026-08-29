@@ -200,6 +200,7 @@ func run() error {
 	// "PA Group Admins"/"PA Group Admin Form".
 	v1.Get("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Get)
 	v1.Put("/platform/group-admins/:id", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Update)
+	v1.Post("/platform/group-admins/:id/renew-contract", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.RenewContract)
 	v1.Get("/platform/tiers", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ListTiers)
 	// S4P-11: katalog tier CRUD + lifecycle (nonaktif/archive, keduanya
 	// reversible independen) -- halaman "Tier & Kuota Global".

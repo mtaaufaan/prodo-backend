@@ -46,6 +46,14 @@ type createGroupAdminRequest struct {
 	Phone          string `json:"phone"`
 	TierID         string `json:"tier_id"`
 	StorageQuotaGB *int   `json:"storage_quota_gb"`
+
+	// Kontrak awal (dikonfirmasi user 2026-08-29) -- OPSIONAL. ContractStartAt
+	// kosong berarti grup dibuat tanpa kontrak dulu (bisa ditambah belakangan
+	// lewat POST .../renew-contract). Format tanggal "2006-01-02" (date-only,
+	// sama pola dengan filter GET /platform/audit-logs).
+	ContractStartAt            string `json:"contract_start_at"`
+	ContractSubscriptionPeriod string `json:"contract_subscription_period"`
+	ContractInvoiceNumber      string `json:"contract_invoice_number"`
 }
 
 // Create menangani POST /platform/group-admins -- dipasang di belakang
@@ -69,6 +77,14 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 	if !validator.IsValidEmail(req.Email) {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format email tidak valid", nil))
 	}
+	var contractStartAt *time.Time
+	if req.ContractStartAt != "" {
+		t, parseErr := time.Parse("2006-01-02", req.ContractStartAt)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format contract_start_at tidak valid (YYYY-MM-DD)", nil))
+		}
+		contractStartAt = &t
+	}
 
 	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
 	if err != nil {
@@ -87,6 +103,10 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		TierID:          req.TierID,
 		StorageQuotaGB:  req.StorageQuotaGB,
 		InvitedByUserID: actorUserID,
+
+		ContractStartAt:            contractStartAt,
+		ContractSubscriptionPeriod: req.ContractSubscriptionPeriod,
+		ContractInvoiceNumber:      req.ContractInvoiceNumber,
 	})
 	if err != nil {
 		switch {
@@ -96,6 +116,8 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "email, display_name, dan group_name wajib diisi", nil))
 		case errors.Is(err, domain.ErrInvalidTier):
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_TIER", "Tier tidak valid", nil))
+		case errors.Is(err, domain.ErrInvalidSubscriptionPeriod):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_SUBSCRIPTION_PERIOD", "Masa langganan harus monthly, quarterly, atau yearly", nil))
 		default:
 			h.logger.Error("gagal membuat akun Group Admin", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat akun Group Admin", nil))
@@ -372,8 +394,23 @@ func groupAdminSummaryToMap(s *repository.GroupAdminSummary) fiber.Map {
 		"used_org_count":      s.UsedOrgCount,
 		"used_storage_mb":     s.UsedStorageMB,
 		"used_member_count":   s.UsedMemberCount,
+		"contract_start_at":   formatOptionalDate(s.ContractStartAt),
+		"subscription_period": s.SubscriptionPeriod,
+		"contract_end_at":     formatOptionalDate(s.ContractEndAt),
+		"invoice_number":      s.ContractInvoiceNum,
 	}
 	return m
+}
+
+// formatOptionalDate -- kontrak grup (dikonfirmasi user 2026-08-29): nil
+// jadi null JSON, bukan panic/zero-value yang menyesatkan (pola sama
+// dengan optionalPtr yang disebut komentar di atas untuk *string/*int).
+func formatOptionalDate(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
 }
 
 // Get menangani GET /platform/group-admins/:id -- mode "Lihat"/"Ubah"
@@ -489,6 +526,59 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(groupAdminSummaryToMap(detail)))
+}
+
+type renewGroupContractRequest struct {
+	StartAt            string `json:"start_at"`
+	SubscriptionPeriod string `json:"subscription_period"`
+	InvoiceNumber      string `json:"invoice_number"`
+}
+
+// RenewContract menangani POST /platform/group-admins/:id/renew-contract
+// (dikonfirmasi user 2026-08-29) -- kontrak PERTAMA (grup belum pernah
+// punya baris group_contracts) maupun PERPANJANGAN, service/repository
+// yang membedakan audit action-nya.
+func (h *GroupAdminHandler) RenewContract(c *fiber.Ctx) error {
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+
+	targetUserID := c.Params("id")
+	if targetUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
+	}
+
+	var req renewGroupContractRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	startAt, err := time.Parse("2006-01-02", req.StartAt)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format start_at tidak valid (YYYY-MM-DD)", nil))
+	}
+
+	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
+	if err != nil {
+		h.logger.Error("Platform Admin JWT valid tapi tidak ditemukan di tabel users",
+			zap.String("keycloak_sub", claims.Subject), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
+	}
+
+	endAt, err := h.accounts.RenewGroupContract(c.Context(), targetUserID, startAt, req.SubscriptionPeriod, req.InvoiceNumber, actorUserID)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidSubscriptionPeriod):
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_SUBSCRIPTION_PERIOD", "Masa langganan harus monthly, quarterly, atau yearly", nil))
+		case errors.Is(err, domain.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		default:
+			h.logger.Error("gagal memperpanjang kontrak grup", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memperpanjang kontrak", nil))
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{"contract_end_at": endAt.UTC().Format(time.RFC3339)}))
 }
 
 // tierToMap -- bentuk JSON bersama ListTiers/CreateTier/UpdateTier (S4P-07/11).

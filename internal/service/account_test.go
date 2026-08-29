@@ -78,6 +78,13 @@ type fakeAccountRepository struct {
 	unarchiveTierErr    error
 	deleteTierErr       error
 	tierLifecycleCallID string
+
+	renewedTargetUserID       string
+	renewedStartAt            time.Time
+	renewedSubscriptionPeriod string
+	renewedInvoiceNumber      string
+	renewGroupContractEndAt   time.Time
+	renewGroupContractErr     error
 }
 
 func (f *fakeAccountRepository) GetGroupAdminDetail(_ context.Context, _ string) (*repository.GroupAdminSummary, error) {
@@ -91,6 +98,17 @@ func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID
 		return "", f.updateGroupAdminErr
 	}
 	return f.updateGroupAdminOldTier, nil
+}
+
+func (f *fakeAccountRepository) RenewGroupContract(_ context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, _ string) (time.Time, error) {
+	f.renewedTargetUserID = targetUserID
+	f.renewedStartAt = startAt
+	f.renewedSubscriptionPeriod = subscriptionPeriod
+	f.renewedInvoiceNumber = invoiceNumber
+	if f.renewGroupContractErr != nil {
+		return time.Time{}, f.renewGroupContractErr
+	}
+	return f.renewGroupContractEndAt, nil
 }
 
 func (f *fakeAccountRepository) ListServiceTiers(_ context.Context, includeArchived bool) ([]repository.ServiceTier, error) {
@@ -691,6 +709,37 @@ func TestAccountService_UpdateGroupAdmin_Success(t *testing.T) {
 	}
 	if repo.updatedGroupAdminParam.NewStatus != "SUSPENDED" {
 		t.Errorf("NewStatus = %q, want %q", repo.updatedGroupAdminParam.NewStatus, "SUSPENDED")
+	}
+}
+
+func TestAccountService_RenewGroupContract_InvalidPeriod(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	_, err := svc.RenewGroupContract(context.Background(), "ga-1", time.Now(), "weekly", "", "pa-1")
+	if !errors.Is(err, domain.ErrInvalidSubscriptionPeriod) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidSubscriptionPeriod", err)
+	}
+	if repo.renewedTargetUserID != "" {
+		t.Error("repo tidak seharusnya dipanggil kalau subscription_period tidak valid")
+	}
+}
+
+func TestAccountService_RenewGroupContract_Valid(t *testing.T) {
+	wantEnd := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo := &fakeAccountRepository{renewGroupContractEndAt: wantEnd}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	endAt, err := svc.RenewGroupContract(context.Background(), "ga-1", start, "quarterly", "INV-001", "pa-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !endAt.Equal(wantEnd) {
+		t.Errorf("endAt = %v, want %v", endAt, wantEnd)
+	}
+	if repo.renewedTargetUserID != "ga-1" || repo.renewedSubscriptionPeriod != "quarterly" || repo.renewedInvoiceNumber != "INV-001" {
+		t.Errorf("repo params = %+v", repo)
 	}
 }
 

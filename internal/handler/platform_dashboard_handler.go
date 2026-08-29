@@ -92,8 +92,7 @@ func (h *PlatformDashboardHandler) Anomalies(c *fiber.Ctx) error {
 	contractEnd := make([]fiber.Map, len(a.ContractEnd))
 	for i, ce := range a.ContractEnd {
 		contractEnd[i] = fiber.Map{
-			"org_id":          ce.OrgID,
-			"org_name":        ce.OrgName,
+			"group_id":        ce.GroupID,
 			"group_name":      ce.GroupName,
 			"contract_end_at": ce.ContractEndAt.UTC().Format(time.RFC3339),
 		}

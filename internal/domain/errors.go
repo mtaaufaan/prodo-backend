@@ -177,6 +177,11 @@ var (
 	// (S4P-11) saat nama tier bentrok UNIQUE constraint dengan tier lain.
 	ErrTierNameAlreadyExists = errors.New("service tier name already exists")
 
+	// ErrInvalidSubscriptionPeriod dikembalikan saat subscription_period
+	// kontrak grup (dikonfirmasi user 2026-08-29) bukan salah satu dari
+	// "monthly"/"quarterly"/"yearly".
+	ErrInvalidSubscriptionPeriod = errors.New("invalid subscription period")
+
 	// ErrTierNotFound dikembalikan saat tier_id tidak ditemukan di
 	// service_tiers (S4P-11).
 	ErrTierNotFound = errors.New("service tier not found")

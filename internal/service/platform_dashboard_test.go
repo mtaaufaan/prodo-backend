@@ -66,7 +66,7 @@ func TestPlatformDashboardService_Trends_PassesThroughDays(t *testing.T) {
 func TestPlatformDashboardService_Anomalies_CombinesBothKinds(t *testing.T) {
 	repo := &fakePlatformDashboardRepository{
 		storageAnomalies: []repository.StorageAnomaly{{GroupName: "PT A"}},
-		contractEnd:      []repository.ContractEndingAnomaly{{OrgName: "Org B"}},
+		contractEnd:      []repository.ContractEndingAnomaly{{GroupName: "Grup B"}},
 	}
 	svc := NewPlatformDashboardService(repo)
 
@@ -77,7 +77,7 @@ func TestPlatformDashboardService_Anomalies_CombinesBothKinds(t *testing.T) {
 	if len(a.Storage) != 1 || a.Storage[0].GroupName != "PT A" {
 		t.Errorf("Storage = %+v", a.Storage)
 	}
-	if len(a.ContractEnd) != 1 || a.ContractEnd[0].OrgName != "Org B" {
+	if len(a.ContractEnd) != 1 || a.ContractEnd[0].GroupName != "Grup B" {
 		t.Errorf("ContractEnd = %+v", a.ContractEnd)
 	}
 	if repo.contractDays != 7 {

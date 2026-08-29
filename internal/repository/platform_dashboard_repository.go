@@ -43,11 +43,13 @@ type StorageAnomaly struct {
 	Severity  string // "warning" (>=80%) atau "critical" (>=95%)
 }
 
-// ContractEndingAnomaly -- S4P-26, organisasi dengan contract_end_at
-// dalam <30 hari (termasuk yang SUDAH lewat -- lihat komentar Anomalies).
+// ContractEndingAnomaly -- S4P-26, GRUP (dibalik dari per-organisasi
+// 2026-08-29, dikonfirmasi user: kontrak adalah hubungan komersial
+// Platform Admin <-> Group Admin, bukan properti organisasi) dengan
+// kontrak AKTIF (baris group_contracts end_at paling baru) dalam <30
+// hari (termasuk yang SUDAH lewat -- lihat komentar Anomalies).
 type ContractEndingAnomaly struct {
-	OrgID         string
-	OrgName       string
+	GroupID       string
 	GroupName     string
 	ContractEndAt time.Time
 }
@@ -216,37 +218,42 @@ func (r *PlatformDashboardRepository) StorageAnomalies(ctx context.Context) ([]S
 }
 
 // ContractEndingAnomalies -- S4P-26 AC: "org dengan contract_end_date <30
-// hari". Jendela simetris [-days, +days] dari sekarang (dikonfirmasi user
-// 2026-08-29): sisi depan tetap membatasi lookahead, sisi belakang
-// mencegah kontrak yang sudah lama kedaluwarsa & tak pernah ditindak
-// menumpuk selamanya di alert -- sebelumnya sengaja tanpa batas bawah,
-// keputusan itu dibalik atas permintaan user karena jadi noise.
+// hari", dibalik jadi per-GRUP 2026-08-29 (dikonfirmasi user, lihat
+// migrasi group_contracts). Jendela simetris [-days, +days] dari
+// sekarang (dikonfirmasi user 2026-08-29): sisi depan tetap membatasi
+// lookahead, sisi belakang mencegah kontrak yang sudah lama kedaluwarsa
+// & tak pernah ditindak menumpuk selamanya di alert -- sebelumnya
+// sengaja tanpa batas bawah, keputusan itu dibalik atas permintaan user
+// karena jadi noise. Beda dari StorageAnomalies di file ini yang JOIN ke
+// organizations (RLS FORCE sejak S3-42, wajib withPlatformAdminRLS) --
+// query ini cuma menyentuh groups/group_contracts, KEDUANYA tabel
+// level-platform yang sengaja tidak di-RLS (IG-07), jadi r.db langsung
+// aman, tanpa risiko silent-empty-result kelas IG-14/IG-24.
 func (r *PlatformDashboardRepository) ContractEndingAnomalies(ctx context.Context, days int) ([]ContractEndingAnomaly, error) {
-	var result []ContractEndingAnomaly
-	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
-			SELECT o.id, o.name, g.name, o.contract_end_at
-			FROM organizations o
-			JOIN groups g ON g.id = o.group_id
-			WHERE o.contract_end_at IS NOT NULL
-				AND o.contract_end_at BETWEEN NOW() - make_interval(days => $1) AND NOW() + make_interval(days => $1)
-			ORDER BY o.contract_end_at
-		`, days)
-		if err != nil {
-			return fmt.Errorf("query: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var a ContractEndingAnomaly
-			if err := rows.Scan(&a.OrgID, &a.OrgName, &a.GroupName, &a.ContractEndAt); err != nil {
-				return fmt.Errorf("scan: %w", err)
-			}
-			result = append(result, a)
-		}
-		return rows.Err()
-	})
+	rows, err := r.db.Query(ctx, `
+		SELECT g.id, g.name, contract.end_at
+		FROM groups g
+		JOIN LATERAL (
+			SELECT gc.end_at FROM group_contracts gc WHERE gc.group_id = g.id ORDER BY gc.end_at DESC LIMIT 1
+		) contract ON true
+		WHERE contract.end_at BETWEEN NOW() - make_interval(days => $1) AND NOW() + make_interval(days => $1)
+		ORDER BY contract.end_at
+	`, days)
 	if err != nil {
-		return nil, fmt.Errorf("repository.PlatformDashboardRepository.ContractEndingAnomalies: %w", err)
+		return nil, fmt.Errorf("repository.PlatformDashboardRepository.ContractEndingAnomalies: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ContractEndingAnomaly
+	for rows.Next() {
+		var a ContractEndingAnomaly
+		if err := rows.Scan(&a.GroupID, &a.GroupName, &a.ContractEndAt); err != nil {
+			return nil, fmt.Errorf("repository.PlatformDashboardRepository.ContractEndingAnomalies: scan: %w", err)
+		}
+		result = append(result, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.PlatformDashboardRepository.ContractEndingAnomalies: rows: %w", err)
 	}
 	return result, nil
 }

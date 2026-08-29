@@ -45,6 +45,9 @@ type accountRepository interface {
 	GetGroupAdminDetail(ctx context.Context, targetUserID string) (*repository.GroupAdminSummary, error)
 	UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) (oldTier string, err error)
 
+	// RenewGroupContract -- kontrak grup (dikonfirmasi user 2026-08-29).
+	RenewGroupContract(ctx context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error)
+
 	// Katalog tier + lifecycle (S4P-07/11): ListServiceTiers/
 	// FindActiveServiceTierIDByName untuk assign tier ke GA; Create/Update/
 	// Deactivate/Reactivate/Archive/Unarchive/Delete untuk halaman "Tier &
@@ -89,6 +92,16 @@ type accountRepository interface {
 // menit" (S4P-18).
 const minPASessionIdleTimeout = 10 * time.Minute
 
+// isValidSubscriptionPeriod -- kontrak grup (dikonfirmasi user 2026-08-29).
+func isValidSubscriptionPeriod(period string) bool {
+	switch period {
+	case "monthly", "quarterly", "yearly":
+		return true
+	default:
+		return false
+	}
+}
+
 type AccountService struct {
 	repo     accountRepository
 	keycloak keycloak.AdminClient
@@ -121,6 +134,13 @@ type CreateGroupAdminRequest struct {
 	TierID          string
 	StorageQuotaGB  *int
 	InvitedByUserID string // Platform Admin yang melakukan invite
+
+	// Kontrak awal (dikonfirmasi user 2026-08-29) -- OPSIONAL. ContractStartAt
+	// nil berarti grup dibuat tanpa kontrak dulu, bisa ditambah belakangan
+	// lewat RenewGroupContract.
+	ContractStartAt            *time.Time
+	ContractSubscriptionPeriod string
+	ContractInvoiceNumber      string
 }
 
 // GroupAdminInvitation adalah hasil pembuatan akun. ActivationToken cuma
@@ -168,6 +188,9 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req *CreateGroupA
 	if req.Email == "" || req.DisplayName == "" || req.GroupName == "" || req.InvitedByUserID == "" {
 		return nil, fmt.Errorf("service.CreateGroupAdmin: %w", domain.ErrInvalidInput)
 	}
+	if req.ContractStartAt != nil && !isValidSubscriptionPeriod(req.ContractSubscriptionPeriod) {
+		return nil, fmt.Errorf("service.CreateGroupAdmin: %w", domain.ErrInvalidSubscriptionPeriod)
+	}
 	if req.TierID == "" {
 		tierID, err := s.repo.FindActiveServiceTierIDByName(ctx, defaultServiceTierName)
 		if err != nil {
@@ -204,6 +227,10 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req *CreateGroupA
 		TokenHash:       tokenHash,
 		ExpiresAt:       expiresAt,
 		InvitedByUserID: req.InvitedByUserID,
+
+		ContractStartAt:            req.ContractStartAt,
+		ContractSubscriptionPeriod: req.ContractSubscriptionPeriod,
+		ContractInvoiceNumber:      req.ContractInvoiceNumber,
 	})
 	if err != nil {
 		s.logger.Error("gagal simpan invitation Group Admin setelah user Keycloak dibuat -- kemungkinan orphan, perlu cleanup manual",
@@ -426,6 +453,21 @@ func (s *AccountService) GetGroupAdminDetail(ctx context.Context, targetUserID s
 		return nil, fmt.Errorf("service.GetGroupAdminDetail: %w", err)
 	}
 	return detail, nil
+}
+
+// RenewGroupContract -- S4P-06 area, kontrak grup (dikonfirmasi user
+// 2026-08-29). Dipakai untuk kontrak PERTAMA (grup belum pernah punya
+// baris group_contracts) maupun PERPANJANGAN -- repository yang
+// membedakan audit action-nya.
+func (s *AccountService) RenewGroupContract(ctx context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (time.Time, error) {
+	if !isValidSubscriptionPeriod(subscriptionPeriod) {
+		return time.Time{}, fmt.Errorf("service.RenewGroupContract: %w", domain.ErrInvalidSubscriptionPeriod)
+	}
+	endAt, err := s.repo.RenewGroupContract(ctx, targetUserID, startAt, subscriptionPeriod, invoiceNumber, actorUserID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("service.RenewGroupContract: %w", err)
+	}
+	return endAt, nil
 }
 
 // UpdateGroupAdmin -- S4P-06, form "Ubah Group Admin". Validasi tier dan
