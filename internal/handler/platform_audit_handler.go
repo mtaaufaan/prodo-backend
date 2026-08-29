@@ -156,9 +156,15 @@ func stringOrEmpty(s *string) string {
 }
 
 func auditLogEntryToMap(e *repository.PlatformAuditLogEntry) fiber.Map {
-	var metadata any
+	var metadata, stateBefore, stateAfter any
 	if len(e.Metadata) > 0 {
 		metadata = json.RawMessage(e.Metadata)
+	}
+	if len(e.StateBefore) > 0 {
+		stateBefore = json.RawMessage(e.StateBefore)
+	}
+	if len(e.StateAfter) > 0 {
+		stateAfter = json.RawMessage(e.StateAfter)
 	}
 	return fiber.Map{
 		"id":                 e.ID,
@@ -173,6 +179,8 @@ func auditLogEntryToMap(e *repository.PlatformAuditLogEntry) fiber.Map {
 		"target_user_role":   e.TargetUserRole,
 		"target_tier_name":   e.TargetTierName,
 		"actor_ip":           e.ActorIP,
+		"state_before":       stateBefore,
+		"state_after":        stateAfter,
 		"metadata":           metadata,
 		"logged_at":          e.LoggedAt.UTC().Format(time.RFC3339),
 	}

@@ -164,7 +164,7 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 		"email":         p.Email,
 		"platform_role": "group_admin",
 		"group_id":      groupID,
-	}); err != nil {
+	}, nil, nil); err != nil {
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert platform_audit_logs: %w", err)
 	}
 
@@ -631,7 +631,7 @@ func (r *AccountRepository) CreateServiceTier(ctx context.Context, p *ServiceTie
 		return "", fmt.Errorf("repository.CreateServiceTier: insert: %w", err)
 	}
 
-	if err := logTierAudit(ctx, tx, actorUserID, "tier.created", id); err != nil {
+	if err := logTierAudit(ctx, tx, actorUserID, "tier.created", id, p.Name); err != nil {
 		return "", fmt.Errorf("repository.CreateServiceTier: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -666,7 +666,7 @@ func (r *AccountRepository) UpdateServiceTier(ctx context.Context, id string, p 
 		return fmt.Errorf("repository.UpdateServiceTier: %w", domain.ErrTierNotFound)
 	}
 
-	if err := logTierAudit(ctx, tx, actorUserID, "tier.updated", id); err != nil {
+	if err := logTierAudit(ctx, tx, actorUserID, "tier.updated", id, p.Name); err != nil {
 		return fmt.Errorf("repository.UpdateServiceTier: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -679,22 +679,43 @@ func (r *AccountRepository) UpdateServiceTier(ctx context.Context, id string, p 
 // (nonaktifkan/aktifkan/archive/pulihkan, S4P-11): masing-masing sekadar
 // toggle satu kolom timestamp + audit log. sqlStatement SELALU konstanta
 // yang di-hardcode caller (lihat 4 fungsi di bawah) -- tidak pernah dari
-// input pengguna.
-func (r *AccountRepository) updateTierLifecycleColumn(ctx context.Context, id, actorUserID, auditAction, sqlStatement string) error {
+// input pengguna. column juga selalu literal ("deactivated_at"/
+// "archived_at") dari caller yang sama, aman disisipkan lewat fmt.Sprintf.
+//
+// stateKey/newValue (2026-08-29, permintaan user: status tier -- nonaktif/
+// aktif, archived/tidak -- adalah perubahan satu nilai boolean, perlu
+// before/after seperti session timeout) -- nilai lama dibaca via SELECT
+// SEBELUM update (bukan diasumsikan dari nama aksi) supaya tetap akurat
+// kalau aksi dipanggil dua kali berturut-turut (mis. deactivate saat sudah
+// nonaktif).
+func (r *AccountRepository) updateTierLifecycleColumn(ctx context.Context, id, actorUserID, auditAction, column, stateKey string, newValue bool, sqlStatement string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("repository.%s: begin tx: %w", auditAction, err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
-	tag, err := tx.Exec(ctx, sqlStatement, id)
-	if err != nil {
+	var wasSet bool
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT %s IS NOT NULL FROM service_tiers WHERE id = $1`, column), id).Scan(&wasSet); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.%s: %w", auditAction, domain.ErrTierNotFound)
+		}
+		return fmt.Errorf("repository.%s: cek nilai lama: %w", auditAction, err)
+	}
+
+	// RETURNING name -- snapshot nama tier (2026-08-29, bug ditemukan user:
+	// hapus tier merusak narasi tier.created lama -- lihat logTierAudit)
+	// dalam query yang sama, bukan SELECT terpisah.
+	var name string
+	if err := tx.QueryRow(ctx, sqlStatement+" RETURNING name", id).Scan(&name); err != nil {
 		return fmt.Errorf("repository.%s: update: %w", auditAction, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.%s: %w", auditAction, domain.ErrTierNotFound)
-	}
-	if err := logTierAudit(ctx, tx, actorUserID, auditAction, id); err != nil {
+
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", auditAction, "tier", &id,
+		map[string]any{"tier_name": name},
+		map[string]any{stateKey: wasSet},
+		map[string]any{stateKey: newValue},
+	); err != nil {
 		return fmt.Errorf("repository.%s: %w", auditAction, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -707,12 +728,12 @@ func (r *AccountRepository) updateTierLifecycleColumn(ctx context.Context, id, a
 // Tier nonaktif tetap tampil di daftar utama tapi tidak bisa di-assign ke
 // GA baru; GA yang sudah memakainya tidak terpengaruh.
 func (r *AccountRepository) DeactivateServiceTier(ctx context.Context, id, actorUserID string) error {
-	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.deactivated",
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.deactivated", "deactivated_at", "deactivated", true,
 		`UPDATE service_tiers SET deactivated_at = NOW(), updated_at = NOW() WHERE id = $1`)
 }
 
 func (r *AccountRepository) ReactivateServiceTier(ctx context.Context, id, actorUserID string) error {
-	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.reactivated",
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.reactivated", "deactivated_at", "deactivated", false,
 		`UPDATE service_tiers SET deactivated_at = NULL, updated_at = NOW() WHERE id = $1`)
 }
 
@@ -721,12 +742,12 @@ func (r *AccountRepository) ReactivateServiceTier(ctx context.Context, id, actor
 // (perlu toggle "Tampilkan Arsip"), langkah administratif sebelum tier itu
 // aman dihapus permanen.
 func (r *AccountRepository) ArchiveServiceTier(ctx context.Context, id, actorUserID string) error {
-	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.archived",
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.archived", "archived_at", "archived", true,
 		`UPDATE service_tiers SET archived_at = NOW(), updated_at = NOW() WHERE id = $1`)
 }
 
 func (r *AccountRepository) UnarchiveServiceTier(ctx context.Context, id, actorUserID string) error {
-	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.unarchived",
+	return r.updateTierLifecycleColumn(ctx, id, actorUserID, "tier.unarchived", "archived_at", "archived", false,
 		`UPDATE service_tiers SET archived_at = NULL, updated_at = NOW() WHERE id = $1`)
 }
 
@@ -742,7 +763,8 @@ func (r *AccountRepository) DeleteServiceTier(ctx context.Context, id, actorUser
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
 	var isCustom bool
-	if err := tx.QueryRow(ctx, `SELECT is_custom FROM service_tiers WHERE id = $1`, id).Scan(&isCustom); err != nil {
+	var name string
+	if err := tx.QueryRow(ctx, `SELECT is_custom, name FROM service_tiers WHERE id = $1`, id).Scan(&isCustom, &name); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.DeleteServiceTier: %w", domain.ErrTierNotFound)
 		}
@@ -764,7 +786,7 @@ func (r *AccountRepository) DeleteServiceTier(ctx context.Context, id, actorUser
 		return fmt.Errorf("repository.DeleteServiceTier: delete: %w", err)
 	}
 
-	if err := logTierAudit(ctx, tx, actorUserID, "tier.deleted", id); err != nil {
+	if err := logTierAudit(ctx, tx, actorUserID, "tier.deleted", id, name); err != nil {
 		return fmt.Errorf("repository.DeleteServiceTier: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1505,7 +1527,7 @@ func (r *AccountRepository) TransferGroup(ctx context.Context, fromUserID, toUse
 		"from_user_id": fromUserID,
 		"to_user_id":   toUserID,
 		"group_ids":    groupIDs,
-	}); err != nil {
+	}, nil, nil); err != nil {
 		return 0, fmt.Errorf("repository.TransferGroup: audit: %w", err)
 	}
 
@@ -1589,13 +1611,26 @@ func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
+	// nilai lama (bisa NULL -- belum pernah diset, berlaku default global)
+	// dibaca dalam tx yang sama supaya before/after konsisten dengan UPDATE
+	// di bawah (2026-08-29, permintaan user: sertakan nilai sebelum-sesudah
+	// untuk perubahan satu nilai skalar).
+	var oldSeconds *int
+	if err := tx.QueryRow(ctx, `SELECT pa_session_idle_timeout_seconds FROM users WHERE id = $1`, userID).Scan(&oldSeconds); err != nil {
+		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: select nilai lama: %w", err)
+	}
+
 	if _, err := tx.Exec(ctx, `
 		UPDATE users SET pa_session_idle_timeout_seconds = $1 WHERE id = $2
 	`, seconds, userID); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: update: %w", err)
 	}
 
-	if err := writeAuditLog(ctx, tx, "platform_audit_logs", userID, "platform_admin", "platform_settings.session_timeout_changed", "platform_settings", nil, nil); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", userID, "platform_admin", "platform_settings.session_timeout_changed", "platform_settings", nil,
+		nil,
+		map[string]any{"idle_timeout_seconds": oldSeconds},
+		map[string]any{"idle_timeout_seconds": seconds},
+	); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: audit: %w", err)
 	}
 
@@ -1626,13 +1661,22 @@ func (r *AccountRepository) SetIPAllowlistEnabled(ctx context.Context, enabled b
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
+	var oldEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT ip_allowlist_enabled FROM platform_settings WHERE id = 1`).Scan(&oldEnabled); err != nil {
+		return fmt.Errorf("repository.SetIPAllowlistEnabled: select nilai lama: %w", err)
+	}
+
 	if _, err := tx.Exec(ctx, `
 		UPDATE platform_settings SET ip_allowlist_enabled = $1, updated_at = NOW() WHERE id = 1
 	`, enabled); err != nil {
 		return fmt.Errorf("repository.SetIPAllowlistEnabled: update: %w", err)
 	}
 
-	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "platform_settings.ip_allowlist_enabled_changed", "platform_settings", nil, nil); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "platform_settings.ip_allowlist_enabled_changed", "platform_settings", nil,
+		nil,
+		map[string]any{"enabled": oldEnabled},
+		map[string]any{"enabled": enabled},
+	); err != nil {
 		return fmt.Errorf("repository.SetIPAllowlistEnabled: audit: %w", err)
 	}
 
@@ -1705,7 +1749,8 @@ func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, cidr, actor
 		return "", fmt.Errorf("repository.AddIPAllowlistEntry: insert: %w", err)
 	}
 
-	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "ip_allowlist.added", "ip_allowlist", &id, nil); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "ip_allowlist.added", "ip_allowlist", &id,
+		map[string]any{"cidr": cidr}, nil, nil); err != nil {
 		return "", fmt.Errorf("repository.AddIPAllowlistEntry: audit: %w", err)
 	}
 
@@ -1726,6 +1771,17 @@ func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, entryID,
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
+	// cidr dibaca SEBELUM delete -- entry ini hard-delete (bukan soft-delete
+	// seperti users), jadi metadata harus menyimpan snapshot-nya sendiri
+	// (pola sama tier_name di logTierAudit, gap yang sama ditemukan user).
+	var cidr string
+	if err := tx.QueryRow(ctx, `SELECT cidr::text FROM platform_admin_ip_allowlist WHERE id = $1`, entryID).Scan(&cidr); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.DeleteIPAllowlistEntry: %w", domain.ErrIPAllowlistEntryNotFound)
+		}
+		return fmt.Errorf("repository.DeleteIPAllowlistEntry: select cidr: %w", err)
+	}
+
 	tag, err := tx.Exec(ctx, `
 		DELETE FROM platform_admin_ip_allowlist WHERE id = $1
 	`, entryID)
@@ -1736,7 +1792,8 @@ func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, entryID,
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: %w", domain.ErrIPAllowlistEntryNotFound)
 	}
 
-	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "ip_allowlist.removed", "ip_allowlist", &entryID, nil); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "ip_allowlist.removed", "ip_allowlist", &entryID,
+		map[string]any{"cidr": cidr}, nil, nil); err != nil {
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: audit: %w", err)
 	}
 
@@ -1768,6 +1825,16 @@ func requestMetaFromContext(ctx context.Context) (ip *string, path string) {
 	return ip, meta.Path
 }
 
+// marshalIfNotEmpty -- nil map -> nil bytes (kolom JSONB NULL), supaya
+// writeAuditLog tidak menulis "{}" untuk state_before/state_after/metadata
+// yang memang tidak relevan untuk action tertentu.
+func marshalIfNotEmpty(m map[string]any) ([]byte, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(m)
+}
+
 // writeAuditLog -- SATU-SATUNYA titik INSERT ke audit_logs/platform_audit_logs,
 // dipakai logAudit/logTierAudit dan seluruh pemanggil lain yang butuh
 // entity_type/metadata custom (TransferGroup, security settings, IP
@@ -1776,7 +1843,13 @@ func requestMetaFromContext(ctx context.Context) (ip *string, path string) {
 // cukup ditambahkan di SATU tempat. table selalu literal ("audit_logs"
 // atau "platform_audit_logs" dari pemanggil), tidak pernah input user --
 // aman dari SQL injection meski disisipkan lewat fmt.Sprintf.
-func writeAuditLog(ctx context.Context, exec execer, table, actorID, actorRole, action, entityType string, entityID *string, extraMetadata map[string]any) error {
+//
+// stateBefore/stateAfter (2026-08-29, permintaan user: perubahan satu
+// nilai skalar seperti session timeout/IP allowlist enabled perlu
+// menyertakan nilai sebelum-sesudah) -- nil untuk action yang tidak
+// relevan (perubahan multi-field seperti tier diwakilkan nama/kode unik
+// di metadata, bukan diff per-field).
+func writeAuditLog(ctx context.Context, exec execer, table, actorID, actorRole, action, entityType string, entityID *string, extraMetadata, stateBefore, stateAfter map[string]any) error {
 	ip, path := requestMetaFromContext(ctx)
 	metadata := extraMetadata
 	if path != "" {
@@ -1785,18 +1858,22 @@ func writeAuditLog(ctx context.Context, exec execer, table, actorID, actorRole, 
 		}
 		metadata["request_path"] = path
 	}
-	var metaJSON []byte
-	if len(metadata) > 0 {
-		var err error
-		metaJSON, err = json.Marshal(metadata)
-		if err != nil {
-			return fmt.Errorf("writeAuditLog: encode metadata: %w", err)
-		}
+	metaJSON, err := marshalIfNotEmpty(metadata)
+	if err != nil {
+		return fmt.Errorf("writeAuditLog: encode metadata: %w", err)
+	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("writeAuditLog: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("writeAuditLog: encode state_after: %w", err)
 	}
 	if _, err := exec.Exec(ctx, fmt.Sprintf(`
-		INSERT INTO %s (actor_id, actor_role, action, entity_type, entity_id, actor_ip, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6::inet, $7)
-	`, table), actorID, actorRole, action, entityType, entityID, ip, metaJSON); err != nil {
+		INSERT INTO %s (actor_id, actor_role, action, entity_type, entity_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9)
+	`, table), actorID, actorRole, action, entityType, entityID, ip, beforeJSON, afterJSON, metaJSON); err != nil {
 		return fmt.Errorf("writeAuditLog: %w", err)
 	}
 	return nil
@@ -1816,12 +1893,20 @@ func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, enti
 	if actorRole == "platform_admin" {
 		table = "platform_audit_logs"
 	}
-	return writeAuditLog(ctx, exec, table, actorID, actorRole, action, "user", &entityID, nil)
+	return writeAuditLog(ctx, exec, table, actorID, actorRole, action, "user", &entityID, nil, nil, nil)
 }
 
 // logTierAudit -- sama seperti logAudit tapi entity_type='tier' (S4P-11),
 // ke platform_audit_logs (S4P-20/21) karena actor_role selalu
 // 'platform_admin' -- katalog tier cuma bisa diubah Platform Admin.
-func logTierAudit(ctx context.Context, exec execer, actorID, action, entityID string) error {
-	return writeAuditLog(ctx, exec, "platform_audit_logs", actorID, "platform_admin", action, "tier", &entityID, nil)
+//
+// tierName (2026-08-29, bug ditemukan user: hapus tier membuat SEMUA
+// entry lama tier itu -- termasuk "tier.created" -- menampilkan "target
+// tidak diketahui", karena target_tier_name di-resolve lewat LIVE JOIN ke
+// service_tiers yang sudah tidak punya baris itu) -- disimpan sebagai
+// snapshot immutable di metadata, dibaca FE sebagai fallback saat JOIN
+// null (lihat auditNarrative.ts targetOf).
+func logTierAudit(ctx context.Context, exec execer, actorID, action, entityID, tierName string) error {
+	return writeAuditLog(ctx, exec, "platform_audit_logs", actorID, "platform_admin", action, "tier", &entityID,
+		map[string]any{"tier_name": tierName}, nil, nil)
 }
