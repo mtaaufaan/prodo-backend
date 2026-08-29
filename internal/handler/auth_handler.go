@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
+	"github.com/mtaaufaan/prodo-backend/internal/keycloak"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/validator"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
@@ -183,6 +184,49 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 			"platform_role": result.User.PlatformRole,
 			"avatar_url":    result.User.AvatarURL,
 		},
+	}))
+}
+
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+	JTI          string `json:"jti"`
+}
+
+// Refresh menangani POST /auth/refresh (ditambahkan 2026-08-29, menutup
+// gap: tidak ada jalur refresh sama sekali sebelum ini, SEMUA sesi
+// otomatis logout begitu access_token 5 menit kedaluwarsa). BUKAN di
+// belakang middleware.JWTAuth -- access_token lama SEHARUSNYA sudah
+// kedaluwarsa saat endpoint ini dipanggil, jti-nya dikirim klien di body
+// (didekode klien sendiri dari access_token lama, tanpa verifikasi --
+// aman karena backend cuma memakainya sebagai kunci lookup, bukan klaim
+// tepercaya, lihat komentar RenewSessionJTI).
+func (h *AuthHandler) Refresh(c *fiber.Ctx) error {
+	var req refreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if req.RefreshToken == "" || req.JTI == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "refresh_token dan jti wajib diisi", nil))
+	}
+
+	result, err := h.auth.RefreshAccessToken(c.Context(), req.JTI, req.RefreshToken)
+	if err != nil {
+		switch {
+		case errors.Is(err, keycloak.ErrInvalidGrant):
+			return c.Status(fiber.StatusUnauthorized).JSON(response.Error("TOKEN_EXPIRED", "Refresh token sudah tidak valid.", nil))
+		case errors.Is(err, domain.ErrSessionExpired):
+			return c.Status(fiber.StatusUnauthorized).JSON(response.Error("TOKEN_EXPIRED", "Sesi sudah berakhir atau tidak aktif.", nil))
+		default:
+			h.logger.Error("gagal memperbarui access token", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memperbarui sesi", nil))
+		}
+	}
+
+	return c.JSON(response.Success(fiber.Map{
+		"access_token":  result.AccessToken,
+		"refresh_token": result.RefreshToken,
+		"token_type":    "Bearer",
+		"expires_in":    result.ExpiresIn,
 	}))
 }
 

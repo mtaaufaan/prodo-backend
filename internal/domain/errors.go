@@ -77,6 +77,12 @@ var (
 	// disamakan supaya tidak membocorkan keberadaan sesi user lain.
 	ErrSessionNotFound = errors.New("session not found")
 
+	// ErrSessionExpired dikembalikan POST /auth/refresh (ditambahkan
+	// 2026-08-29) saat sesi lama (jti) sudah di-revoke atau sudah lewat
+	// idle-timeout-nya sendiri (sliding 30 menit / fixed per-akun PA) --
+	// refresh ditolak, klien harus login ulang.
+	ErrSessionExpired = errors.New("session already expired or revoked")
+
 	// ErrForbidden dikembalikan service layer saat actor tidak berhak atas
 	// resource target (mis. Group Admin bukan pengelola grup organisasi
 	// yang dituju, S3-02/03/04) -- beda dari middleware.RequireRole yang
