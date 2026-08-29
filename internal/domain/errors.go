@@ -207,6 +207,27 @@ var (
 	// S4P-31; desain "PA Erasure Confirm" cuma modal 1 klik, lihat
 	// implementation_gaps.md untuk gap ini).
 	ErrErasureConfirmationRequired = errors.New("typed confirmation required to execute erasure")
+
+	// ErrCannotDeactivateSelf dikembalikan PUT /platform/admins/:id/deactivate
+	// (S4P-38) saat target = actor sendiri -- Platform Admin tidak boleh
+	// menonaktifkan akunnya sendiri (akan langsung terkunci dari sesi
+	// berikutnya tanpa cara memulihkan lewat aplikasi).
+	ErrCannotDeactivateSelf = errors.New("platform admin cannot deactivate their own account")
+
+	// ErrMinimumActiveAdminRequired dikembalikan saat deactivate (S4P-38)
+	// akan menyisakan 0 Platform Admin aktif -- selalu harus ada minimal
+	// satu akun PA aktif supaya platform tidak pernah kehilangan admin.
+	ErrMinimumActiveAdminRequired = errors.New("at least one active platform admin must remain")
+
+	// ErrCannotResetOwnMFA dikembalikan POST /platform/admins/:id/reset-mfa
+	// (S4P-39) saat target = actor sendiri -- mereset MFA sendiri akan
+	// mengunci actor dari MFA yang sedang dia pakai untuk sesi ini juga.
+	ErrCannotResetOwnMFA = errors.New("platform admin cannot reset their own mfa")
+
+	// ErrPlatformAdminNotFound dikembalikan saat target
+	// deactivate/reactivate/reset-mfa (S4P-38/39) bukan akun platform_admin
+	// yang valid.
+	ErrPlatformAdminNotFound = errors.New("platform admin not found")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id

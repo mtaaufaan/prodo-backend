@@ -186,6 +186,29 @@ func (f *fakeAccountRepository) DeleteIPAllowlistEntry(_ context.Context, _, ent
 	return f.deleteIPAllowlistErr
 }
 
+func (f *fakeAccountRepository) CreatePlatformAdminInvitation(_ context.Context, _ *repository.CreatePlatformAdminInvitationParams) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.returnID, nil
+}
+
+func (f *fakeAccountRepository) ListPlatformAdmins(_ context.Context) ([]repository.PlatformAdminSummary, error) {
+	return nil, f.err
+}
+
+func (f *fakeAccountRepository) DeactivatePlatformAdmin(_ context.Context, _, _ string) error {
+	return f.err
+}
+
+func (f *fakeAccountRepository) ReactivatePlatformAdmin(_ context.Context, _, _ string) error {
+	return f.err
+}
+
+func (f *fakeAccountRepository) ResetPlatformAdminMFA(_ context.Context, _, _ string) error {
+	return f.err
+}
+
 func (f *fakeAccountRepository) CreateGroupAdminInvitation(_ context.Context, p *repository.CreateGroupAdminInvitationParams) (string, error) {
 	f.captured = *p
 	if f.err != nil {
