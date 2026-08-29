@@ -86,6 +86,7 @@ func (h *PlatformDashboardHandler) Anomalies(c *fiber.Ctx) error {
 			"group_name": s.GroupName,
 			"used_mb":    s.UsedMB,
 			"quota_gb":   s.QuotaGB,
+			"severity":   s.Severity,
 		}
 	}
 	contractEnd := make([]fiber.Map, len(a.ContractEnd))
