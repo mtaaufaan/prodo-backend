@@ -121,7 +121,7 @@ func (h *PlatformAuditHandler) exportCSV(c *fiber.Ctx, filter repository.Platfor
 	c.Set("Content-Disposition", `attachment; filename="platform-audit-logs.csv"`)
 
 	w := csv.NewWriter(c.Response().BodyWriter())
-	if err := w.Write([]string{"logged_at", "action", "entity_type", "entity_id", "target_name", "actor_email", "actor_display_name", "actor_role"}); err != nil {
+	if err := w.Write([]string{"logged_at", "action", "entity_type", "entity_id", "target_name", "actor_email", "actor_display_name", "actor_role", "actor_ip"}); err != nil {
 		return fmt.Errorf("handler.exportCSV: header: %w", err)
 	}
 	for i := range entries {
@@ -139,6 +139,7 @@ func (h *PlatformAuditHandler) exportCSV(c *fiber.Ctx, filter repository.Platfor
 			stringOrEmpty(e.ActorEmail),
 			stringOrEmpty(e.ActorDisplayName),
 			stringOrEmpty(e.ActorRole),
+			stringOrEmpty(e.ActorIP),
 		}); err != nil {
 			return fmt.Errorf("handler.exportCSV: row: %w", err)
 		}
@@ -171,6 +172,7 @@ func auditLogEntryToMap(e *repository.PlatformAuditLogEntry) fiber.Map {
 		"target_user_name":   e.TargetUserName,
 		"target_user_role":   e.TargetUserRole,
 		"target_tier_name":   e.TargetTierName,
+		"actor_ip":           e.ActorIP,
 		"metadata":           metadata,
 		"logged_at":          e.LoggedAt.UTC().Format(time.RFC3339),
 	}

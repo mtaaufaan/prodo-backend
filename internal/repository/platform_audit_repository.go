@@ -36,8 +36,13 @@ type PlatformAuditLogEntry struct {
 	// (lihat auditNarrative.ts).
 	TargetUserRole *string
 	TargetTierName *string
-	Metadata       []byte
-	LoggedAt       time.Time
+	// ActorIP -- alamat IP request yang melakukan aksi (2026-08-29,
+	// permintaan user: audit trail perlu info asal request). NULL untuk
+	// entry lama sebelum kolom ini dipopulasikan (writeAuditLog di
+	// account_repository.go).
+	ActorIP  *string
+	Metadata []byte
+	LoggedAt time.Time
 }
 
 // PlatformAuditLogFilter -- field kosong/nil berarti tidak difilter
@@ -107,7 +112,7 @@ func (r *PlatformAuditRepository) List(ctx context.Context, f PlatformAuditLogFi
 		rows, err := tx.Query(ctx, `
 			SELECT pal.id, pal.actor_id, u.email, u.display_name, pal.actor_role,
 			       pal.action, pal.entity_type, pal.entity_id, target_u.display_name, target_u.platform_role, target_t.name,
-			       pal.metadata, pal.logged_at
+			       pal.actor_ip::text, pal.metadata, pal.logged_at
 			FROM platform_audit_logs pal
 			LEFT JOIN users u ON u.id = pal.actor_id
 			LEFT JOIN users target_u ON pal.entity_type = 'user' AND target_u.id = pal.entity_id
@@ -125,7 +130,7 @@ func (r *PlatformAuditRepository) List(ctx context.Context, f PlatformAuditLogFi
 			var e PlatformAuditLogEntry
 			if err := rows.Scan(&e.ID, &e.ActorID, &e.ActorEmail, &e.ActorDisplayName, &e.ActorRole,
 				&e.Action, &e.EntityType, &e.EntityID, &e.TargetUserName, &e.TargetUserRole, &e.TargetTierName,
-				&e.Metadata, &e.LoggedAt); err != nil {
+				&e.ActorIP, &e.Metadata, &e.LoggedAt); err != nil {
 				return fmt.Errorf("scan: %w", err)
 			}
 			entries = append(entries, e)
