@@ -13,7 +13,7 @@ type platformDashboardRepository interface {
 	HealthMetrics(ctx context.Context) (repository.HealthMetrics, error)
 	Trends(ctx context.Context, days int) ([]repository.TrendPoint, error)
 	StorageAnomalies(ctx context.Context) ([]repository.StorageAnomaly, error)
-	ContractEndingAnomalies(ctx context.Context) ([]repository.ContractEndingAnomaly, error)
+	ContractEndingAnomalies(ctx context.Context, days int) ([]repository.ContractEndingAnomaly, error)
 }
 
 // PlatformDashboardService -- S4P-24/25/26, US-072: KPI, tren, dan
@@ -52,12 +52,14 @@ type Anomalies struct {
 	ContractEnd []repository.ContractEndingAnomaly
 }
 
-func (s *PlatformDashboardService) Anomalies(ctx context.Context) (Anomalies, error) {
+// Anomalies -- days mengatur jendela simetris ContractEndingAnomalies saja;
+// StorageAnomalies tidak berdimensi waktu (kondisi kuota saat ini).
+func (s *PlatformDashboardService) Anomalies(ctx context.Context, days int) (Anomalies, error) {
 	storage, err := s.repo.StorageAnomalies(ctx)
 	if err != nil {
 		return Anomalies{}, fmt.Errorf("service.Anomalies: storage: %w", err)
 	}
-	contractEnd, err := s.repo.ContractEndingAnomalies(ctx)
+	contractEnd, err := s.repo.ContractEndingAnomalies(ctx, days)
 	if err != nil {
 		return Anomalies{}, fmt.Errorf("service.Anomalies: contract end: %w", err)
 	}

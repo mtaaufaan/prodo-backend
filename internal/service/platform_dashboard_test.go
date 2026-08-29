@@ -16,6 +16,7 @@ type fakePlatformDashboardRepository struct {
 	trendsErr        error
 	storageAnomalies []repository.StorageAnomaly
 	storageErr       error
+	contractDays     int
 	contractEnd      []repository.ContractEndingAnomaly
 	contractErr      error
 }
@@ -33,7 +34,8 @@ func (f *fakePlatformDashboardRepository) StorageAnomalies(_ context.Context) ([
 	return f.storageAnomalies, f.storageErr
 }
 
-func (f *fakePlatformDashboardRepository) ContractEndingAnomalies(_ context.Context) ([]repository.ContractEndingAnomaly, error) {
+func (f *fakePlatformDashboardRepository) ContractEndingAnomalies(_ context.Context, days int) ([]repository.ContractEndingAnomaly, error) {
+	f.contractDays = days
 	return f.contractEnd, f.contractErr
 }
 
@@ -68,7 +70,7 @@ func TestPlatformDashboardService_Anomalies_CombinesBothKinds(t *testing.T) {
 	}
 	svc := NewPlatformDashboardService(repo)
 
-	a, err := svc.Anomalies(context.Background())
+	a, err := svc.Anomalies(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,11 +80,14 @@ func TestPlatformDashboardService_Anomalies_CombinesBothKinds(t *testing.T) {
 	if len(a.ContractEnd) != 1 || a.ContractEnd[0].OrgName != "Org B" {
 		t.Errorf("ContractEnd = %+v", a.ContractEnd)
 	}
+	if repo.contractDays != 7 {
+		t.Errorf("contractDays = %d, want 7", repo.contractDays)
+	}
 }
 
 func TestPlatformDashboardService_Anomalies_PropagatesStorageError(t *testing.T) {
 	svc := NewPlatformDashboardService(&fakePlatformDashboardRepository{storageErr: errors.New("boom")})
-	if _, err := svc.Anomalies(context.Background()); err == nil {
+	if _, err := svc.Anomalies(context.Background(), 7); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }

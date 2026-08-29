@@ -25,14 +25,22 @@ type TrendPoint struct {
 }
 
 // StorageAnomaly -- S4P-26, grup yang total pemakaian storage organisasi
-// di dalamnya sudah melewati plafon (storage_quota_gb grup, fallback ke
-// service_tiers.max_storage_gb kalau grup belum override manual -- pola
-// sama dengan groupAdminSummaryQuery/S4P-12).
+// di dalamnya mendekati/melewati plafon (storage_quota_gb grup, fallback
+// ke service_tiers.max_storage_gb kalau grup belum override manual --
+// pola sama dengan groupAdminSummaryQuery/S4P-12). Threshold 80%/95%
+// (dikonfirmasi user 2026-08-29) mengikuti persis peringatan kuota di
+// docs/prd.md ("80% peringatan awal, 95% peringatan kritis") -- tetap
+// di level GRUP (agregat seluruh organisasi di dalamnya), bukan per
+// organisasi, karena scope dashboard Platform Admin memang grup;
+// >100% sengaja tidak dijadikan syarat sendiri karena upload real
+// diblokir sebelum kuota organisasi penuh (lihat DATABASE_SCHEMA.md
+// §5.28), jadi ambang 95% sudah menangkap kasus itu juga.
 type StorageAnomaly struct {
 	GroupID   string
 	GroupName string
 	UsedMB    int64
 	QuotaGB   int
+	Severity  string // "warning" (>=80%) atau "critical" (>=95%)
 }
 
 // ContractEndingAnomaly -- S4P-26, organisasi dengan contract_end_at
@@ -178,13 +186,15 @@ func (r *PlatformDashboardRepository) StorageAnomalies(ctx context.Context) ([]S
 	var result []StorageAnomaly
 	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT g.id, g.name, COALESCE(org_agg.used_mb, 0), COALESCE(g.storage_quota_gb, st.max_storage_gb)
+			SELECT g.id, g.name, COALESCE(org_agg.used_mb, 0), COALESCE(g.storage_quota_gb, st.max_storage_gb),
+				CASE WHEN COALESCE(org_agg.used_mb, 0) >= COALESCE(g.storage_quota_gb, st.max_storage_gb) * 1024 * 0.95
+					THEN 'critical' ELSE 'warning' END
 			FROM groups g
 			JOIN service_tiers st ON st.id = g.tier_id
 			LEFT JOIN LATERAL (
 				SELECT sum(o.storage_used_mb) AS used_mb FROM organizations o WHERE o.group_id = g.id
 			) org_agg ON true
-			WHERE COALESCE(org_agg.used_mb, 0) > COALESCE(g.storage_quota_gb, st.max_storage_gb) * 1024
+			WHERE COALESCE(org_agg.used_mb, 0) >= COALESCE(g.storage_quota_gb, st.max_storage_gb) * 1024 * 0.80
 		`)
 		if err != nil {
 			return fmt.Errorf("query: %w", err)
@@ -192,7 +202,7 @@ func (r *PlatformDashboardRepository) StorageAnomalies(ctx context.Context) ([]S
 		defer rows.Close()
 		for rows.Next() {
 			var a StorageAnomaly
-			if err := rows.Scan(&a.GroupID, &a.GroupName, &a.UsedMB, &a.QuotaGB); err != nil {
+			if err := rows.Scan(&a.GroupID, &a.GroupName, &a.UsedMB, &a.QuotaGB, &a.Severity); err != nil {
 				return fmt.Errorf("scan: %w", err)
 			}
 			result = append(result, a)
@@ -206,20 +216,22 @@ func (r *PlatformDashboardRepository) StorageAnomalies(ctx context.Context) ([]S
 }
 
 // ContractEndingAnomalies -- S4P-26 AC: "org dengan contract_end_date <30
-// hari". TANPA batas bawah (termasuk yang SUDAH lewat, bukan cuma yang
-// akan datang) -- organisasi yang kontraknya sudah kedaluwarsa lebih
-// mendesak untuk ditindaklanjuti PA daripada yang baru akan berakhir,
-// jadi lebih masuk akal tetap muncul di alert, bukan hilang begitu saja.
-func (r *PlatformDashboardRepository) ContractEndingAnomalies(ctx context.Context) ([]ContractEndingAnomaly, error) {
+// hari". Jendela simetris [-days, +days] dari sekarang (dikonfirmasi user
+// 2026-08-29): sisi depan tetap membatasi lookahead, sisi belakang
+// mencegah kontrak yang sudah lama kedaluwarsa & tak pernah ditindak
+// menumpuk selamanya di alert -- sebelumnya sengaja tanpa batas bawah,
+// keputusan itu dibalik atas permintaan user karena jadi noise.
+func (r *PlatformDashboardRepository) ContractEndingAnomalies(ctx context.Context, days int) ([]ContractEndingAnomaly, error) {
 	var result []ContractEndingAnomaly
 	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT o.id, o.name, g.name, o.contract_end_at
 			FROM organizations o
 			JOIN groups g ON g.id = o.group_id
-			WHERE o.contract_end_at IS NOT NULL AND o.contract_end_at <= NOW() + INTERVAL '30 days'
+			WHERE o.contract_end_at IS NOT NULL
+				AND o.contract_end_at BETWEEN NOW() - make_interval(days => $1) AND NOW() + make_interval(days => $1)
 			ORDER BY o.contract_end_at
-		`)
+		`, days)
 		if err != nil {
 			return fmt.Errorf("query: %w", err)
 		}
