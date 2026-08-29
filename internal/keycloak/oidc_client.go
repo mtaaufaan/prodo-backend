@@ -42,6 +42,15 @@ type OIDCClient interface {
 	// redirect Keycloak (setelah user login, termasuk lewat IdP eksternal
 	// yang di-broker Keycloak) menjadi token.
 	ExchangeAuthorizationCode(ctx context.Context, code, redirectURI string) (*TokenResponse, error)
+
+	// RefreshTokenGrant -- menukar refresh_token untuk access_token baru
+	// (ditambahkan 2026-08-29 menutup gap: access_token cuma berlaku 5
+	// menit, TIDAK ADA jalur refresh sama sekali sebelum ini di seluruh
+	// stack -- SEMUA sesi, bukan cuma Platform Admin, otomatis logout
+	// begitu access_token kedaluwarsa, terlepas dari idle-timeout apa pun
+	// yang dikonfigurasi). Keycloak me-rotasi refresh_token juga (baris
+	// lama langsung tidak berlaku), respons dipakai apa adanya.
+	RefreshTokenGrant(ctx context.Context, refreshToken string) (*TokenResponse, error)
 }
 
 type httpOIDCClient struct {
@@ -73,6 +82,14 @@ func (c *httpOIDCClient) PasswordGrant(ctx context.Context, username, password s
 		"grant_type": {"password"},
 		"username":   {username},
 		"password":   {password},
+	})
+}
+
+func (c *httpOIDCClient) RefreshTokenGrant(ctx context.Context, refreshToken string) (*TokenResponse, error) {
+	return c.tokenRequest(ctx, url.Values{
+		"client_id":     {c.clientID},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
 	})
 }
 

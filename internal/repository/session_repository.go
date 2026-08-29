@@ -183,6 +183,55 @@ func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string) (
 	return true, nil
 }
 
+// RenewSessionJTI mengganti jti sesi jadi jti access_token BARU hasil
+// refresh (ditambahkan 2026-08-29, menutup gap: access_token cuma
+// berlaku 5 menit dan TIDAK ADA jalur refresh sama sekali sebelum ini di
+// seluruh stack -- SEMUA sesi otomatis logout begitu access_token
+// kedaluwarsa, terlepas idle-timeout apa pun yang dikonfigurasi).
+//
+// created_at TIDAK disentuh -- krusial untuk Platform Admin (non-sliding,
+// TouchSessionFixed): kalau refresh mereset jam idle-timeout, setting
+// "session timeout" jadi tidak berarti apa-apa (selalu diperpanjang
+// otomatis tiap refresh terjadi sebelum timeout habis). Validitas dicek
+// dengan syarat SAMA PERSIS seperti TouchSession/TouchSessionFixed (JOIN
+// ke users di query yang sama untuk tahu role-nya -- TIDAK mempercayai
+// role dari klaim token lama yang dikirim klien, yang tidak diverifikasi
+// signature-nya di sini karena memang sudah kedaluwarsa; jti aman
+// dipakai sebagai kunci lookup opaque, tapi role harus dari sumber
+// tepercaya DB), TANPA syarat `expires_at > NOW()` -- beda dari
+// TouchSession/TouchSessionFixed, karena tujuan refresh MEMANG
+// memperpanjang melewati masa berlaku access_token lama itu sendiri.
+// slidingIdleTimeout diteruskan dari service (sama konstanta yang dipakai
+// TouchSession) -- BUKAN di-hardcode di SQL, supaya tidak ada dua sumber
+// kebenaran untuk nilai yang sama.
+func (r *SessionRepository) RenewSessionJTI(ctx context.Context, oldJTI, newJTI string, slidingIdleTimeout time.Duration, newExpiresAt time.Time) (valid bool, err error) {
+	var id string
+	err = r.db.QueryRow(ctx, `
+		UPDATE user_sessions us
+		SET jti = $2, expires_at = $3, last_active_at = NOW()
+		FROM users u
+		WHERE us.jti = $1
+		  AND us.user_id = u.id
+		  AND us.revoked_at IS NULL
+		  AND (
+		    (u.platform_role = 'platform_admin' AND us.created_at > NOW() - make_interval(secs => COALESCE(
+		        u.pa_session_idle_timeout_seconds,
+		        (SELECT EXTRACT(EPOCH FROM ps.pa_session_idle_timeout)::int FROM platform_settings ps WHERE ps.id = 1)
+		      )))
+		    OR
+		    (u.platform_role != 'platform_admin' AND us.last_active_at > NOW() - $4::interval)
+		  )
+		RETURNING us.id
+	`, oldJTI, newJTI, newExpiresAt, slidingIdleTimeout.String()).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("repository.RenewSessionJTI: %w", err)
+	}
+	return true, nil
+}
+
 // RevokeSession meng-set revoked_at (S1-33) -- HANYA kalau jti benar-benar
 // milik userID (ownership check langsung di WHERE, bukan query terpisah
 // -- mencegah TOCTOU dan sekaligus jadi satu-satunya jalan untuk
