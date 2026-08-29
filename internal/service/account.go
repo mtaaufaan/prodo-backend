@@ -69,6 +69,14 @@ type accountRepository interface {
 	ListIPAllowlist(ctx context.Context, userID string) ([]repository.IPAllowlistEntry, error)
 	AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (id string, err error)
 	DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error
+
+	// CreatePlatformAdminInvitation/ListPlatformAdmins/DeactivatePlatformAdmin/
+	// ReactivatePlatformAdmin/ResetPlatformAdminMFA -- S4P-37/38/39/40, US-084.
+	CreatePlatformAdminInvitation(ctx context.Context, p *repository.CreatePlatformAdminInvitationParams) (userID string, err error)
+	ListPlatformAdmins(ctx context.Context) ([]repository.PlatformAdminSummary, error)
+	DeactivatePlatformAdmin(ctx context.Context, targetUserID, actorUserID string) error
+	ReactivatePlatformAdmin(ctx context.Context, targetUserID, actorUserID string) error
+	ResetPlatformAdminMFA(ctx context.Context, targetUserID, actorUserID string) error
 }
 
 // minPASessionIdleTimeout -- US-070 AC: "dapat dikonfigurasi ... minimum 10
@@ -286,6 +294,111 @@ func (s *AccountService) SuspendGroupAdmin(ctx context.Context, targetUserID, ac
 func (s *AccountService) ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error {
 	if err := s.repo.ReactivateGroupAdmin(ctx, targetUserID, actorUserID); err != nil {
 		return fmt.Errorf("service.ReactivateGroupAdmin: %w", err)
+	}
+	return nil
+}
+
+// PlatformAdminInvitation adalah hasil pembuatan akun PA baru (S4P-37,
+// US-084). ActivationToken cuma terisi (raw) tepat setelah pembuatan --
+// dipakai untuk kirim email lalu dibuang, sama pola GroupAdminInvitation.
+type PlatformAdminInvitation struct {
+	UserID          string
+	Email           string
+	DisplayName     string
+	ActivationToken string
+	ExpiresAt       time.Time
+}
+
+// CreatePlatformAdmin membuat akun Platform Admin baru oleh Platform
+// Admin lain (S4P-37, US-084) -- pola sama dengan CreateGroupAdmin
+// (Keycloak disabled user + token aktivasi + platform_invitations), TAPI
+// jauh lebih sederhana karena PA tidak punya konsep grup/tier/kuota.
+// Aktivasi (set password + setup MFA) memakai ActivationService yang
+// SAMA persis dengan Group Admin.
+func (s *AccountService) CreatePlatformAdmin(ctx context.Context, email, displayName, invitedByUserID string) (*PlatformAdminInvitation, error) {
+	if email == "" || displayName == "" || invitedByUserID == "" {
+		return nil, fmt.Errorf("service.CreatePlatformAdmin: %w", domain.ErrInvalidInput)
+	}
+
+	kcUserID, err := s.keycloak.CreateDisabledUser(ctx, email, displayName)
+	if err != nil {
+		if errors.Is(err, keycloak.ErrUserAlreadyExists) {
+			return nil, fmt.Errorf("service.CreatePlatformAdmin: %w", domain.ErrEmailAlreadyExists)
+		}
+		return nil, fmt.Errorf("service.CreatePlatformAdmin: %w", err)
+	}
+
+	rawToken, tokenHash, err := generateActivationToken()
+	if err != nil {
+		return nil, fmt.Errorf("service.CreatePlatformAdmin: %w", err)
+	}
+	expiresAt := time.Now().Add(groupAdminInvitationTTL)
+
+	userID, err := s.repo.CreatePlatformAdminInvitation(ctx, &repository.CreatePlatformAdminInvitationParams{
+		Email:           email,
+		DisplayName:     displayName,
+		KeycloakUserID:  kcUserID,
+		TokenHash:       tokenHash,
+		ExpiresAt:       expiresAt,
+		InvitedByUserID: invitedByUserID,
+	})
+	if err != nil {
+		s.logger.Error("gagal simpan invitation Platform Admin setelah user Keycloak dibuat -- kemungkinan orphan, perlu cleanup manual",
+			zap.String("email", email),
+			zap.String("keycloak_user_id", kcUserID),
+			zap.Error(err),
+		)
+		return nil, fmt.Errorf("service.CreatePlatformAdmin: %w", err)
+	}
+
+	return &PlatformAdminInvitation{
+		UserID:          userID,
+		Email:           email,
+		DisplayName:     displayName,
+		ActivationToken: rawToken,
+		ExpiresAt:       expiresAt,
+	}, nil
+}
+
+// ListPlatformAdmins -- S4P-40.
+func (s *AccountService) ListPlatformAdmins(ctx context.Context) ([]repository.PlatformAdminSummary, error) {
+	admins, err := s.repo.ListPlatformAdmins(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListPlatformAdmins: %w", err)
+	}
+	return admins, nil
+}
+
+// DeactivatePlatformAdmin -- S4P-38. Guard "bukan diri sendiri" DI SINI
+// (bukan repo) supaya pesan error jelas tanpa perlu round-trip DB; guard
+// "minimal satu PA aktif tersisa" ada di repo (butuh query, dan harus
+// atomik dalam transaksi yang sama dengan UPDATE-nya).
+func (s *AccountService) DeactivatePlatformAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	if targetUserID == actorUserID {
+		return fmt.Errorf("service.DeactivatePlatformAdmin: %w", domain.ErrCannotDeactivateSelf)
+	}
+	if err := s.repo.DeactivatePlatformAdmin(ctx, targetUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.DeactivatePlatformAdmin: %w", err)
+	}
+	return nil
+}
+
+// ReactivatePlatformAdmin -- S4P-38 (tambahan, dikonfirmasi user).
+func (s *AccountService) ReactivatePlatformAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	if err := s.repo.ReactivatePlatformAdmin(ctx, targetUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.ReactivatePlatformAdmin: %w", err)
+	}
+	return nil
+}
+
+// ResetPlatformAdminMFA -- S4P-39. Guard "bukan diri sendiri" di sini,
+// pola sama DeactivatePlatformAdmin.
+func (s *AccountService) ResetPlatformAdminMFA(ctx context.Context, targetUserID, actorUserID string) error {
+	if targetUserID == actorUserID {
+		return fmt.Errorf("service.ResetPlatformAdminMFA: %w", domain.ErrCannotResetOwnMFA)
+	}
+	if err := s.repo.ResetPlatformAdminMFA(ctx, targetUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.ResetPlatformAdminMFA: %w", err)
 	}
 	return nil
 }

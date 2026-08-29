@@ -1127,6 +1127,218 @@ func (r *AccountRepository) ReactivateGroupAdmin(ctx context.Context, targetUser
 	return nil
 }
 
+// CreatePlatformAdminInvitationParams -- S4P-37, US-084. JAUH lebih
+// sederhana dari CreateGroupAdminInvitationParams -- Platform Admin tidak
+// punya konsep grup/tier/kuota, jadi cuma email/display_name + infra
+// undangan (Keycloak disabled user, token aktivasi, platform_invitations)
+// yang dipakai ulang persis dari alur GA.
+type CreatePlatformAdminInvitationParams struct {
+	Email           string
+	DisplayName     string
+	KeycloakUserID  string
+	TokenHash       string
+	ExpiresAt       time.Time
+	InvitedByUserID string
+}
+
+// CreatePlatformAdminInvitation menyimpan user baru
+// (is_active=false, platform_role='platform_admin'), referensi
+// Keycloak-nya, token aktivasi, dan entry platform_invitations. Aktivasi
+// (set password + setup MFA) memakai ActivationService yang SAMA persis
+// dengan Group Admin -- tidak ada percabangan role di sana.
+func (r *AccountRepository) CreatePlatformAdminInvitation(ctx context.Context, p *CreatePlatformAdminInvitationParams) (userID string, err error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO users (email, display_name, platform_role, is_active)
+		VALUES ($1, $2, 'platform_admin', FALSE)
+		RETURNING id
+	`, p.Email, p.DisplayName).Scan(&userID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: %w", domain.ErrEmailAlreadyExists)
+		}
+		return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: insert users: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO user_auth_providers (user_id, provider, provider_sub)
+		VALUES ($1, 'local', $2)
+	`, userID, p.KeycloakUserID); err != nil {
+		return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: insert user_auth_providers: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO platform_invitations (email, platform_role, invited_by, token_hash, expires_at)
+		VALUES ($1, 'platform_admin', $2, $3, $4)
+	`, p.Email, p.InvitedByUserID, p.TokenHash, p.ExpiresAt); err != nil {
+		return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: insert platform_invitations: %w", err)
+	}
+
+	if err := logAudit(ctx, tx, p.InvitedByUserID, "platform_admin", "user.invited", userID); err != nil {
+		return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("repository.CreatePlatformAdminInvitation: commit tx: %w", err)
+	}
+	return userID, nil
+}
+
+// PlatformAdminSummary -- satu baris GET /platform/admins (S4P-40).
+type PlatformAdminSummary struct {
+	ID          string
+	Email       string
+	DisplayName string
+	IsActive    bool
+	SuspendedAt *time.Time
+	LastLoginAt *time.Time
+	CreatedAt   time.Time
+}
+
+// ListPlatformAdmins -- S4P-40 (endpoint tambahan, tidak disebut literal
+// di task S4P-37-39 -- dikonfirmasi user, dibutuhkan FE untuk mengisi
+// tabel). Tidak perlu withPlatformAdminRLS -- users TIDAK di-RLS.
+func (r *AccountRepository) ListPlatformAdmins(ctx context.Context) ([]PlatformAdminSummary, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, email, display_name, is_active, suspended_at, last_login_at, created_at
+		FROM users
+		WHERE platform_role = 'platform_admin' AND deleted_at IS NULL
+		ORDER BY created_at
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListPlatformAdmins: %w", err)
+	}
+	defer rows.Close()
+
+	admins := make([]PlatformAdminSummary, 0)
+	for rows.Next() {
+		var a PlatformAdminSummary
+		if err := rows.Scan(&a.ID, &a.Email, &a.DisplayName, &a.IsActive, &a.SuspendedAt, &a.LastLoginAt, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListPlatformAdmins: scan: %w", err)
+		}
+		admins = append(admins, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListPlatformAdmins: %w", err)
+	}
+	return admins, nil
+}
+
+// DeactivatePlatformAdmin -- S4P-38. Dua guard DALAM transaksi yang sama
+// (hindari race antara cek dan update): target bukan diri sendiri (dicek
+// di service, sebelum sampai sini, tapi query WHERE id != $1 di guard
+// kedua tetap benar independen dari itu), dan minimal satu PA aktif
+// tersisa SETELAH deactivate ini.
+func (r *AccountRepository) DeactivatePlatformAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.DeactivatePlatformAdmin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var otherActiveCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM users
+		WHERE platform_role = 'platform_admin' AND suspended_at IS NULL AND deleted_at IS NULL AND id != $1
+	`, targetUserID).Scan(&otherActiveCount); err != nil {
+		return fmt.Errorf("repository.DeactivatePlatformAdmin: cek PA aktif lain: %w", err)
+	}
+	if otherActiveCount == 0 {
+		return domain.ErrMinimumActiveAdminRequired
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE users SET suspended_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND platform_role = 'platform_admin'
+	`, targetUserID)
+	if err != nil {
+		return fmt.Errorf("repository.DeactivatePlatformAdmin: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrPlatformAdminNotFound
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.suspended", targetUserID); err != nil {
+		return fmt.Errorf("repository.DeactivatePlatformAdmin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.DeactivatePlatformAdmin: commit tx: %w", err)
+	}
+	return nil
+}
+
+// ReactivatePlatformAdmin -- S4P-38 (tambahan, dikonfirmasi user --
+// mirror pola suspend/reactivate Group Admin S4P-02, supaya PA yang
+// dinonaktifkan tidak butuh pemulihan manual lewat DB).
+func (r *AccountRepository) ReactivatePlatformAdmin(ctx context.Context, targetUserID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.ReactivatePlatformAdmin: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE users SET suspended_at = NULL, updated_at = NOW()
+		WHERE id = $1 AND platform_role = 'platform_admin'
+	`, targetUserID)
+	if err != nil {
+		return fmt.Errorf("repository.ReactivatePlatformAdmin: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrPlatformAdminNotFound
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.reactivated", targetUserID); err != nil {
+		return fmt.Errorf("repository.ReactivatePlatformAdmin: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.ReactivatePlatformAdmin: commit tx: %w", err)
+	}
+	return nil
+}
+
+// ResetPlatformAdminMFA -- S4P-39. Menghapus user_mfa_configs milik
+// target -- login berikutnya otomatis diarahkan ke alur setup MFA ulang
+// (mfa_setup_required, S4P-14/19), TANPA endpoint/logic tambahan.
+func (r *AccountRepository) ResetPlatformAdminMFA(ctx context.Context, targetUserID, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.ResetPlatformAdminMFA: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var exists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND platform_role = 'platform_admin')
+	`, targetUserID).Scan(&exists); err != nil {
+		return fmt.Errorf("repository.ResetPlatformAdminMFA: cek target: %w", err)
+	}
+	if !exists {
+		return domain.ErrPlatformAdminNotFound
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM user_mfa_configs WHERE user_id = $1`, targetUserID); err != nil {
+		return fmt.Errorf("repository.ResetPlatformAdminMFA: delete mfa: %w", err)
+	}
+
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", "user.mfa_reset", targetUserID); err != nil {
+		return fmt.Errorf("repository.ResetPlatformAdminMFA: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.ResetPlatformAdminMFA: commit tx: %w", err)
+	}
+	return nil
+}
+
 // TransferGroup memindahkan pengelolaan SEMUA grup dari fromUserID ke
 // toUserID (S4P-03/04, IG-21). `organizations.group_id` TIDAK disentuh --
 // organisasi tetap berada di grup yang sama, yang berubah cuma siapa GA

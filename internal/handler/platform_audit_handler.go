@@ -169,6 +169,7 @@ func auditLogEntryToMap(e *repository.PlatformAuditLogEntry) fiber.Map {
 		"entity_type":        e.EntityType,
 		"entity_id":          e.EntityID,
 		"target_user_name":   e.TargetUserName,
+		"target_user_role":   e.TargetUserRole,
 		"target_tier_name":   e.TargetTierName,
 		"metadata":           metadata,
 		"logged_at":          e.LoggedAt.UTC().Format(time.RFC3339),
