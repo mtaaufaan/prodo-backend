@@ -58,6 +58,14 @@ type CreateGroupAdminInvitationParams struct {
 	TokenHash       string
 	ExpiresAt       time.Time
 	InvitedByUserID string
+
+	// Kontrak awal (dikonfirmasi user 2026-08-29) -- OPSIONAL, nil berarti
+	// grup dibuat tanpa kontrak dulu (bisa ditambah belakangan lewat
+	// RenewGroupContract). ContractStartAt nil -> ContractSubscriptionPeriod/
+	// ContractInvoiceNumber diabaikan.
+	ContractStartAt            *time.Time
+	ContractSubscriptionPeriod string
+	ContractInvoiceNumber      string
 }
 
 // CreateGroupAdminInvitation menyimpan user baru (is_active=false,
@@ -132,6 +140,26 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert group_admin_assignments: %w", err)
 	}
 
+	if p.ContractStartAt != nil {
+		endAt, err := addSubscriptionPeriod(*p.ContractStartAt, p.ContractSubscriptionPeriod)
+		if err != nil {
+			return "", fmt.Errorf("repository.CreateGroupAdminInvitation: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO group_contracts (group_id, start_at, subscription_period, end_at, invoice_number, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, groupID, *p.ContractStartAt, p.ContractSubscriptionPeriod, endAt, p.ContractInvoiceNumber, p.InvitedByUserID); err != nil {
+			return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert group_contracts: %w", err)
+		}
+		// entity_id = userID (GA), BUKAN groupID -- logAudit mengasumsikan
+		// entity_type='user' (JOIN ke tabel users di platform_audit_repository.go),
+		// pakai groupID di sini akan membuat resolusi nama target di Audit
+		// Trail selalu gagal (JOIN ke users dengan PK yang bukan user).
+		if err = logAudit(ctx, tx, p.InvitedByUserID, "platform_admin", "group.contract_created", userID); err != nil {
+			return "", fmt.Errorf("repository.CreateGroupAdminInvitation: %w", err)
+		}
+	}
+
 	metadata, err := json.Marshal(map[string]string{
 		"email":         p.Email,
 		"platform_role": "group_admin",
@@ -182,6 +210,14 @@ type GroupAdminSummary struct {
 	UsedStorageMB   int64
 	UsedMemberCount int
 	StorageQuotaGB  *int
+
+	// Kontrak (dikonfirmasi user 2026-08-29): kontrak AKTIF grup = baris
+	// group_contracts dengan end_at paling baru. Nil kalau grup belum
+	// pernah punya kontrak sama sekali.
+	ContractStartAt    *time.Time
+	SubscriptionPeriod *string
+	ContractEndAt      *time.Time
+	ContractInvoiceNum *string
 }
 
 // groupAdminSummaryQuery -- SELECT bersama ListGroupAdmins (banyak baris)
@@ -192,7 +228,8 @@ const groupAdminSummaryQuery = `
 	SELECT u.id, u.email, u.display_name, u.is_active, u.suspended_at, u.created_at,
 	       g.id, g.name, g.job_title, g.address, g.phone, g.tier_id, st.name, g.storage_quota_gb,
 	       COALESCE(st.max_org, 0), COALESCE(st.max_storage_gb, 0), COALESCE(st.max_members, 0),
-	       COALESCE(org_agg.org_count, 0), COALESCE(org_agg.storage_used_mb, 0), COALESCE(mem_agg.member_count, 0)
+	       COALESCE(org_agg.org_count, 0), COALESCE(org_agg.storage_used_mb, 0), COALESCE(mem_agg.member_count, 0),
+	       contract.start_at, contract.subscription_period, contract.end_at, contract.invoice_number
 	FROM users u
 	LEFT JOIN LATERAL (
 		SELECT gaa.group_id FROM group_admin_assignments gaa
@@ -211,6 +248,10 @@ const groupAdminSummaryQuery = `
 		JOIN organizations o2 ON o2.id = w.org_id
 		WHERE o2.group_id = g.id
 	) mem_agg ON true
+	LEFT JOIN LATERAL (
+		SELECT gc.start_at, gc.subscription_period, gc.end_at, gc.invoice_number
+		FROM group_contracts gc WHERE gc.group_id = g.id ORDER BY gc.end_at DESC LIMIT 1
+	) contract ON true
 	WHERE u.platform_role = 'group_admin' AND u.deleted_at IS NULL
 `
 
@@ -219,7 +260,8 @@ func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSumma
 	err := row.Scan(&s.ID, &s.Email, &s.DisplayName, &s.IsActive, &s.SuspendedAt, &s.CreatedAt,
 		&s.GroupID, &s.GroupName, &s.JobTitle, &s.Address, &s.Phone, &s.TierID, &s.Tier, &s.StorageQuotaGB,
 		&s.TierMaxOrg, &s.TierMaxStorage, &s.TierMaxMembers,
-		&s.UsedOrgCount, &s.UsedStorageMB, &s.UsedMemberCount)
+		&s.UsedOrgCount, &s.UsedStorageMB, &s.UsedMemberCount,
+		&s.ContractStartAt, &s.SubscriptionPeriod, &s.ContractEndAt, &s.ContractInvoiceNum)
 	return s, err
 }
 
@@ -405,6 +447,82 @@ func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID s
 		return "", fmt.Errorf("repository.UpdateGroupAdmin: commit tx: %w", err)
 	}
 	return oldTier, nil
+}
+
+// addSubscriptionPeriod menghitung end_at dari start_at + masa langganan
+// (dikonfirmasi user 2026-08-29). Divalidasi di Go (bukan cuma CHECK
+// constraint DB) supaya domain.ErrInvalidSubscriptionPeriod bisa
+// dikembalikan SEBELUM query INSERT dijalankan.
+func addSubscriptionPeriod(start time.Time, period string) (time.Time, error) {
+	switch period {
+	case "monthly":
+		return start.AddDate(0, 1, 0), nil
+	case "quarterly":
+		return start.AddDate(0, 3, 0), nil
+	case "yearly":
+		return start.AddDate(1, 0, 0), nil
+	default:
+		return time.Time{}, domain.ErrInvalidSubscriptionPeriod
+	}
+}
+
+// RenewGroupContract menambah SATU baris baru ke group_contracts (dikonfirmasi
+// user 2026-08-29) -- riwayat kontrak tetap utuh, bukan menimpa baris lama.
+// Dipakai baik untuk kontrak PERTAMA suatu grup (kalau belum pernah ada
+// sama sekali) maupun PERPANJANGAN (kalau sudah ada) -- dibedakan lewat
+// count baris existing SEBELUM insert, supaya audit action-nya tepat
+// (group.contract_created vs group.contract_renewed). groupID diresolusi
+// dari targetUserID (grup PERTAMA milik GA itu) -- pola sama dengan
+// UpdateGroupAdmin.
+func (r *AccountRepository) RenewGroupContract(ctx context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error) {
+	endAt, err = addSubscriptionPeriod(startAt, subscriptionPeriod)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: %w", err)
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var groupID string
+	if err := tx.QueryRow(ctx, `
+		SELECT gaa.group_id FROM group_admin_assignments gaa
+		WHERE gaa.user_id = $1 ORDER BY gaa.assigned_at LIMIT 1
+	`, targetUserID).Scan(&groupID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return time.Time{}, fmt.Errorf("repository.RenewGroupContract: %w", domain.ErrUserNotFound)
+		}
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: cari grup: %w", err)
+	}
+
+	var existingCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM group_contracts WHERE group_id = $1`, groupID).Scan(&existingCount); err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: count existing: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO group_contracts (group_id, start_at, subscription_period, end_at, invoice_number, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, groupID, startAt, subscriptionPeriod, endAt, invoiceNumber, actorUserID); err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: insert: %w", err)
+	}
+
+	action := "group.contract_renewed"
+	if existingCount == 0 {
+		action = "group.contract_created"
+	}
+	// entity_id = targetUserID (GA), BUKAN groupID -- lihat komentar sama
+	// di CreateGroupAdminInvitation.
+	if err := logAudit(ctx, tx, actorUserID, "platform_admin", action, targetUserID); err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: commit tx: %w", err)
+	}
+	return endAt, nil
 }
 
 // ServiceTier -- satu baris katalog tier (S4P-07, diperluas S4P-11 dengan
