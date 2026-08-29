@@ -24,6 +24,7 @@ type sessionRepository interface {
 	ListActiveSessions(ctx context.Context, userID string) ([]repository.Session, error)
 	TouchSession(ctx context.Context, jti string, idleTimeout time.Duration) (valid bool, err error)
 	TouchSessionFixed(ctx context.Context, jti string) (valid bool, err error)
+	RenewSessionJTI(ctx context.Context, oldJTI, newJTI string, slidingIdleTimeout time.Duration, newExpiresAt time.Time) (valid bool, err error)
 	RevokeSession(ctx context.Context, userID, jti string) (remaining time.Duration, err error)
 	RevokeAllSessions(ctx context.Context, userID, exceptJTI string) ([]repository.RevokedSession, error)
 	IsUserInOrg(ctx context.Context, userID, orgID string) (bool, error)
@@ -137,6 +138,31 @@ func (s *SessionService) IsValidSession(ctx context.Context, jti, platformRole s
 	valid, err := s.repo.TouchSession(ctx, jti, slidingIdleTimeout)
 	if err != nil {
 		return false, fmt.Errorf("service.IsValidSession: %w", err)
+	}
+	return valid, nil
+}
+
+// RefreshSession dipanggil POST /auth/refresh (ditambahkan 2026-08-29,
+// menutup gap: tidak ada jalur refresh sama sekali sebelum ini, SEMUA
+// sesi otomatis logout begitu access_token 5 menit kedaluwarsa terlepas
+// idle-timeout apa pun yang dikonfigurasi). Blacklist dicek dulu sama
+// seperti IsValidSession -- sesi yang sudah di-revoke tidak boleh
+// diperpanjang lewat refresh. Role (fixed vs sliding) ditentukan
+// repository lewat JOIN ke users, bukan parameter di sini -- lihat
+// komentar RenewSessionJTI kenapa TIDAK boleh percaya klaim role dari
+// token lama yang dikirim klien.
+func (s *SessionService) RefreshSession(ctx context.Context, oldJTI, newJTI string, newExpiresAt time.Time) (bool, error) {
+	_, err := s.cache.Get(ctx, blacklistKey(oldJTI))
+	if err == nil {
+		return false, nil // ada di blacklist -> revoked
+	}
+	if err != cache.ErrNotFound {
+		return false, fmt.Errorf("service.RefreshSession: cek blacklist: %w", err)
+	}
+
+	valid, err := s.repo.RenewSessionJTI(ctx, oldJTI, newJTI, slidingIdleTimeout, newExpiresAt)
+	if err != nil {
+		return false, fmt.Errorf("service.RefreshSession: %w", err)
 	}
 	return valid, nil
 }

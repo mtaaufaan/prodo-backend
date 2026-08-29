@@ -30,6 +30,11 @@ type stubSessionRepository struct {
 
 	isUserInOrgResult bool
 	isUserInOrgErr    error
+
+	renewValid    bool
+	renewErr      error
+	renewedOldJTI string
+	renewedNewJTI string
 }
 
 func (f *stubSessionRepository) CreateSession(_ context.Context, userID, jti string, device repository.DeviceInfo, expiresAt time.Time) error {
@@ -61,6 +66,11 @@ func (f *stubSessionRepository) RevokeAllSessions(_ context.Context, _, _ string
 
 func (f *stubSessionRepository) IsUserInOrg(_ context.Context, _, _ string) (bool, error) {
 	return f.isUserInOrgResult, f.isUserInOrgErr
+}
+
+func (f *stubSessionRepository) RenewSessionJTI(_ context.Context, oldJTI, newJTI string, _ time.Duration, _ time.Time) (bool, error) {
+	f.renewedOldJTI, f.renewedNewJTI = oldJTI, newJTI
+	return f.renewValid, f.renewErr
 }
 
 type stubCache struct {
@@ -206,6 +216,53 @@ func TestSessionService_IsValidSession_PlatformAdmin_FixedTimeoutExpired(t *test
 	}
 	if valid {
 		t.Error("sesi PA melewati paIdleTimeout harusnya invalid, terlepas dari aktivitas (non-sliding)")
+	}
+}
+
+func TestSessionService_RefreshSession_Blacklisted(t *testing.T) {
+	c := newStubCache()
+	c.store[blacklistKey("jti-revoked")] = "1"
+	svc := NewSessionService(&stubSessionRepository{renewValid: true}, c)
+
+	valid, err := svc.RefreshSession(context.Background(), "jti-revoked", "jti-new", time.Now().Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if valid {
+		t.Error("sesi di blacklist harusnya tidak bisa di-refresh")
+	}
+}
+
+func TestSessionService_RefreshSession_DelegatesToRenewSessionJTI(t *testing.T) {
+	repo := &stubSessionRepository{renewValid: true}
+	svc := NewSessionService(repo, newStubCache())
+	newExpiry := time.Now().Add(5 * time.Minute)
+
+	valid, err := svc.RefreshSession(context.Background(), "jti-old", "jti-new", newExpiry)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !valid {
+		t.Error("RenewSessionJTI bilang valid -- RefreshSession harusnya lolos")
+	}
+	if repo.renewedOldJTI != "jti-old" || repo.renewedNewJTI != "jti-new" {
+		t.Errorf("RenewSessionJTI dipanggil dengan oldJTI=%q newJTI=%q, want jti-old/jti-new", repo.renewedOldJTI, repo.renewedNewJTI)
+	}
+}
+
+func TestSessionService_RefreshSession_IdleTimeoutExpired(t *testing.T) {
+	// RenewSessionJTI repo-level yang menegakkan idle timeout (sliding
+	// ATAU fixed PA, tergantung role di dalam query) -- diuji di sini
+	// lewat stub yang mensimulasikan repo bilang "tidak valid" (baris
+	// tidak ke-update karena WHERE clause idle gagal).
+	svc := NewSessionService(&stubSessionRepository{renewValid: false}, newStubCache())
+
+	valid, err := svc.RefreshSession(context.Background(), "jti-idle", "jti-new", time.Now().Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if valid {
+		t.Error("sesi yang sudah lewat idle-timeout harusnya tidak bisa di-refresh")
 	}
 }
 

@@ -33,6 +33,9 @@ func (f *fakeSessionRepository) TouchSession(_ context.Context, _ string, _ time
 func (f *fakeSessionRepository) TouchSessionFixed(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
+func (f *fakeSessionRepository) RenewSessionJTI(_ context.Context, _, _ string, _ time.Duration, _ time.Time) (bool, error) {
+	return true, nil
+}
 func (f *fakeSessionRepository) RevokeSession(_ context.Context, _, _ string) (time.Duration, error) {
 	return 0, nil
 }
@@ -186,6 +189,13 @@ type fakeOIDCClient struct {
 }
 
 func (f *fakeOIDCClient) PasswordGrant(_ context.Context, _, _ string) (*keycloak.TokenResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.token, nil
+}
+
+func (f *fakeOIDCClient) RefreshTokenGrant(_ context.Context, _ string) (*keycloak.TokenResponse, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -736,5 +746,48 @@ func TestAuthService_CompletePlatformAdminMFASetup_IPDenied(t *testing.T) {
 	_, err := svc.CompletePlatformAdminMFASetup(context.Background(), "pa@example.com", "Str0ng!Passw0rd", "000000", "test-agent", "198.51.100.9")
 	if !errors.Is(err, domain.ErrIPNotAllowed) {
 		t.Errorf("err = %v, want wrapped domain.ErrIPNotAllowed", err)
+	}
+}
+
+func TestAuthService_RefreshAccessToken_Success(t *testing.T) {
+	newAccessToken := testAccessTokenJWT(t, "jti-new")
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{
+		AccessToken: newAccessToken, RefreshToken: "rt-new", TokenType: "Bearer", ExpiresIn: 300,
+	}}
+	svc := NewAuthService(&fakeAuthRepository{}, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
+
+	result, err := svc.RefreshAccessToken(context.Background(), "jti-old", "rt-old")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.AccessToken != newAccessToken || result.RefreshToken != "rt-new" {
+		t.Errorf("result = %+v", result)
+	}
+}
+
+func TestAuthService_RefreshAccessToken_KeycloakInvalidGrant(t *testing.T) {
+	oidc := &fakeOIDCClient{err: keycloak.ErrInvalidGrant}
+	svc := NewAuthService(&fakeAuthRepository{}, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
+
+	_, err := svc.RefreshAccessToken(context.Background(), "jti-old", "rt-expired")
+	if !errors.Is(err, keycloak.ErrInvalidGrant) {
+		t.Errorf("err = %v, want wrapped keycloak.ErrInvalidGrant", err)
+	}
+}
+
+// TestAuthService_RefreshAccessToken_SessionAlreadyExpired -- sesi lama
+// sudah lewat idle-timeout-nya sendiri (RenewSessionJTI repo bilang
+// tidak valid) -- refresh HARUS ditolak meski Keycloak sendiri masih mau
+// menukar refresh_token-nya. Ini adalah titik penegakan idle-timeout
+// yang sesungguhnya (2026-08-29), bukan lagi di lapisan JWT 5 menit.
+func TestAuthService_RefreshAccessToken_SessionAlreadyExpired(t *testing.T) {
+	newAccessToken := testAccessTokenJWT(t, "jti-new")
+	oidc := &fakeOIDCClient{token: &keycloak.TokenResponse{AccessToken: newAccessToken, RefreshToken: "rt-new", ExpiresIn: 300}}
+	sessions := NewSessionService(&stubSessionRepository{renewValid: false}, &fakeCache{})
+	svc := NewAuthService(&fakeAuthRepository{}, oidc, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{}), sessions, &fakeEmailSender{}, zap.NewNop())
+
+	_, err := svc.RefreshAccessToken(context.Background(), "jti-old", "rt-old")
+	if !errors.Is(err, domain.ErrSessionExpired) {
+		t.Errorf("err = %v, want wrapped domain.ErrSessionExpired", err)
 	}
 }

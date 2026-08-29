@@ -244,6 +244,56 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userA
 	return result, nil, nil
 }
 
+// RefreshResult adalah hasil RefreshAccessToken, dipetakan langsung ke
+// response POST /auth/refresh sukses.
+type RefreshResult struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresIn    int
+}
+
+// RefreshAccessToken (ditambahkan 2026-08-29, menutup gap: access_token
+// cuma berlaku 5 menit dan TIDAK ADA jalur refresh sama sekali sebelum
+// ini di seluruh stack -- SEMUA sesi, bukan cuma Platform Admin,
+// otomatis logout begitu access_token kedaluwarsa terlepas idle-timeout
+// apa pun yang dikonfigurasi). oldJTI dari access_token LAMA milik
+// klien (boleh sudah kedaluwarsa -- itu justru kasus normalnya, refresh
+// dipicu SETELAH access_token mati) -- dipakai murni sebagai kunci
+// lookup baris sesi, TIDAK diverifikasi signature di sini (keamanan
+// sesungguhnya ada di refreshToken yang divalidasi Keycloak).
+// domain.ErrSessionExpired kalau sesi lama sudah lewat idle-timeout-nya
+// sendiri atau sudah di-revoke -- caller (handler) memetakannya ke kode
+// yang sama dengan JWT middleware (TOKEN_EXPIRED) supaya FE menanganinya
+// dengan cara yang sama (logout penuh, bukan retry lagi).
+func (s *AuthService) RefreshAccessToken(ctx context.Context, oldJTI, refreshToken string) (*RefreshResult, error) {
+	tok, err := s.oidc.RefreshTokenGrant(ctx, refreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("service.RefreshAccessToken: %w", err)
+	}
+
+	// access_token baru barusan diterbitkan Keycloak lewat panggilan
+	// server-to-server di atas -- unverified parse aman di sini, sama
+	// alasan dengan SessionService.RecordSession (belum pernah menyentuh
+	// klien).
+	claims := &jwt.RegisteredClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(tok.AccessToken, claims); err != nil {
+		return nil, fmt.Errorf("service.RefreshAccessToken: decode access_token baru: %w", err)
+	}
+	if claims.ID == "" || claims.ExpiresAt == nil {
+		return nil, fmt.Errorf("service.RefreshAccessToken: access_token baru tidak punya klaim jti/exp")
+	}
+
+	valid, err := s.sessions.RefreshSession(ctx, oldJTI, claims.ID, claims.ExpiresAt.Time)
+	if err != nil {
+		return nil, fmt.Errorf("service.RefreshAccessToken: %w", err)
+	}
+	if !valid {
+		return nil, fmt.Errorf("service.RefreshAccessToken: %w", domain.ErrSessionExpired)
+	}
+
+	return &RefreshResult{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, ExpiresIn: tok.ExpiresIn}, nil
+}
+
 // sendPlatformAdminLoginAlert (S4P-16, implementation_gaps.md IG-20) --
 // best-effort, TIDAK menggagalkan login kalau SMTP gagal (beda dari
 // RecordLogin/RecordSession di atas yang memang harus gagal -- keduanya
