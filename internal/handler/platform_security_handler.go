@@ -15,8 +15,9 @@ import (
 )
 
 // PlatformSecurityHandler -- S4P-18, US-070: panel Platform Admin untuk
-// mengubah session timeout (global, semua akun PA) dan IP allowlist
-// (self-service, per akun PA sendiri).
+// mengubah session timeout (dibalik jadi PER-AKUN 2026-08-29, dikonfirmasi
+// user) dan IP allowlist (dibalik jadi GLOBAL untuk semua akun PA, dengan
+// flag ip_allowlist_enabled terpisah dari isi daftar).
 type PlatformSecurityHandler struct {
 	accounts *service.AccountService
 	logger   *zap.Logger
@@ -55,13 +56,19 @@ func (h *PlatformSecurityHandler) Get(c *fiber.Ctx) error {
 		return nil
 	}
 
-	seconds, err := h.accounts.GetPASessionIdleTimeoutSeconds(c.Context())
+	seconds, err := h.accounts.GetPASessionIdleTimeoutSeconds(c.Context(), actorUserID)
 	if err != nil {
 		h.logger.Error("gagal membaca session timeout Platform Admin", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil pengaturan keamanan", nil))
 	}
 
-	entries, err := h.accounts.ListIPAllowlist(c.Context(), actorUserID)
+	allowlistEnabled, err := h.accounts.GetIPAllowlistEnabled(c.Context())
+	if err != nil {
+		h.logger.Error("gagal membaca flag IP allowlist Platform Admin", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil pengaturan keamanan", nil))
+	}
+
+	entries, err := h.accounts.ListIPAllowlist(c.Context())
 	if err != nil {
 		h.logger.Error("gagal membaca IP allowlist Platform Admin", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil pengaturan keamanan", nil))
@@ -77,6 +84,7 @@ func (h *PlatformSecurityHandler) Get(c *fiber.Ctx) error {
 
 	return c.JSON(response.Success(fiber.Map{
 		"session_idle_timeout_seconds": seconds,
+		"ip_allowlist_enabled":         allowlistEnabled,
 		"ip_allowlist":                 data,
 	}))
 }
@@ -131,7 +139,7 @@ func (h *PlatformSecurityHandler) AddIPAllowlist(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "cidr wajib diisi", nil))
 	}
 
-	id, err := h.accounts.AddIPAllowlistEntry(c.Context(), actorUserID, req.CIDR, actorUserID)
+	id, err := h.accounts.AddIPAllowlistEntry(c.Context(), req.CIDR, actorUserID)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidCIDR):
@@ -157,7 +165,7 @@ func (h *PlatformSecurityHandler) DeleteIPAllowlist(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID entry wajib diisi", nil))
 	}
 
-	if err := h.accounts.DeleteIPAllowlistEntry(c.Context(), actorUserID, entryID, actorUserID); err != nil {
+	if err := h.accounts.DeleteIPAllowlistEntry(c.Context(), entryID, actorUserID); err != nil {
 		switch {
 		case errors.Is(err, domain.ErrIPAllowlistEntryNotFound):
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Entry IP allowlist tidak ditemukan", nil))
@@ -168,4 +176,31 @@ func (h *PlatformSecurityHandler) DeleteIPAllowlist(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(fiber.Map{"id": entryID, "deleted": true}))
+}
+
+type updateIPAllowlistEnabledRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// UpdateIPAllowlistEnabled menangani PUT /platform/security-settings/ip-allowlist/enabled
+// (dikonfirmasi user 2026-08-29) -- flag global terpisah dari isi daftar,
+// supaya enforcement bisa dimatikan sementara tanpa menghapus CIDR yang
+// sudah dikonfigurasi.
+func (h *PlatformSecurityHandler) UpdateIPAllowlistEnabled(c *fiber.Ctx) error {
+	actorUserID, failed := h.resolveActor(c)
+	if failed {
+		return nil
+	}
+
+	var req updateIPAllowlistEnabledRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+
+	if err := h.accounts.SetIPAllowlistEnabled(c.Context(), req.Enabled, actorUserID); err != nil {
+		h.logger.Error("gagal mengubah flag IP allowlist Platform Admin", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengubah pengaturan keamanan", nil))
+	}
+
+	return c.JSON(response.Success(fiber.Map{"ip_allowlist_enabled": req.Enabled}))
 }

@@ -25,8 +25,9 @@ type authRepository interface {
 	// ListOrgIDsForGroupAdmin -- S3-38, dasar klaim JWT prodo_org_ids.
 	ListOrgIDsForGroupAdmin(ctx context.Context, userID string) ([]string, error)
 
-	// CheckIPAllowlist -- S4P-17, implementation_gaps.md IG-20.
-	CheckIPAllowlist(ctx context.Context, userID, ip string) (allowed bool, err error)
+	// CheckIPAllowlist -- S4P-17, implementation_gaps.md IG-20, dibalik jadi
+	// GLOBAL 2026-08-29 (dikonfirmasi user).
+	CheckIPAllowlist(ctx context.Context, ip string) (allowed bool, err error)
 }
 
 // authEmailSender -- interface didefinisikan di consumer,
@@ -205,7 +206,7 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userA
 	isGroupAdmin := result.User.PlatformRole == string(domain.PlatformRoleGroupAdmin)
 	isPlatformAdmin := result.User.PlatformRole == string(domain.PlatformRoleAdmin)
 	if isPlatformAdmin {
-		if err := s.checkPAIPAllowlist(ctx, result.User.ID, ip); err != nil {
+		if err := s.checkPAIPAllowlist(ctx, ip); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -259,16 +260,17 @@ func (s *AuthService) sendPlatformAdminLoginAlert(ctx context.Context, user *rep
 	}
 }
 
-// checkPAIPAllowlist (S4P-17, implementation_gaps.md IG-20): ip kosong
-// (dev/test client tanpa header nyata) LOLOS tanpa mengecek -- sama pola
-// toleransi yang sudah ada untuk userAgent/ip di RecordSession, dan
-// $1::inet tidak bisa cast string kosong sama sekali (akan error, bukan
-// ditolak dengan wajar).
-func (s *AuthService) checkPAIPAllowlist(ctx context.Context, userID, ip string) error {
+// checkPAIPAllowlist (S4P-17, implementation_gaps.md IG-20, dibalik jadi
+// GLOBAL 2026-08-29 -- dikonfirmasi user, berlaku untuk semua akun
+// Platform Admin bukan lagi per-akun): ip kosong (dev/test client tanpa
+// header nyata) LOLOS tanpa mengecek -- sama pola toleransi yang sudah
+// ada untuk userAgent/ip di RecordSession, dan $1::inet tidak bisa cast
+// string kosong sama sekali (akan error, bukan ditolak dengan wajar).
+func (s *AuthService) checkPAIPAllowlist(ctx context.Context, ip string) error {
 	if ip == "" {
 		return nil
 	}
-	allowed, err := s.repo.CheckIPAllowlist(ctx, userID, ip)
+	allowed, err := s.repo.CheckIPAllowlist(ctx, ip)
 	if err != nil {
 		return fmt.Errorf("service.checkPAIPAllowlist: %w", err)
 	}
@@ -292,7 +294,7 @@ func (s *AuthService) CompletePlatformAdminMFASetup(ctx context.Context, email, 
 	if result.User.PlatformRole != string(domain.PlatformRoleAdmin) {
 		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", domain.ErrInvalidCredentials)
 	}
-	if err := s.checkPAIPAllowlist(ctx, result.User.ID, ip); err != nil {
+	if err := s.checkPAIPAllowlist(ctx, ip); err != nil {
 		return nil, err
 	}
 

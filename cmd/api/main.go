@@ -227,6 +227,7 @@ func run() error {
 	v1.Put("/platform/security-settings/session-timeout", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.UpdateSessionTimeout)
 	v1.Post("/platform/security-settings/ip-allowlist", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.AddIPAllowlist)
 	v1.Delete("/platform/security-settings/ip-allowlist/:id", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.DeleteIPAllowlist)
+	v1.Put("/platform/security-settings/ip-allowlist/enabled", jwtAuth, middleware.RequirePlatformAdmin(), platformSecurityHandler.UpdateIPAllowlistEnabled)
 	// S4P-28-33, US-060: Right to Erasure. Create SENGAJA TANPA
 	// RequirePlatformAdmin() -- user/AW/PM mengajukan, otorisasi per-request
 	// di service (lihat komentar ErasureHandler.Create). List/Execute/Reject
