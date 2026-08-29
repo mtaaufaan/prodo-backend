@@ -126,6 +126,7 @@ func run() error {
 	platformAuditRepo := repository.NewPlatformAuditRepository(pool)
 	platformDashboardRepo := repository.NewPlatformDashboardRepository(pool)
 	erasureRepo := repository.NewErasureRepository(pool)
+	groupDirectoryRepo := repository.NewGroupDirectoryRepository(pool)
 	mfaRepo, err := repository.NewMFARepository(pool, cfg.MFAEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("setup MFA repository: %w", err)
@@ -153,6 +154,7 @@ func run() error {
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
+	groupDirectorySvc := service.NewGroupDirectoryService(groupDirectoryRepo)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -166,6 +168,7 @@ func run() error {
 	platformAuditHandler := handler.NewPlatformAuditHandler(platformAuditSvc, logger)
 	platformDashboardHandler := handler.NewPlatformDashboardHandler(platformDashboardSvc, logger)
 	erasureHandler := handler.NewErasureHandler(erasureSvc, accountSvc, logger)
+	groupDirectoryHandler := handler.NewGroupDirectoryHandler(groupDirectorySvc, logger)
 	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
@@ -281,6 +284,12 @@ func run() error {
 	// query lewat exec. Beda dari S3-02..06 (sebelum S3-42) yang belum pakai
 	// dbCtx sama sekali karena organizations belum ber-RLS saat itu.
 	requireOrgAdmin := middleware.RequirePlatformRole(accountSvc, "platform_admin", "group_admin")
+	// S4P-34, US-083: direktori grup. TANPA dbCtx -- otorisasi GA-vs-PA ada
+	// di query lewat withRLSContext (GroupDirectoryRepository), pola sama
+	// erasureHandler/platformDashboardHandler, bukan DBContextMiddleware
+	// (groups sendiri TIDAK di-RLS, RLS_DESIGN.md §8). Dipakai konsol PA
+	// (GroupDirectoryPage) DAN picker grup di CreateOrganizationModal (GA).
+	v1.Get("/platform/groups", jwtAuth, requireOrgAdmin, groupDirectoryHandler.List)
 	v1.Get("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.List)
 	v1.Post("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Create)
 	v1.Put("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Update)
