@@ -42,6 +42,11 @@ type fakeAccountRepository struct {
 	deleteIPAllowlistErr error
 	deletedEntryID       string
 
+	ipAllowlistEnabled       bool
+	ipAllowlistEnabledErr    error
+	setIPAllowlistEnabledTo  bool
+	setIPAllowlistEnabledErr error
+
 	transferErr         error
 	transferCount       int
 	transferFromUserID  string
@@ -160,7 +165,7 @@ func (f *fakeAccountRepository) DeleteGroupAdmin(_ context.Context, targetUserID
 	return f.deleteGroupAdminErr
 }
 
-func (f *fakeAccountRepository) GetPASessionIdleTimeoutSeconds(_ context.Context) (int, error) {
+func (f *fakeAccountRepository) GetPASessionIdleTimeoutSeconds(_ context.Context, _ string) (int, error) {
 	return f.sessionTimeoutSecs, f.sessionTimeoutErr
 }
 
@@ -169,11 +174,20 @@ func (f *fakeAccountRepository) SetPASessionIdleTimeoutSeconds(_ context.Context
 	return f.setSessionTimeoutErr
 }
 
-func (f *fakeAccountRepository) ListIPAllowlist(_ context.Context, _ string) ([]repository.IPAllowlistEntry, error) {
+func (f *fakeAccountRepository) GetIPAllowlistEnabled(_ context.Context) (bool, error) {
+	return f.ipAllowlistEnabled, f.ipAllowlistEnabledErr
+}
+
+func (f *fakeAccountRepository) SetIPAllowlistEnabled(_ context.Context, enabled bool, _ string) error {
+	f.setIPAllowlistEnabledTo = enabled
+	return f.setIPAllowlistEnabledErr
+}
+
+func (f *fakeAccountRepository) ListIPAllowlist(_ context.Context) ([]repository.IPAllowlistEntry, error) {
 	return f.ipAllowlist, f.ipAllowlistErr
 }
 
-func (f *fakeAccountRepository) AddIPAllowlistEntry(_ context.Context, _, cidr, _ string) (string, error) {
+func (f *fakeAccountRepository) AddIPAllowlistEntry(_ context.Context, cidr, _ string) (string, error) {
 	f.addedCIDR = cidr
 	if f.addIPAllowlistErr != nil {
 		return "", f.addIPAllowlistErr
@@ -181,7 +195,7 @@ func (f *fakeAccountRepository) AddIPAllowlistEntry(_ context.Context, _, cidr, 
 	return f.addIPAllowlistID, nil
 }
 
-func (f *fakeAccountRepository) DeleteIPAllowlistEntry(_ context.Context, _, entryID, _ string) error {
+func (f *fakeAccountRepository) DeleteIPAllowlistEntry(_ context.Context, entryID, _ string) error {
 	f.deletedEntryID = entryID
 	return f.deleteIPAllowlistErr
 }
@@ -472,11 +486,36 @@ func TestAccountService_SetPASessionIdleTimeout_AtMinimum_Accepted(t *testing.T)
 	}
 }
 
+func TestAccountService_SetIPAllowlistEnabled_PassesThrough(t *testing.T) {
+	repo := &fakeAccountRepository{}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	if err := svc.SetIPAllowlistEnabled(context.Background(), true, "pa-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !repo.setIPAllowlistEnabledTo {
+		t.Error("setIPAllowlistEnabledTo = false, want true")
+	}
+}
+
+func TestAccountService_GetIPAllowlistEnabled_PassesThrough(t *testing.T) {
+	repo := &fakeAccountRepository{ipAllowlistEnabled: true}
+	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
+
+	enabled, err := svc.GetIPAllowlistEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Error("enabled = false, want true")
+	}
+}
+
 func TestAccountService_AddIPAllowlistEntry_InvalidCIDR(t *testing.T) {
 	repo := &fakeAccountRepository{}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.AddIPAllowlistEntry(context.Background(), "pa-1", "not-a-cidr", "pa-1")
+	_, err := svc.AddIPAllowlistEntry(context.Background(), "not-a-cidr", "pa-1")
 	if !errors.Is(err, domain.ErrInvalidCIDR) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidCIDR", err)
 	}
@@ -489,7 +528,7 @@ func TestAccountService_AddIPAllowlistEntry_Valid(t *testing.T) {
 	repo := &fakeAccountRepository{addIPAllowlistID: "entry-1"}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	id, err := svc.AddIPAllowlistEntry(context.Background(), "pa-1", "10.0.0.0/24", "pa-1")
+	id, err := svc.AddIPAllowlistEntry(context.Background(), "10.0.0.0/24", "pa-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -505,7 +544,7 @@ func TestAccountService_DeleteIPAllowlistEntry_NotFound(t *testing.T) {
 	repo := &fakeAccountRepository{deleteIPAllowlistErr: domain.ErrIPAllowlistEntryNotFound}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	err := svc.DeleteIPAllowlistEntry(context.Background(), "pa-1", "entry-1", "pa-1")
+	err := svc.DeleteIPAllowlistEntry(context.Background(), "entry-1", "pa-1")
 	if !errors.Is(err, domain.ErrIPAllowlistEntryNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrIPAllowlistEntryNotFound", err)
 	}

@@ -852,19 +852,24 @@ func (r *AccountRepository) FindUserForLogin(ctx context.Context, email string) 
 	return u, nil
 }
 
-// CheckIPAllowlist mengembalikan true kalau ip diperbolehkan login untuk
-// userID (S4P-17): TIDAK ADA baris allowlist sama sekali untuk user ini
-// berarti fitur belum dikonfigurasi -> selalu diperbolehkan (opsional,
-// bukan wajib). Kalau ADA baris, ip harus cocok dengan SALAH SATU CIDR
-// yang terdaftar. Satu query pakai operator containment native Postgres
-// (`<<=`) -- lebih murah dan lebih benar daripada fetch semua baris lalu
-// parse CIDR manual di Go.
-func (r *AccountRepository) CheckIPAllowlist(ctx context.Context, userID, ip string) (allowed bool, err error) {
+// CheckIPAllowlist mengembalikan true kalau ip diperbolehkan login (S4P-17,
+// dibalik jadi GLOBAL 2026-08-29 -- dikonfirmasi user, lihat migrasi
+// pa_security_scope_swap): berlaku untuk SEMUA akun platform_admin, bukan
+// lagi per-akun. Gate pertama `ip_allowlist_enabled` -- flag OFF berarti
+// enforcement dimatikan sama sekali TERLEPAS dari isi daftar (PA bisa
+// menonaktifkan sementara tanpa menghapus CIDR yang sudah dikonfigurasi).
+// Flag ON tapi daftar kosong tetap meloloskan semua IP (fitur opsional,
+// bukan wajib -- hindari mengunci semua PA keluar cuma karena flag
+// keburu diaktifkan sebelum ada entry). Operator containment native
+// Postgres (`<<=`) -- lebih murah dan lebih benar daripada fetch semua
+// baris lalu parse CIDR manual di Go.
+func (r *AccountRepository) CheckIPAllowlist(ctx context.Context, ip string) (allowed bool, err error) {
 	err = r.db.QueryRow(ctx, `
 		SELECT
-			NOT EXISTS(SELECT 1 FROM platform_admin_ip_allowlist WHERE user_id = $1)
-			OR EXISTS(SELECT 1 FROM platform_admin_ip_allowlist WHERE user_id = $1 AND $2::inet <<= cidr)
-	`, userID, ip).Scan(&allowed)
+			NOT (SELECT ip_allowlist_enabled FROM platform_settings WHERE id = 1)
+			OR NOT EXISTS(SELECT 1 FROM platform_admin_ip_allowlist)
+			OR EXISTS(SELECT 1 FROM platform_admin_ip_allowlist WHERE $1::inet <<= cidr)
+	`, ip).Scan(&allowed)
 	if err != nil {
 		return false, fmt.Errorf("repository.CheckIPAllowlist: %w", err)
 	}
@@ -1451,25 +1456,30 @@ func (r *AccountRepository) DeleteGroupAdmin(ctx context.Context, targetUserID, 
 	return nil
 }
 
-// GetPASessionIdleTimeoutSeconds membaca setting global session timeout
-// Platform Admin (S4P-18, satu baris singleton platform_settings id=1)
-// dalam detik -- dipakai FE PlatformSecuritySettings menampilkan nilai saat
-// ini di form.
-func (r *AccountRepository) GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error) {
+// GetPASessionIdleTimeoutSeconds membaca session timeout Platform Admin
+// dalam detik untuk userID (dibalik jadi PER-AKUN 2026-08-29 -- dikonfirmasi
+// user, lihat migrasi pa_security_scope_swap): override milik userID kalau
+// pernah diatur sendiri, fallback ke platform_settings (default sistem,
+// dipertahankan sebagai singleton id=1) kalau belum pernah.
+func (r *AccountRepository) GetPASessionIdleTimeoutSeconds(ctx context.Context, userID string) (int, error) {
 	var seconds int
 	if err := r.db.QueryRow(ctx, `
-		SELECT EXTRACT(EPOCH FROM pa_session_idle_timeout)::int FROM platform_settings WHERE id = 1
-	`).Scan(&seconds); err != nil {
+		SELECT COALESCE(
+			(SELECT pa_session_idle_timeout_seconds FROM users WHERE id = $1),
+			(SELECT EXTRACT(EPOCH FROM pa_session_idle_timeout)::int FROM platform_settings WHERE id = 1)
+		)
+	`, userID).Scan(&seconds); err != nil {
 		return 0, fmt.Errorf("repository.GetPASessionIdleTimeoutSeconds: %w", err)
 	}
 	return seconds, nil
 }
 
-// SetPASessionIdleTimeoutSeconds mengubah setting global session timeout
-// Platform Admin (S4P-18) -- berlaku untuk SEMUA akun Platform Admin (bukan
-// per-akun, beda dari IP allowlist), langsung tanpa redeploy karena dibaca
-// dinamis oleh SessionRepository.TouchSessionFixed lewat subquery.
-func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, seconds int, actorUserID string) error {
+// SetPASessionIdleTimeoutSeconds mengubah session timeout PER-AKUN
+// (dibalik 2026-08-29 -- dikonfirmasi user): hanya berlaku untuk userID
+// itu sendiri, bukan lagi setting global. Dibaca dinamis oleh
+// SessionRepository.TouchSessionFixed lewat subquery, langsung berlaku
+// tanpa redeploy.
+func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, seconds int, userID string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: begin tx: %w", err)
@@ -1477,20 +1487,60 @@ func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, 
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE platform_settings SET pa_session_idle_timeout = make_interval(secs => $1), updated_at = NOW() WHERE id = 1
-	`, seconds); err != nil {
+		UPDATE users SET pa_session_idle_timeout_seconds = $1 WHERE id = $2
+	`, seconds, userID); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: update: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
 		VALUES ($1, 'platform_admin', 'platform_settings.session_timeout_changed', 'platform_settings', NULL)
-	`, actorUserID); err != nil {
+	`, userID); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: audit: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: commit tx: %w", err)
+	}
+	return nil
+}
+
+// GetIPAllowlistEnabled/SetIPAllowlistEnabled -- flag global platform_settings
+// (dikonfirmasi user 2026-08-29): terpisah dari isi daftar CIDR sendiri,
+// supaya PA bisa menonaktifkan enforcement sementara tanpa menghapus entry
+// yang sudah dikonfigurasi.
+func (r *AccountRepository) GetIPAllowlistEnabled(ctx context.Context) (bool, error) {
+	var enabled bool
+	if err := r.db.QueryRow(ctx, `
+		SELECT ip_allowlist_enabled FROM platform_settings WHERE id = 1
+	`).Scan(&enabled); err != nil {
+		return false, fmt.Errorf("repository.GetIPAllowlistEnabled: %w", err)
+	}
+	return enabled, nil
+}
+
+func (r *AccountRepository) SetIPAllowlistEnabled(ctx context.Context, enabled bool, actorUserID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.SetIPAllowlistEnabled: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE platform_settings SET ip_allowlist_enabled = $1, updated_at = NOW() WHERE id = 1
+	`, enabled); err != nil {
+		return fmt.Errorf("repository.SetIPAllowlistEnabled: update: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
+		VALUES ($1, 'platform_admin', 'platform_settings.ip_allowlist_enabled_changed', 'platform_settings', NULL)
+	`, actorUserID); err != nil {
+		return fmt.Errorf("repository.SetIPAllowlistEnabled: audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repository.SetIPAllowlistEnabled: commit tx: %w", err)
 	}
 	return nil
 }
@@ -1503,16 +1553,17 @@ type IPAllowlistEntry struct {
 	CreatedAt time.Time
 }
 
-// ListIPAllowlist mengembalikan entry allowlist milik SATU akun Platform
-// Admin (S4P-18) -- self-service per akun, bukan lintas akun (beda dari
-// session timeout yang global).
-func (r *AccountRepository) ListIPAllowlist(ctx context.Context, userID string) ([]IPAllowlistEntry, error) {
+// ListIPAllowlist mengembalikan SELURUH entry allowlist (dibalik jadi
+// GLOBAL 2026-08-29 -- dikonfirmasi user): daftar bersama semua akun
+// Platform Admin, bukan lagi per-akun. Kolom user_id di tabel tetap ada
+// sebagai jejak audit "siapa yang menambahkan", TIDAK lagi dipakai
+// sebagai filter.
+func (r *AccountRepository) ListIPAllowlist(ctx context.Context) ([]IPAllowlistEntry, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, cidr::text, created_at
 		FROM platform_admin_ip_allowlist
-		WHERE user_id = $1
 		ORDER BY created_at
-	`, userID)
+	`)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListIPAllowlist: %w", err)
 	}
@@ -1532,10 +1583,13 @@ func (r *AccountRepository) ListIPAllowlist(ctx context.Context, userID string) 
 	return entries, nil
 }
 
-// AddIPAllowlistEntry menambah satu entry CIDR untuk userID (S4P-18).
-// domain.ErrInvalidCIDR kalau cidr bukan notasi valid -- pengaman kedua,
-// service layer sudah validasi lewat net.ParseCIDR sebelum sampai sini.
-func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (id string, err error) {
+// AddIPAllowlistEntry menambah satu entry CIDR ke daftar GLOBAL (dibalik
+// 2026-08-29 -- dikonfirmasi user) -- actorUserID dicatat sebagai
+// user_id/pemilik kolom (jejak audit siapa yang menambahkan), tapi
+// entry berlaku untuk SEMUA akun Platform Admin. domain.ErrInvalidCIDR
+// kalau cidr bukan notasi valid -- pengaman kedua, service layer sudah
+// validasi lewat net.ParseCIDR sebelum sampai sini.
+func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, cidr, actorUserID string) (id string, err error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("repository.AddIPAllowlistEntry: begin tx: %w", err)
@@ -1545,7 +1599,7 @@ func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, userID, cid
 	err = tx.QueryRow(ctx, `
 		INSERT INTO platform_admin_ip_allowlist (user_id, cidr) VALUES ($1, $2::cidr)
 		RETURNING id
-	`, userID, cidr).Scan(&id)
+	`, actorUserID, cidr).Scan(&id)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
@@ -1567,11 +1621,11 @@ func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, userID, cid
 	return id, nil
 }
 
-// DeleteIPAllowlistEntry menghapus satu entry -- HANYA kalau benar milik
-// userID (S4P-18), sama pola ownership-check-di-WHERE seperti
-// SessionRepository.RevokeSession, supaya satu PA tidak bisa menebak/hapus
-// entry PA lain lewat ID.
-func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error {
+// DeleteIPAllowlistEntry menghapus satu entry dari daftar GLOBAL (dibalik
+// 2026-08-29 -- dikonfirmasi user): tidak lagi dibatasi hanya pemilik
+// aslinya -- entry berlaku untuk semua PA, jadi PA mana pun boleh
+// menghapusnya.
+func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, entryID, actorUserID string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: begin tx: %w", err)
@@ -1579,8 +1633,8 @@ func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, userID, 
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
 	tag, err := tx.Exec(ctx, `
-		DELETE FROM platform_admin_ip_allowlist WHERE id = $1 AND user_id = $2
-	`, entryID, userID)
+		DELETE FROM platform_admin_ip_allowlist WHERE id = $1
+	`, entryID)
 	if err != nil {
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: delete: %w", err)
 	}

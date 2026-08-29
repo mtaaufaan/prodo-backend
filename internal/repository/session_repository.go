@@ -153,10 +153,13 @@ func (r *SessionRepository) TouchSession(ctx context.Context, jti string, idleTi
 // aktif" di GET /auth/sessions), tapi validitas sesi dicek terhadap
 // created_at yang TIDAK PERNAH berubah.
 //
-// Timeout dibaca langsung dari platform_settings (S4P-18, singleton id=1)
-// lewat subquery -- BUKAN parameter Go lagi seperti sebelum S4 H3, supaya
-// perubahan lewat PlatformSecuritySettings langsung berlaku tanpa redeploy
-// (env var PA_SESSION_IDLE_TIMEOUT dihapus, S4P-15 tergantikan penuh).
+// Timeout dibaca per-akun (dibalik 2026-08-29 -- dikonfirmasi user, lihat
+// migrasi pa_security_scope_swap): override users.pa_session_idle_timeout_seconds
+// milik pemilik sesi kalau pernah diatur sendiri, fallback ke
+// platform_settings (default sistem, singleton id=1) kalau belum -- BUKAN
+// parameter Go seperti sebelum S4 H3, supaya perubahan lewat
+// PlatformSecuritySettings langsung berlaku tanpa redeploy (env var
+// PA_SESSION_IDLE_TIMEOUT dihapus, S4P-15 tergantikan penuh).
 func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string) (valid bool, err error) {
 	var id string
 	err = r.db.QueryRow(ctx, `
@@ -165,7 +168,10 @@ func (r *SessionRepository) TouchSessionFixed(ctx context.Context, jti string) (
 		WHERE jti = $1
 		  AND revoked_at IS NULL
 		  AND expires_at > NOW()
-		  AND created_at > NOW() - (SELECT pa_session_idle_timeout FROM platform_settings WHERE id = 1)
+		  AND created_at > NOW() - make_interval(secs => COALESCE(
+		        (SELECT u.pa_session_idle_timeout_seconds FROM users u WHERE u.id = user_sessions.user_id),
+		        (SELECT EXTRACT(EPOCH FROM ps.pa_session_idle_timeout)::int FROM platform_settings ps WHERE ps.id = 1)
+		      ))
 		RETURNING id
 	`, jti).Scan(&id)
 	if err != nil {
