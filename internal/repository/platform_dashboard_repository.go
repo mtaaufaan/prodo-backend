@@ -206,20 +206,22 @@ func (r *PlatformDashboardRepository) StorageAnomalies(ctx context.Context) ([]S
 }
 
 // ContractEndingAnomalies -- S4P-26 AC: "org dengan contract_end_date <30
-// hari". TANPA batas bawah (termasuk yang SUDAH lewat, bukan cuma yang
-// akan datang) -- organisasi yang kontraknya sudah kedaluwarsa lebih
-// mendesak untuk ditindaklanjuti PA daripada yang baru akan berakhir,
-// jadi lebih masuk akal tetap muncul di alert, bukan hilang begitu saja.
-func (r *PlatformDashboardRepository) ContractEndingAnomalies(ctx context.Context) ([]ContractEndingAnomaly, error) {
+// hari". Jendela simetris [-days, +days] dari sekarang (dikonfirmasi user
+// 2026-08-29): sisi depan tetap membatasi lookahead, sisi belakang
+// mencegah kontrak yang sudah lama kedaluwarsa & tak pernah ditindak
+// menumpuk selamanya di alert -- sebelumnya sengaja tanpa batas bawah,
+// keputusan itu dibalik atas permintaan user karena jadi noise.
+func (r *PlatformDashboardRepository) ContractEndingAnomalies(ctx context.Context, days int) ([]ContractEndingAnomaly, error) {
 	var result []ContractEndingAnomaly
 	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT o.id, o.name, g.name, o.contract_end_at
 			FROM organizations o
 			JOIN groups g ON g.id = o.group_id
-			WHERE o.contract_end_at IS NOT NULL AND o.contract_end_at <= NOW() + INTERVAL '30 days'
+			WHERE o.contract_end_at IS NOT NULL
+				AND o.contract_end_at BETWEEN NOW() - make_interval(days => $1) AND NOW() + make_interval(days => $1)
 			ORDER BY o.contract_end_at
-		`)
+		`, days)
 		if err != nil {
 			return fmt.Errorf("query: %w", err)
 		}

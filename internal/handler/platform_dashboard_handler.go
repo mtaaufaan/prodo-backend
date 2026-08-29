@@ -60,12 +60,20 @@ func (h *PlatformDashboardHandler) Trends(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
-// Anomalies menangani GET /platform/anomalies (S4P-26) -- endpoint baru,
-// tidak disebut literal di AC sprint_backlog.md (yang cuma menyebut
-// "Service AnomalyDetector") tapi dibutuhkan supaya FE (S4P-27, tabel
-// alert) punya cara membaca hasilnya.
+// Anomalies menangani GET /platform/anomalies?period=7|30|90 (S4P-26).
+// Endpoint awalnya tidak disebut literal di AC sprint_backlog.md (yang
+// cuma menyebut "Service AnomalyDetector") tapi dibutuhkan supaya FE
+// (S4P-27, tabel alert) punya cara membaca hasilnya. Param `period`
+// ditambah 2026-08-29 atas permintaan user: jendela simetris [-N,+N]
+// hari untuk anomali kontrak berakhir, supaya kontrak yang sudah lama
+// kedaluwarsa tidak menumpuk selamanya di alert.
 func (h *PlatformDashboardHandler) Anomalies(c *fiber.Ctx) error {
-	a, err := h.dashboard.Anomalies(c.Context())
+	period := c.QueryInt("period", 7)
+	if period != 7 && period != 30 && period != 90 {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "period harus 7, 30, atau 90", nil))
+	}
+
+	a, err := h.dashboard.Anomalies(c.Context(), period)
 	if err != nil {
 		h.logger.Error("gagal mengambil anomalies", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil anomalies", nil))
