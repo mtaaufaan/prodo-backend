@@ -60,15 +60,21 @@ type accountRepository interface {
 	DeleteServiceTier(ctx context.Context, id, actorUserID string) error
 
 	// GetPASessionIdleTimeoutSeconds/SetPASessionIdleTimeoutSeconds --
-	// S4P-18, satu setting global untuk seluruh akun Platform Admin.
-	GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error)
-	SetPASessionIdleTimeoutSeconds(ctx context.Context, seconds int, actorUserID string) error
+	// S4P-18, dibalik jadi PER-AKUN 2026-08-29 (dikonfirmasi user).
+	GetPASessionIdleTimeoutSeconds(ctx context.Context, userID string) (int, error)
+	SetPASessionIdleTimeoutSeconds(ctx context.Context, seconds int, userID string) error
+
+	// GetIPAllowlistEnabled/SetIPAllowlistEnabled -- flag global terpisah
+	// dari isi daftar (dikonfirmasi user 2026-08-29).
+	GetIPAllowlistEnabled(ctx context.Context) (bool, error)
+	SetIPAllowlistEnabled(ctx context.Context, enabled bool, actorUserID string) error
 
 	// ListIPAllowlist/AddIPAllowlistEntry/DeleteIPAllowlistEntry -- S4P-18,
-	// self-service per akun Platform Admin.
-	ListIPAllowlist(ctx context.Context, userID string) ([]repository.IPAllowlistEntry, error)
-	AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (id string, err error)
-	DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error
+	// dibalik jadi GLOBAL 2026-08-29 (dikonfirmasi user): berlaku untuk
+	// semua akun Platform Admin, bukan lagi per-akun.
+	ListIPAllowlist(ctx context.Context) ([]repository.IPAllowlistEntry, error)
+	AddIPAllowlistEntry(ctx context.Context, cidr, actorUserID string) (id string, err error)
+	DeleteIPAllowlistEntry(ctx context.Context, entryID, actorUserID string) error
 
 	// CreatePlatformAdminInvitation/ListPlatformAdmins/DeactivatePlatformAdmin/
 	// ReactivatePlatformAdmin/ResetPlatformAdminMFA -- S4P-37/38/39/40, US-084.
@@ -552,56 +558,77 @@ func (s *AccountService) DeleteGroupAdmin(ctx context.Context, targetUserID, act
 	return nil
 }
 
-// GetPASessionIdleTimeoutSeconds -- S4P-18, dipakai FE PlatformSecuritySettings
-// menampilkan nilai saat ini.
-func (s *AccountService) GetPASessionIdleTimeoutSeconds(ctx context.Context) (int, error) {
-	seconds, err := s.repo.GetPASessionIdleTimeoutSeconds(ctx)
+// GetPASessionIdleTimeoutSeconds -- S4P-18, dibalik jadi PER-AKUN 2026-08-29
+// (dikonfirmasi user): dipakai FE PlatformSecuritySettings menampilkan nilai
+// efektif milik pemanggil sendiri (override atau fallback default sistem).
+func (s *AccountService) GetPASessionIdleTimeoutSeconds(ctx context.Context, userID string) (int, error) {
+	seconds, err := s.repo.GetPASessionIdleTimeoutSeconds(ctx, userID)
 	if err != nil {
 		return 0, fmt.Errorf("service.GetPASessionIdleTimeoutSeconds: %w", err)
 	}
 	return seconds, nil
 }
 
-// SetPASessionIdleTimeout mengubah setting global session timeout Platform
-// Admin (S4P-18) -- domain.ErrSessionTimeoutTooShort kalau di bawah 10 menit
-// (US-070 AC).
-func (s *AccountService) SetPASessionIdleTimeout(ctx context.Context, seconds int, actorUserID string) error {
+// SetPASessionIdleTimeout mengubah session timeout PER-AKUN (dibalik
+// 2026-08-29 -- dikonfirmasi user): hanya berlaku untuk userID itu sendiri.
+// domain.ErrSessionTimeoutTooShort kalau di bawah 10 menit (US-070 AC).
+func (s *AccountService) SetPASessionIdleTimeout(ctx context.Context, seconds int, userID string) error {
 	if time.Duration(seconds)*time.Second < minPASessionIdleTimeout {
 		return fmt.Errorf("service.SetPASessionIdleTimeout: %w", domain.ErrSessionTimeoutTooShort)
 	}
-	if err := s.repo.SetPASessionIdleTimeoutSeconds(ctx, seconds, actorUserID); err != nil {
+	if err := s.repo.SetPASessionIdleTimeoutSeconds(ctx, seconds, userID); err != nil {
 		return fmt.Errorf("service.SetPASessionIdleTimeout: %w", err)
 	}
 	return nil
 }
 
-// ListIPAllowlist -- S4P-18, entry allowlist milik satu akun Platform Admin.
-func (s *AccountService) ListIPAllowlist(ctx context.Context, userID string) ([]repository.IPAllowlistEntry, error) {
-	entries, err := s.repo.ListIPAllowlist(ctx, userID)
+// GetIPAllowlistEnabled/SetIPAllowlistEnabled -- flag global (dikonfirmasi
+// user 2026-08-29), terpisah dari isi daftar CIDR.
+func (s *AccountService) GetIPAllowlistEnabled(ctx context.Context) (bool, error) {
+	enabled, err := s.repo.GetIPAllowlistEnabled(ctx)
+	if err != nil {
+		return false, fmt.Errorf("service.GetIPAllowlistEnabled: %w", err)
+	}
+	return enabled, nil
+}
+
+func (s *AccountService) SetIPAllowlistEnabled(ctx context.Context, enabled bool, actorUserID string) error {
+	if err := s.repo.SetIPAllowlistEnabled(ctx, enabled, actorUserID); err != nil {
+		return fmt.Errorf("service.SetIPAllowlistEnabled: %w", err)
+	}
+	return nil
+}
+
+// ListIPAllowlist -- S4P-18, dibalik jadi GLOBAL 2026-08-29 (dikonfirmasi
+// user): seluruh entry, berlaku untuk semua akun Platform Admin.
+func (s *AccountService) ListIPAllowlist(ctx context.Context) ([]repository.IPAllowlistEntry, error) {
+	entries, err := s.repo.ListIPAllowlist(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListIPAllowlist: %w", err)
 	}
 	return entries, nil
 }
 
-// AddIPAllowlistEntry -- S4P-18. Validasi format CIDR di sini (stdlib
-// net.ParseCIDR) SEBELUM menyentuh DB -- repository juga menjaga lewat cast
-// Postgres ($2::cidr) sebagai pengaman kedua, tapi pesan error yang jelas
-// (domain.ErrInvalidCIDR) lebih murah divalidasi di Go dulu.
-func (s *AccountService) AddIPAllowlistEntry(ctx context.Context, userID, cidr, actorUserID string) (string, error) {
+// AddIPAllowlistEntry -- S4P-18, dibalik jadi GLOBAL 2026-08-29 (dikonfirmasi
+// user). Validasi format CIDR di sini (stdlib net.ParseCIDR) SEBELUM
+// menyentuh DB -- repository juga menjaga lewat cast Postgres ($2::cidr)
+// sebagai pengaman kedua, tapi pesan error yang jelas (domain.ErrInvalidCIDR)
+// lebih murah divalidasi di Go dulu.
+func (s *AccountService) AddIPAllowlistEntry(ctx context.Context, cidr, actorUserID string) (string, error) {
 	if _, _, err := net.ParseCIDR(cidr); err != nil {
 		return "", fmt.Errorf("service.AddIPAllowlistEntry: %w", domain.ErrInvalidCIDR)
 	}
-	id, err := s.repo.AddIPAllowlistEntry(ctx, userID, cidr, actorUserID)
+	id, err := s.repo.AddIPAllowlistEntry(ctx, cidr, actorUserID)
 	if err != nil {
 		return "", fmt.Errorf("service.AddIPAllowlistEntry: %w", err)
 	}
 	return id, nil
 }
 
-// DeleteIPAllowlistEntry -- S4P-18.
-func (s *AccountService) DeleteIPAllowlistEntry(ctx context.Context, userID, entryID, actorUserID string) error {
-	if err := s.repo.DeleteIPAllowlistEntry(ctx, userID, entryID, actorUserID); err != nil {
+// DeleteIPAllowlistEntry -- S4P-18, dibalik jadi GLOBAL 2026-08-29
+// (dikonfirmasi user): PA mana pun boleh menghapus entry mana pun.
+func (s *AccountService) DeleteIPAllowlistEntry(ctx context.Context, entryID, actorUserID string) error {
+	if err := s.repo.DeleteIPAllowlistEntry(ctx, entryID, actorUserID); err != nil {
 		return fmt.Errorf("service.DeleteIPAllowlistEntry: %w", err)
 	}
 	return nil

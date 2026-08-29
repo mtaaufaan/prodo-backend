@@ -141,7 +141,7 @@ func (f *fakeAuthRepository) ListOrgIDsForGroupAdmin(_ context.Context, _ string
 	return f.orgIDsForGroupAdmin, f.orgIDsErr
 }
 
-func (f *fakeAuthRepository) CheckIPAllowlist(_ context.Context, _, ip string) (bool, error) {
+func (f *fakeAuthRepository) CheckIPAllowlist(_ context.Context, ip string) (bool, error) {
 	f.checkedIP = ip
 	return !f.ipDenied, f.ipErr
 }
