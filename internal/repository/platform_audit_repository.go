@@ -29,9 +29,15 @@ type PlatformAuditLogEntry struct {
 	EntityType       string
 	EntityID         *string
 	TargetUserName   *string
-	TargetTierName   *string
-	Metadata         []byte
-	LoggedAt         time.Time
+	// TargetUserRole -- S4P-40: action code seperti user.suspended/
+	// user.reactivated/user.invited/user.mfa_reset dipakai BERSAMA untuk
+	// Group Admin (S4P-02/S1-05) dan Platform Admin (S4P-37/38/39) --
+	// field ini membedakan target-nya supaya kalimat naratif FE benar
+	// (lihat auditNarrative.ts).
+	TargetUserRole *string
+	TargetTierName *string
+	Metadata       []byte
+	LoggedAt       time.Time
 }
 
 // PlatformAuditLogFilter -- field kosong/nil berarti tidak difilter
@@ -100,7 +106,7 @@ func (r *PlatformAuditRepository) List(ctx context.Context, f PlatformAuditLogFi
 		listArgs = append(listArgs, f.Limit, f.Offset)
 		rows, err := tx.Query(ctx, `
 			SELECT pal.id, pal.actor_id, u.email, u.display_name, pal.actor_role,
-			       pal.action, pal.entity_type, pal.entity_id, target_u.display_name, target_t.name,
+			       pal.action, pal.entity_type, pal.entity_id, target_u.display_name, target_u.platform_role, target_t.name,
 			       pal.metadata, pal.logged_at
 			FROM platform_audit_logs pal
 			LEFT JOIN users u ON u.id = pal.actor_id
@@ -118,7 +124,7 @@ func (r *PlatformAuditRepository) List(ctx context.Context, f PlatformAuditLogFi
 		for rows.Next() {
 			var e PlatformAuditLogEntry
 			if err := rows.Scan(&e.ID, &e.ActorID, &e.ActorEmail, &e.ActorDisplayName, &e.ActorRole,
-				&e.Action, &e.EntityType, &e.EntityID, &e.TargetUserName, &e.TargetTierName,
+				&e.Action, &e.EntityType, &e.EntityID, &e.TargetUserName, &e.TargetUserRole, &e.TargetTierName,
 				&e.Metadata, &e.LoggedAt); err != nil {
 				return fmt.Errorf("scan: %w", err)
 			}

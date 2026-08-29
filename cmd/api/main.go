@@ -165,6 +165,7 @@ func run() error {
 	}
 
 	groupAdminHandler := handler.NewGroupAdminHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
+	platformAdminAccountsHandler := handler.NewPlatformAdminAccountsHandler(accountSvc, emailSvc, cfg.AppBaseURL, logger)
 	platformAuditHandler := handler.NewPlatformAuditHandler(platformAuditSvc, logger)
 	platformDashboardHandler := handler.NewPlatformDashboardHandler(platformDashboardSvc, logger)
 	erasureHandler := handler.NewErasureHandler(erasureSvc, accountSvc, logger)
@@ -179,6 +180,13 @@ func run() error {
 	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
 
 	v1 := app.Group("/api/v1")
+	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
+	v1.Post("/platform/admins", jwtAuth, middleware.RequirePlatformAdmin(), platformAdminAccountsHandler.Create)
+	v1.Get("/platform/admins", jwtAuth, middleware.RequirePlatformAdmin(), platformAdminAccountsHandler.List)
+	v1.Put("/platform/admins/:id/deactivate", jwtAuth, middleware.RequirePlatformAdmin(), platformAdminAccountsHandler.Deactivate)
+	// Reactivate -- tambahan, dikonfirmasi user (mirror suspend/reactivate GA).
+	v1.Put("/platform/admins/:id/reactivate", jwtAuth, middleware.RequirePlatformAdmin(), platformAdminAccountsHandler.Reactivate)
+	v1.Post("/platform/admins/:id/reset-mfa", jwtAuth, middleware.RequirePlatformAdmin(), platformAdminAccountsHandler.ResetMFA)
 	v1.Get("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.List)
 	v1.Post("/platform/group-admins", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.Create)
 	v1.Post("/platform/group-admins/:id/resend-activation", jwtAuth, middleware.RequirePlatformAdmin(), groupAdminHandler.ResendActivation)
