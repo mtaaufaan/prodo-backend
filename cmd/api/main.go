@@ -97,6 +97,7 @@ func run() error {
 	app.Use(otelfiber.Middleware())
 	app.Use(middleware.RequestID())
 	app.Use(middleware.Logging(logger))
+	app.Use(middleware.RequestMeta())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: cfg.CORSAllowOrigins,
 	}))

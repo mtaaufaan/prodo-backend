@@ -160,19 +160,11 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 		}
 	}
 
-	metadata, err := json.Marshal(map[string]string{
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", p.InvitedByUserID, "platform_admin", "user.invited", "user", &userID, map[string]any{
 		"email":         p.Email,
 		"platform_role": "group_admin",
 		"group_id":      groupID,
-	})
-	if err != nil {
-		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: encode metadata: %w", err)
-	}
-
-	if _, err = tx.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
-		VALUES ($1, 'platform_admin', 'user.invited', 'user', $2, $3::jsonb)
-	`, p.InvitedByUserID, userID, string(metadata)); err != nil {
+	}); err != nil {
 		return "", fmt.Errorf("repository.CreateGroupAdminInvitation: insert platform_audit_logs: %w", err)
 	}
 
@@ -1509,18 +1501,11 @@ func (r *AccountRepository) TransferGroup(ctx context.Context, fromUserID, toUse
 		return 0, fmt.Errorf("repository.TransferGroup: rows: %w", err)
 	}
 
-	metadata, err := json.Marshal(map[string]any{
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "group.transferred", "user", &fromUserID, map[string]any{
 		"from_user_id": fromUserID,
 		"to_user_id":   toUserID,
 		"group_ids":    groupIDs,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: encode metadata: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
-		VALUES ($1, 'platform_admin', 'group.transferred', 'user', $2, $3::jsonb)
-	`, actorUserID, fromUserID, string(metadata)); err != nil {
+	}); err != nil {
 		return 0, fmt.Errorf("repository.TransferGroup: audit: %w", err)
 	}
 
@@ -1610,10 +1595,7 @@ func (r *AccountRepository) SetPASessionIdleTimeoutSeconds(ctx context.Context, 
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: update: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, 'platform_admin', 'platform_settings.session_timeout_changed', 'platform_settings', NULL)
-	`, userID); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", userID, "platform_admin", "platform_settings.session_timeout_changed", "platform_settings", nil, nil); err != nil {
 		return fmt.Errorf("repository.SetPASessionIdleTimeoutSeconds: audit: %w", err)
 	}
 
@@ -1650,10 +1632,7 @@ func (r *AccountRepository) SetIPAllowlistEnabled(ctx context.Context, enabled b
 		return fmt.Errorf("repository.SetIPAllowlistEnabled: update: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, 'platform_admin', 'platform_settings.ip_allowlist_enabled_changed', 'platform_settings', NULL)
-	`, actorUserID); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "platform_settings.ip_allowlist_enabled_changed", "platform_settings", nil, nil); err != nil {
 		return fmt.Errorf("repository.SetIPAllowlistEnabled: audit: %w", err)
 	}
 
@@ -1726,10 +1705,7 @@ func (r *AccountRepository) AddIPAllowlistEntry(ctx context.Context, cidr, actor
 		return "", fmt.Errorf("repository.AddIPAllowlistEntry: insert: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, 'platform_admin', 'ip_allowlist.added', 'ip_allowlist', $2)
-	`, actorUserID, id); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "ip_allowlist.added", "ip_allowlist", &id, nil); err != nil {
 		return "", fmt.Errorf("repository.AddIPAllowlistEntry: audit: %w", err)
 	}
 
@@ -1760,10 +1736,7 @@ func (r *AccountRepository) DeleteIPAllowlistEntry(ctx context.Context, entryID,
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: %w", domain.ErrIPAllowlistEntryNotFound)
 	}
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, 'platform_admin', 'ip_allowlist.removed', 'ip_allowlist', $2)
-	`, actorUserID, entryID); err != nil {
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "ip_allowlist.removed", "ip_allowlist", &entryID, nil); err != nil {
 		return fmt.Errorf("repository.DeleteIPAllowlistEntry: audit: %w", err)
 	}
 
@@ -1780,6 +1753,55 @@ type execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
+// requestMetaFromContext baca info asal HTTP request (IP, "METHOD path")
+// yang disuntikkan middleware.RequestMeta (2026-08-29, permintaan user:
+// audit trail perlu info asal request). Kosong kalau dipanggil di luar
+// konteks HTTP (worker, test) -- audit tetap tercatat, cuma tanpa info ini.
+func requestMetaFromContext(ctx context.Context) (ip *string, path string) {
+	meta, ok := ctx.Value(domain.RequestMetaKey).(domain.RequestMeta)
+	if !ok {
+		return nil, ""
+	}
+	if meta.IP != "" {
+		ip = &meta.IP
+	}
+	return ip, meta.Path
+}
+
+// writeAuditLog -- SATU-SATUNYA titik INSERT ke audit_logs/platform_audit_logs,
+// dipakai logAudit/logTierAudit dan seluruh pemanggil lain yang butuh
+// entity_type/metadata custom (TransferGroup, security settings, IP
+// allowlist). Konsolidasi dari 8 statement INSERT yang sebelumnya
+// terduplikasi (2026-08-29) supaya actor_ip + request_path (metadata)
+// cukup ditambahkan di SATU tempat. table selalu literal ("audit_logs"
+// atau "platform_audit_logs" dari pemanggil), tidak pernah input user --
+// aman dari SQL injection meski disisipkan lewat fmt.Sprintf.
+func writeAuditLog(ctx context.Context, exec execer, table, actorID, actorRole, action, entityType string, entityID *string, extraMetadata map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := extraMetadata
+	if path != "" {
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata["request_path"] = path
+	}
+	var metaJSON []byte
+	if len(metadata) > 0 {
+		var err error
+		metaJSON, err = json.Marshal(metadata)
+		if err != nil {
+			return fmt.Errorf("writeAuditLog: encode metadata: %w", err)
+		}
+	}
+	if _, err := exec.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO %s (actor_id, actor_role, action, entity_type, entity_id, actor_ip, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6::inet, $7)
+	`, table), actorID, actorRole, action, entityType, entityID, ip, metaJSON); err != nil {
+		return fmt.Errorf("writeAuditLog: %w", err)
+	}
+	return nil
+}
+
 // logAudit menulis satu baris audit trail (US-073 AC: seluruh aksi onboarding
 // dicatat). metadata kosong untuk entry sesederhana ini -- entity_id dipakai
 // sebagai referensi utama. entity_type selalu 'user' -- seluruh pemanggil
@@ -1790,25 +1812,16 @@ type execer interface {
 // audit_logs biasa -- pemanggil TIDAK perlu berubah, cuma tabel tujuan yang
 // beda tergantung actorRole. Lihat juga logTierAudit (selalu platform_admin).
 func logAudit(ctx context.Context, exec execer, actorID, actorRole, action, entityID string) error {
-	query := `INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id) VALUES ($1, $2, $3, 'user', $4)`
+	table := "audit_logs"
 	if actorRole == "platform_admin" {
-		query = `INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id) VALUES ($1, $2, $3, 'user', $4)`
+		table = "platform_audit_logs"
 	}
-	if _, err := exec.Exec(ctx, query, actorID, actorRole, action, entityID); err != nil {
-		return fmt.Errorf("logAudit: %w", err)
-	}
-	return nil
+	return writeAuditLog(ctx, exec, table, actorID, actorRole, action, "user", &entityID, nil)
 }
 
 // logTierAudit -- sama seperti logAudit tapi entity_type='tier' (S4P-11),
 // ke platform_audit_logs (S4P-20/21) karena actor_role selalu
 // 'platform_admin' -- katalog tier cuma bisa diubah Platform Admin.
 func logTierAudit(ctx context.Context, exec execer, actorID, action, entityID string) error {
-	if _, err := exec.Exec(ctx, `
-		INSERT INTO platform_audit_logs (actor_id, actor_role, action, entity_type, entity_id)
-		VALUES ($1, 'platform_admin', $2, 'tier', $3)
-	`, actorID, action, entityID); err != nil {
-		return fmt.Errorf("logTierAudit: %w", err)
-	}
-	return nil
+	return writeAuditLog(ctx, exec, "platform_audit_logs", actorID, "platform_admin", action, "tier", &entityID, nil)
 }
