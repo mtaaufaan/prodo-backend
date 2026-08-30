@@ -13,6 +13,7 @@ import (
 type workspaceRepository interface {
 	Create(ctx context.Context, exec db.Executor, orgID, name, actorID, actorRole string) (*repository.Workspace, error)
 	GetOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+	Get(ctx context.Context, exec db.Executor, workspaceID string) (*repository.Workspace, error)
 	Update(ctx context.Context, exec db.Executor, workspaceID, name, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	Reactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
@@ -132,6 +133,20 @@ func (s *WorkspaceService) DeleteWorkspace(ctx context.Context, exec db.Executor
 		return fmt.Errorf("service.DeleteWorkspace: %w", err)
 	}
 	return nil
+}
+
+// GetWorkspace mengembalikan satu workspace (S4-04 prasyarat -- nama
+// workspace untuk header WorkspaceLayout). TIDAK ada pengecekan otorisasi
+// tambahan, scoping penuh lewat RLS workspaces_select.
+func (s *WorkspaceService) GetWorkspace(ctx context.Context, exec db.Executor, workspaceID string) (*repository.Workspace, error) {
+	if workspaceID == "" {
+		return nil, fmt.Errorf("service.GetWorkspace: %w", domain.ErrInvalidInput)
+	}
+	ws, err := s.repo.Get(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.GetWorkspace: %w", err)
+	}
+	return ws, nil
 }
 
 // ListWorkspaces mengembalikan workspace yang terlihat oleh actor dalam

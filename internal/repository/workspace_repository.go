@@ -181,6 +181,23 @@ func (r *WorkspaceRepository) Delete(ctx context.Context, exec db.Executor, work
 	return nil
 }
 
+// Get mengembalikan satu workspace (S4-04 prasyarat -- header WorkspaceLayout
+// butuh nama workspace/org, sebelumnya tidak ada GET satuan, cuma List per
+// org). Scoping lewat RLS workspaces_select, sama seperti List.
+func (r *WorkspaceRepository) Get(ctx context.Context, exec db.Executor, workspaceID string) (*Workspace, error) {
+	var w Workspace
+	err := exec.QueryRow(ctx, `
+		SELECT id, org_id, name, archived_at, created_at FROM workspaces WHERE id = $1
+	`, workspaceID).Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.Get: %w", domain.ErrWorkspaceNotFound)
+		}
+		return nil, fmt.Errorf("repository.Get: %w", err)
+	}
+	return &w, nil
+}
+
 // List mengembalikan workspace dalam satu organisasi (S3-13 prasyarat).
 // Scoping tambahan lewat RLS `workspaces_select` (S3-42) -- Platform
 // Admin/Group Admin pemilik org lihat semua, workspace member biasa cuma

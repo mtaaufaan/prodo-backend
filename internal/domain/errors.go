@@ -144,6 +144,15 @@ var (
 	// member (S3-22/23).
 	ErrProjectMemberNotFound = errors.New("project member not found")
 
+	// ErrProjectCodeTaken dikembalikan POST/PUT project (S4-02) saat kode
+	// task (prefiks nomor task) sudah dipakai project lain DI WORKSPACE
+	// YANG SAMA -- unik per workspace, bukan global (AW Add Project.dc.html).
+	ErrProjectCodeTaken = errors.New("project code already used in this workspace")
+
+	// ErrProjectNotDeleted dikembalikan POST /projects/:id/restore (S4-02)
+	// saat project target tidak sedang dalam status soft-deleted.
+	ErrProjectNotDeleted = errors.New("project is not soft-deleted")
+
 	// ErrInvalidCIDR dikembalikan saat input allowlist IP Platform Admin
 	// (S4P-18) bukan notasi CIDR yang valid.
 	ErrInvalidCIDR = errors.New("invalid cidr notation")
