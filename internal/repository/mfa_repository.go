@@ -80,6 +80,31 @@ func (r *MFARepository) SaveBackupCodes(ctx context.Context, userID string, hash
 	return nil
 }
 
+// ConsumeBackupCode mencocokkan hash kode cadangan terhadap
+// user_mfa_configs.backup_codes DAN menghapusnya sekaligus dalam satu query
+// atomik (2026-08-30, menutup gap: backup_codes sudah diterbitkan+disimpan
+// sejak awal tapi tidak ada jalur untuk memakainya saat login) -- WHERE
+// codeHash = ANY(backup_codes) gagal cocok (0 baris ter-update, RETURNING
+// kosong) kalau kode salah ATAU sudah pernah dipakai sebelumnya (array_remove
+// pada percobaan pertama membuatnya tidak ada lagi di array), sehingga
+// sifat sekali-pakai terjamin tanpa race condition terpisah.
+func (r *MFARepository) ConsumeBackupCode(ctx context.Context, userID, codeHash string) (matched bool, err error) {
+	var id string
+	err = r.db.QueryRow(ctx, `
+		UPDATE user_mfa_configs
+		SET backup_codes = array_remove(backup_codes, $2), updated_at = NOW()
+		WHERE user_id = $1 AND $2 = ANY(backup_codes)
+		RETURNING id
+	`, userID, codeHash).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("repository.ConsumeBackupCode: %w", err)
+	}
+	return true, nil
+}
+
 // GetMFAStatus mengembalikan status MFA user untuk verifikasi saat login
 // (S1-17). Tidak ada baris sama sekali (belum pernah setup MFA) BUKAN
 // error -- isEnabled=false, secret="" dikembalikan, caller (MFAService)

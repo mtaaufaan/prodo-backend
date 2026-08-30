@@ -125,8 +125,9 @@ type fakeAuthRepository struct {
 	createdUser *repository.LoginUserRecord
 	createErr   error
 
-	recordedLoginUserID string
-	recordLoginErr      error
+	recordedLoginUserID    string
+	recordLoginErr         error
+	recordedUsedBackupCode bool
 
 	orgIDsForGroupAdmin []string
 	orgIDsErr           error
@@ -149,8 +150,9 @@ func (f *fakeAuthRepository) CheckIPAllowlist(_ context.Context, ip string) (boo
 	return !f.ipDenied, f.ipErr
 }
 
-func (f *fakeAuthRepository) RecordLogin(_ context.Context, userID, _ string) error {
+func (f *fakeAuthRepository) RecordLogin(_ context.Context, userID, _ string, usedBackupCode bool) error {
 	f.recordedLoginUserID = userID
+	f.recordedUsedBackupCode = usedBackupCode
 	return f.recordLoginErr
 }
 
@@ -408,9 +410,25 @@ func TestAuthService_VerifyMFA_ValidOTP(t *testing.T) {
 	secret := generateTestTOTPSecret(t)
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", true, false, currentTOTPCode(t, secret))
+	usedBackupCode, err := svc.VerifyMFA(context.Background(), "user-1", true, false, currentTOTPCode(t, secret))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if usedBackupCode {
+		t.Error("usedBackupCode harus false untuk OTP TOTP biasa")
+	}
+}
+
+func TestAuthService_VerifyMFA_ValidBackupCode(t *testing.T) {
+	mfaRepo := &fakeMFARepository{enabled: true, consumeBackupCodeResult: true}
+	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(mfaRepo), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
+
+	usedBackupCode, err := svc.VerifyMFA(context.Background(), "user-1", true, false, "abcd-1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !usedBackupCode {
+		t.Error("usedBackupCode harus true kalau login pakai kode cadangan yang cocok")
 	}
 }
 
@@ -418,7 +436,7 @@ func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
 	secret := generateTestTOTPSecret(t)
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: true, savedSecret: secret}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", true, false, "000000")
+	_, err := svc.VerifyMFA(context.Background(), "user-1", true, false, "000000")
 	if !errors.Is(err, domain.ErrInvalidOTP) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidOTP", err)
 	}
@@ -427,7 +445,7 @@ func TestAuthService_VerifyMFA_WrongOTP(t *testing.T) {
 func TestAuthService_VerifyMFA_GroupAdminWithoutMFA_Blocked(t *testing.T) {
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", true, false, "")
+	_, err := svc.VerifyMFA(context.Background(), "user-1", true, false, "")
 	if !errors.Is(err, domain.ErrMFARequired) {
 		t.Errorf("err = %v, want wrapped domain.ErrMFARequired", err)
 	}
@@ -436,7 +454,7 @@ func TestAuthService_VerifyMFA_GroupAdminWithoutMFA_Blocked(t *testing.T) {
 func TestAuthService_VerifyMFA_PlatformAdminWithoutMFA_SetupRequired(t *testing.T) {
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", false, true, "")
+	_, err := svc.VerifyMFA(context.Background(), "user-1", false, true, "")
 	if !errors.Is(err, domain.ErrMFASetupRequired) {
 		t.Errorf("err = %v, want wrapped domain.ErrMFASetupRequired", err)
 	}
@@ -445,7 +463,7 @@ func TestAuthService_VerifyMFA_PlatformAdminWithoutMFA_SetupRequired(t *testing.
 func TestAuthService_VerifyMFA_MemberWithoutMFA_Passes(t *testing.T) {
 	svc := NewAuthService(&fakeAuthRepository{}, &fakeOIDCClient{}, &fakeKeycloakClient{}, NewMFAService(&fakeMFARepository{enabled: false}), newTestSessionService(), &fakeEmailSender{}, zap.NewNop())
 
-	err := svc.VerifyMFA(context.Background(), "user-1", false, false, "")
+	_, err := svc.VerifyMFA(context.Background(), "user-1", false, false, "")
 	if err != nil {
 		t.Errorf("member tanpa MFA harusnya lolos (opsional): %v", err)
 	}
