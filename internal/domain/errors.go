@@ -253,6 +253,19 @@ var (
 	// deactivate/reactivate/reset-mfa (S4P-38/39) bukan akun platform_admin
 	// yang valid.
 	ErrPlatformAdminNotFound = errors.New("platform admin not found")
+
+	// ErrRetentionOutOfRange dikembalikan PUT /organizations/:id/storage-quota
+	// (S4G-03, Track S4G) saat retention_days yang diminta di luar 30-365
+	// hari -- sama batas dengan CHECK constraint ck_organizations_retention_days
+	// (DATABASE_SCHEMA.md §5.7), ditegakkan juga di sini supaya pesan error
+	// jelas (bukan constraint violation mentah), sama pola StorageQuotaExceedsMax.
+	ErrRetentionOutOfRange = errors.New("retention days out of allowed range")
+
+	// ErrOrganizationInactive dikembalikan PUT /workspaces/:wsId/move
+	// (S4G-04, Track S4G) saat organisasi tujuan pindah sedang nonaktif
+	// (deactivated_at TERISI) -- workspace tidak boleh dipindah ke organisasi
+	// yang aksesnya sendiri sedang diblokir.
+	ErrOrganizationInactive = errors.New("target organization is deactivated")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id

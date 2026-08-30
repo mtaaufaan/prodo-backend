@@ -150,7 +150,7 @@ func run() error {
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
 	organizationSvc := service.NewOrganizationService(organizationRepo)
 	workspaceRepo := repository.NewWorkspaceRepository()
-	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc)
+	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc)
@@ -273,6 +273,11 @@ func run() error {
 	v1.Put("/workspaces/:wsId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Update)
 	v1.Put("/workspaces/:wsId/deactivate", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Deactivate)
 	v1.Put("/workspaces/:wsId/reactivate", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Reactivate)
+	// S4G-04, Track S4G, desain "GA Workspaces.dc.html": ARSIP (read-only,
+	// beda dari deactivate di atas yang blokir akses total) -- gate sama
+	// dengan Update/Deactivate (AW workspace ini, atau PA/GA pengelola org).
+	v1.Put("/workspaces/:wsId/archive", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Archive)
+	v1.Put("/workspaces/:wsId/unarchive", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Unarchive)
 	// ⚠️ S2-07/08 prasyarat, dimajukan dari S3-14 (implementation_gaps.md
 	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
 	// workspace boleh lihat daftar member workspace mereka sendiri.
@@ -331,6 +336,11 @@ func run() error {
 	// RLS workspaces_delete yang tidak punya cabang workspace_member).
 	v1.Get("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.List)
 	v1.Delete("/workspaces/:wsId", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.Delete)
+	// S4G-04, Track S4G, desain "GA Workspaces.dc.html": pindah org + ganti
+	// Admin Workspace. Gate PA/GA saja (bukan admin_workspace), sama pola
+	// Delete -- lihat komentar WorkspaceService.MoveWorkspace/ReassignAdmin.
+	v1.Put("/workspaces/:wsId/move", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.Move)
+	v1.Put("/workspaces/:wsId/admin", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.ReassignAdmin)
 	// S3-20, US-009b. TANPA requireOrgAdmin/RequireRole -- target scope-nya
 	// groupID (bukan :wsId/:orgId), dan aktor sah (Project Manager)
 	// platform_role-nya "member" biasa. Otorisasi penuh di GroupService.

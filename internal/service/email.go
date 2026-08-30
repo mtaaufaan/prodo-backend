@@ -86,6 +86,51 @@ func (e *EmailService) SendTierChangedEmail(_ context.Context, to, displayName, 
 	return nil
 }
 
+// SendWorkspaceAdminChangedEmail memberitahu admin lama+baru saat Admin
+// Workspace penanggung jawab dialihkan (S4G-04, Track S4G, desain
+// "GA Workspaces.dc.html": "Pengalihan memberi notifikasi ke admin lama
+// dan baru"). Best-effort seperti email lain -- gagal kirim TIDAK
+// menggagalkan pengalihan role itu sendiri.
+func (e *EmailService) SendWorkspaceAdminChangedEmail(_ context.Context, to, displayName, workspaceName string, isNewAdmin bool) error {
+	msg := buildWorkspaceAdminChangedEmailMessage(e.from, to, displayName, workspaceName, isNewAdmin)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendWorkspaceAdminChangedEmail: %w", err)
+	}
+	return nil
+}
+
+// buildWorkspaceAdminChangedEmailMessage -- dipisah dari
+// SendWorkspaceAdminChangedEmail supaya bisa di-unit-test tanpa koneksi
+// SMTP nyata (pola sama dengan buildActivationEmailMessage).
+func buildWorkspaceAdminChangedEmailMessage(from, to, displayName, workspaceName string, isNewAdmin bool) []byte {
+	subject := fmt.Sprintf("Admin Workspace %s Berubah - PRODO", workspaceName)
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Peran Admin Workspace penanggung jawab untuk workspace \"%s\" telah\r\n"+
+			"dialihkan ke orang lain. Anda tidak lagi memegang peran ini, tapi\r\n"+
+			"akses Anda sebagai member workspace tetap berjalan.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, workspaceName,
+	)
+	if isNewAdmin {
+		body = fmt.Sprintf(
+			"Halo %s,\r\n\r\n"+
+				"Anda ditunjuk sebagai Admin Workspace penanggung jawab baru untuk\r\n"+
+				"workspace \"%s\". Anda kini mengelola member, role, dan pengaturan\r\n"+
+				"workspace ini.\r\n\r\n"+
+				"-- Tim PRODO\r\n",
+			displayName, workspaceName,
+		)
+	}
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
 // buildTierChangedEmailMessage -- dipisah dari SendTierChangedEmail supaya
 // bisa di-unit-test tanpa koneksi SMTP nyata (pola sama dengan
 // buildActivationEmailMessage).
