@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -18,7 +19,7 @@ type organizationRepository interface {
 	IsGroupAdminOfGroup(ctx context.Context, exec db.Executor, userID, groupID string) (bool, error)
 	GetGroupID(ctx context.Context, exec db.Executor, orgID string) (string, error)
 	Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error)
-	Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error
+	Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error
 	UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error
 	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
@@ -103,16 +104,25 @@ func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Ex
 	return org, nil
 }
 
-// UpdateOrganization mengubah name/slug organisasi existing (S3-03).
-func (s *OrganizationService) UpdateOrganization(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error {
+// orgDomainPattern -- format domain email resmi (S4G-02, Track S4G, desain
+// "GA Organizations.dc.html"), sama regex dengan CHECK constraint DB.
+var orgDomainPattern = regexp.MustCompile(`(?i)^[a-z0-9.-]+\.[a-z]{2,}$`)
+
+// UpdateOrganization mengubah name/slug/domain organisasi existing (S3-03,
+// domain ditambahkan S4G-02). orgDomain kosong ("") berarti dikosongkan
+// (opsional) -- kalau diisi, WAJIB format domain valid.
+func (s *OrganizationService) UpdateOrganization(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error {
 	if orgID == "" || name == "" || slug == "" {
+		return fmt.Errorf("service.UpdateOrganization: %w", domain.ErrInvalidInput)
+	}
+	if orgDomain != "" && !orgDomainPattern.MatchString(orgDomain) {
 		return fmt.Errorf("service.UpdateOrganization: %w", domain.ErrInvalidInput)
 	}
 	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
 		return err
 	}
 
-	if err := s.repo.Update(ctx, exec, orgID, name, slug, actorID, actorRole); err != nil {
+	if err := s.repo.Update(ctx, exec, orgID, name, slug, orgDomain, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.UpdateOrganization: %w", err)
 	}
 	return nil

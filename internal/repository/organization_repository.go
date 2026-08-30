@@ -32,9 +32,11 @@ type Organization struct {
 	GroupID           string
 	Name              string
 	Slug              string
+	Domain            string
 	DefaultLanguage   string
 	StorageQuotaBytes int64
 	StorageMaxBytes   int64
+	StorageUsedBytes  int64
 	DeactivatedAt     *time.Time
 	CreatedAt         time.Time
 }
@@ -88,14 +90,17 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 	return org, nil
 }
 
-// Update mengubah name/slug organisasi -- DATABASE_SCHEMA.md §5.7 tidak
-// punya kolom logo/domain seperti wording asli S3-03 di sprint_backlog.md,
-// lihat catatan di sana.
-func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error {
+// Update mengubah name/slug/domain organisasi. `domain` (email resmi) --
+// S4G-02, Track S4G -- ditambahkan menyusul kolom `domain` (lihat migrasi
+// 20260910090000), wording asli S3-03 ("nama/logo/domain") sengaja cuma
+// mengerjakan nama/slug waktu itu karena kolomnya belum ada. `logo` TETAP
+// di luar scope (belum ada storage file organisasi). domain kosong ("")
+// disimpan sebagai NULL (opsional, sama pola description project).
+func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
-		UPDATE organizations SET name = $2, slug = $3, updated_at = NOW()
+		UPDATE organizations SET name = $2, slug = $3, domain = NULLIF($4, ''), updated_at = NOW()
 		WHERE id = $1
-	`, orgID, name, slug)
+	`, orgID, name, slug, orgDomain)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
 	}
@@ -135,9 +140,9 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 // validasi di sini yang memberi pesan error jelas (bukan constraint
 // violation mentah).
 func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error {
-	var maxBytes int64
+	var maxBytes, usedMB int64
 	var groupID string
-	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes, &groupID); err != nil {
+	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id, storage_used_mb FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes, &groupID, &usedMB); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrOrganizationNotFound)
 		}
@@ -145,6 +150,13 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 	}
 	if quotaBytes > maxBytes {
 		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrStorageQuotaExceedsMax)
+	}
+	// S4G-02, Track S4G (desain "GA Organizations.dc.html"): kuota tidak
+	// boleh diturunkan di bawah storage yang SUDAH terpakai -- kalau tidak,
+	// organisasi langsung "over quota" begitu disimpan, memblokir seluruh
+	// upload tanpa peringatan eksplisit ke GA saat submit.
+	if usedBytes := usedMB * 1024 * 1024; quotaBytes < usedBytes {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrStorageQuotaBelowUsed)
 	}
 
 	// S4P-12: tegakkan plafon groups.storage_quota_gb (fallback ke
@@ -235,7 +247,7 @@ func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executo
 // DBContextMiddleware -- query di sini polos SELECT *.
 func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]Organization, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, group_id, name, slug, default_language, storage_quota_bytes, storage_max_bytes, deactivated_at, created_at
+		SELECT id, group_id, name, slug, COALESCE(domain, ''), default_language, storage_quota_bytes, storage_max_bytes, storage_used_mb * 1024 * 1024, deactivated_at, created_at
 		FROM organizations
 		ORDER BY name
 	`)
@@ -247,7 +259,7 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]
 	orgs := make([]Organization, 0)
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.DeactivatedAt, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.Domain, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.StorageUsedBytes, &o.DeactivatedAt, &o.CreatedAt); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		orgs = append(orgs, o)
