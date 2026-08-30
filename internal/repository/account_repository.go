@@ -1047,7 +1047,13 @@ func (r *AccountRepository) ListOrgIDsForGroupAdmin(ctx context.Context, userID 
 // Dipanggil setelah password (dan MFA, kalau berlaku) lolos verifikasi --
 // bukan untuk percobaan gagal (rate-limiting percobaan gagal bukan scope
 // audit trail, lihat security-compliance.md).
-func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRole string) error {
+//
+// usedBackupCode (2026-08-30) -- true kalau MFA barusan diverifikasi lewat
+// kode cadangan (bukan OTP TOTP biasa), menulis entry audit TAMBAHAN
+// 'user.backup_code_used' -- sinyal keamanan terpisah dari 'user.login'
+// biasa karena berarti device authenticator kemungkinan hilang/tidak bisa
+// diakses, layak dipantau tersendiri di audit trail.
+func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRole string, usedBackupCode bool) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("repository.RecordLogin: begin tx: %w", err)
@@ -1059,6 +1065,11 @@ func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRol
 	}
 	if err := logAudit(ctx, tx, userID, platformRole, "user.login", userID); err != nil {
 		return fmt.Errorf("repository.RecordLogin: %w", err)
+	}
+	if usedBackupCode {
+		if err := logAudit(ctx, tx, userID, platformRole, "user.backup_code_used", userID); err != nil {
+			return fmt.Errorf("repository.RecordLogin: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

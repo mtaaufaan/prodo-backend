@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"strings"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -37,6 +38,7 @@ type mfaRepository interface {
 	EnableMFA(ctx context.Context, userID string) error
 	GetMFAStatus(ctx context.Context, userID string) (isEnabled bool, secret string, err error)
 	SaveBackupCodes(ctx context.Context, userID string, hashedCodes []string) error
+	ConsumeBackupCode(ctx context.Context, userID, codeHash string) (matched bool, err error)
 }
 
 // MFAService menghasilkan dan menyimpan secret TOTP + QR code untuk setup
@@ -117,21 +119,56 @@ func (s *MFAService) VerifyAndEnable(ctx context.Context, userID, otpCode string
 	return true, codes, nil
 }
 
-// VerifyLoginOTP memverifikasi OTP saat login (S1-17) -- BEDA dari
+// VerifyLoginOTP memverifikasi kode MFA saat login (S1-17) -- BEDA dari
 // VerifyAndEnable (S1-07): tidak pernah mengubah is_enabled, dan tidak
 // menganggap "belum pernah setup MFA" sebagai error. mfaEnabled=false
-// berarti user belum pernah setup MFA sama sekali -- otpValid tidak
-// relevan (selalu false), AuthService.VerifyMFA yang memutuskan kebijakan
-// wajib (GA) vs opsional (member) berdasarkan mfaEnabled.
-func (s *MFAService) VerifyLoginOTP(ctx context.Context, userID, otpCode string) (mfaEnabled, otpValid bool, err error) {
+// berarti user belum pernah setup MFA sama sekali -- valid tidak relevan
+// (selalu false), AuthService.VerifyMFA yang memutuskan kebijakan wajib
+// (GA/PA) vs opsional (member) berdasarkan mfaEnabled.
+//
+// code bisa berupa OTP TOTP 6 digit ATAU salah satu dari 10 kode cadangan
+// format "XXXX-XXXX" (2026-08-30, menutup gap: backup_codes sudah
+// diterbitkan+disimpan sejak awal tapi tidak ada jalur untuk memakainya
+// saat login -- docs/API_CONTRACT.md Appendix A). Dibedakan lewat bentuk
+// kode (ada strip atau tidak), BUKAN field terpisah -- pola yang sama
+// dipakai GitHub/Google, satu kotak input MFA menerima kode pemulihan
+// juga, tanpa endpoint/toggle baru. Kode cadangan HABIS SEKALI PAKAI:
+// usedBackupCode=true berarti ConsumeBackupCode barusan menghapusnya dari
+// daftar (lihat mfa_repository.go) -- caller (AuthService) memakai flag
+// ini untuk mencatat audit trail tambahan.
+func (s *MFAService) VerifyLoginOTP(ctx context.Context, userID, code string) (mfaEnabled, valid, usedBackupCode bool, err error) {
 	enabled, secret, err := s.repo.GetMFAStatus(ctx, userID)
 	if err != nil {
-		return false, false, fmt.Errorf("service.VerifyLoginOTP: %w", err)
+		return false, false, false, fmt.Errorf("service.VerifyLoginOTP: %w", err)
 	}
 	if !enabled {
-		return false, false, nil
+		return false, false, false, nil
 	}
-	return true, verifyTOTP(secret, otpCode, time.Now()), nil
+	if isBackupCodeFormat(code) {
+		matched, err := s.repo.ConsumeBackupCode(ctx, userID, hashBackupCode(normalizeBackupCode(code)))
+		if err != nil {
+			return true, false, false, fmt.Errorf("service.VerifyLoginOTP: %w", err)
+		}
+		return true, matched, matched, nil
+	}
+	return true, verifyTOTP(secret, code, time.Now()), false, nil
+}
+
+// isBackupCodeFormat -- kode cadangan SELALU mengandung satu strip di
+// posisi ke-5 ("XXXX-XXXX"), OTP TOTP TIDAK PERNAH (selalu 6 digit murni).
+// Cukup dan aman dipakai sebagai pembeda: kalau ternyata bukan kode
+// cadangan asli, ConsumeBackupCode di atas cukup gagal cocok (0 baris),
+// tidak ada celah keamanan dari false-positive deteksi bentuk ini.
+func isBackupCodeFormat(code string) bool {
+	return strings.Contains(code, "-")
+}
+
+// normalizeBackupCode -- huruf kode cadangan SELALU kapital saat dibuat
+// (backupCodeCharset), tapi keyboard HP/autocorrect bisa mengubah jadi
+// huruf kecil saat diketik ulang -- disamakan dulu sebelum hash supaya
+// tidak menolak kode yang sebenarnya valid.
+func normalizeBackupCode(code string) string {
+	return strings.ToUpper(strings.TrimSpace(code))
 }
 
 // verifyTOTP mengimplementasikan RFC 6238 (TOTP) di atas RFC 4226 (HOTP)
