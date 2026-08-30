@@ -37,6 +37,9 @@ type Organization struct {
 	StorageQuotaBytes int64
 	StorageMaxBytes   int64
 	StorageUsedBytes  int64
+	RetentionDays     int
+	WorkspaceCount    int
+	MemberCount       int
 	DeactivatedAt     *time.Time
 	CreatedAt         time.Time
 }
@@ -133,13 +136,22 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 	return nil
 }
 
-// UpdateStorageQuota mengubah storage_quota_bytes organisasi (S3-34,
-// US-011) -- divalidasi TIDAK melebihi storage_max_bytes (batas dari
-// Platform Admin, glossary.md "Storage Quota"). CHECK constraint
+// UpdateStorageQuota mengubah storage_quota_bytes + retention_days
+// organisasi (S3-34/US-011, retention ditambah S4G-03/Track S4G) --
+// digabung satu method/satu endpoint karena desain "GA Organizations.dc.html"
+// mengelompokkan keduanya dalam satu section "ALOKASI KUOTA STORAGE" dengan
+// satu tombol simpan. Kuota divalidasi TIDAK melebihi storage_max_bytes
+// (batas dari Platform Admin, glossary.md "Storage Quota"). CHECK constraint
 // ck_org_storage_quota_within_max di DB adalah jaring pengaman kedua;
 // validasi di sini yang memberi pesan error jelas (bukan constraint
-// violation mentah).
-func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error {
+// violation mentah). retentionDays divalidasi 30-365, sama batas dengan
+// CHECK constraint ck_organizations_retention_days (§5.7) -- kolom ini
+// sudah ada sejak awal tapi belum pernah ditulis kode manapun.
+func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error {
+	if retentionDays < 30 || retentionDays > 365 {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrRetentionOutOfRange)
+	}
+
 	var maxBytes, usedMB int64
 	var groupID string
 	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id, storage_used_mb FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes, &groupID, &usedMB); err != nil {
@@ -163,17 +175,15 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 	// service_tiers.max_storage_gb kalau grup belum override manual) sebagai
 	// ceiling GABUNGAN seluruh organisasi dalam grup itu -- sebelumnya cuma
 	// disimpan/ditampilkan di form Group Admin (S4P-06/07), belum ditegakkan.
-	var groupCeilingGB int
+	groupCeilingGB, err := r.groupStorageCeilingGB(ctx, exec, groupID)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
+	}
 	var otherOrgsBytes int64
 	if err := exec.QueryRow(ctx, `
-		SELECT COALESCE(g.storage_quota_gb, st.max_storage_gb, 0),
-		       COALESCE((SELECT sum(o.storage_quota_bytes) FROM organizations o
-		                 WHERE o.group_id = g.id AND o.id != $2), 0)
-		FROM groups g
-		LEFT JOIN service_tiers st ON st.id = g.tier_id
-		WHERE g.id = $1
-	`, groupID, orgID).Scan(&groupCeilingGB, &otherOrgsBytes); err != nil {
-		return fmt.Errorf("repository.UpdateStorageQuota: cek plafon grup: %w", err)
+		SELECT COALESCE(sum(storage_quota_bytes), 0) FROM organizations WHERE group_id = $1 AND id != $2
+	`, groupID, orgID).Scan(&otherOrgsBytes); err != nil {
+		return fmt.Errorf("repository.UpdateStorageQuota: cek kuota organisasi lain: %w", err)
 	}
 	groupCeilingBytes := int64(groupCeilingGB) * 1024 * 1024 * 1024
 	if groupCeilingGB > 0 && otherOrgsBytes+quotaBytes > groupCeilingBytes {
@@ -181,9 +191,9 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 	}
 
 	if _, err := exec.Exec(ctx, `
-		UPDATE organizations SET storage_quota_bytes = $2, updated_at = NOW()
+		UPDATE organizations SET storage_quota_bytes = $2, retention_days = $3, updated_at = NOW()
 		WHERE id = $1
-	`, orgID, quotaBytes); err != nil {
+	`, orgID, quotaBytes, retentionDays); err != nil {
 		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
 	}
 
@@ -191,6 +201,40 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 		return fmt.Errorf("repository.UpdateStorageQuota: audit: %w", err)
 	}
 	return nil
+}
+
+// groupStorageCeilingGB mengembalikan plafon storage grup (GB) --
+// groups.storage_quota_gb (override manual), fallback ke
+// service_tiers.max_storage_gb kalau grup belum override. Dipisah dari
+// UpdateStorageQuota (S4G-03, Track S4G) supaya bisa di-reuse List untuk
+// stat "KUOTA TERALOKASI / plafon" (desain "GA Organizations.dc.html") --
+// TANPA endpoint/tabel baru, murni reuse lookup yang sudah ada.
+func (r *OrganizationRepository) groupStorageCeilingGB(ctx context.Context, exec db.Executor, groupID string) (int, error) {
+	var ceilingGB int
+	if err := exec.QueryRow(ctx, `
+		SELECT COALESCE(g.storage_quota_gb, st.max_storage_gb, 0)
+		FROM groups g
+		LEFT JOIN service_tiers st ON st.id = g.tier_id
+		WHERE g.id = $1
+	`, groupID).Scan(&ceilingGB); err != nil {
+		return 0, fmt.Errorf("cek plafon grup: %w", err)
+	}
+	return ceilingGB, nil
+}
+
+// IsActive mengecek apakah organisasi TIDAK sedang nonaktif (S4G-04, Track
+// S4G) -- dipakai WorkspaceService.MoveWorkspace sebagai guard org tujuan
+// pindah workspace.
+func (r *OrganizationRepository) IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error) {
+	var deactivatedAt *time.Time
+	err := exec.QueryRow(ctx, `SELECT deactivated_at FROM organizations WHERE id = $1`, orgID).Scan(&deactivatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("repository.IsActive: %w", domain.ErrOrganizationNotFound)
+		}
+		return false, fmt.Errorf("repository.IsActive: %w", err)
+	}
+	return deactivatedAt == nil, nil
 }
 
 // Deactivate menyetel deactivated_at (US-007 AC: akses member diblokir,
@@ -245,29 +289,64 @@ func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executo
 // kelola, member cuma org sendiri) SEPENUHNYA ditegakkan RLS `orgs_select`
 // (S3-42) lewat exec yang session variable-nya sudah disuntik
 // DBContextMiddleware -- query di sini polos SELECT *.
-func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]Organization, error) {
+// List mengembalikan organisasi yang terlihat oleh actor, plus plafon
+// storage grup (GB, dikonversi bytes) untuk stat "KUOTA TERALOKASI /
+// plafon" (S4G-03, Track S4G, desain "GA Organizations.dc.html") --
+// ceilingBytes 0 kalau org kosong ATAU baris yang terlihat berasal dari
+// LEBIH dari satu grup (kasus Platform Admin yang lihat semua organisasi
+// lintas grup -- "satu plafon" tidak bermakna di situ, GA yang biasanya
+// lihat halaman ini SELALU discoped RLS ke satu grup saja).
+func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]Organization, int64, error) {
+	// workspace_count/member_count (S4G-03, Track S4G, desain
+	// "GA Organizations.dc.html" kolom "WS · MEMBER") -- dihitung per baris
+	// lewat subquery correlated, sama pola GetSummary, TAPI di sini
+	// multi-row -- reuse yang sama supaya tidak N+1 request GetSummary per
+	// organisasi dari FE.
 	rows, err := exec.Query(ctx, `
-		SELECT id, group_id, name, slug, COALESCE(domain, ''), default_language, storage_quota_bytes, storage_max_bytes, storage_used_mb * 1024 * 1024, deactivated_at, created_at
-		FROM organizations
-		ORDER BY name
+		SELECT o.id, o.group_id, o.name, o.slug, COALESCE(o.domain, ''), o.default_language,
+		       o.storage_quota_bytes, o.storage_max_bytes, o.storage_used_mb * 1024 * 1024, o.retention_days,
+		       COALESCE((SELECT COUNT(*) FROM workspaces w WHERE w.org_id = o.id AND w.archived_at IS NULL), 0),
+		       COALESCE((SELECT COUNT(DISTINCT wm.user_id) FROM workspace_members wm
+		                 JOIN workspaces w2 ON w2.id = wm.workspace_id WHERE w2.org_id = o.id), 0),
+		       o.deactivated_at, o.created_at
+		FROM organizations o
+		ORDER BY o.name
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("repository.List: %w", err)
+		return nil, 0, fmt.Errorf("repository.List: %w", err)
 	}
 	defer rows.Close()
 
 	orgs := make([]Organization, 0)
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.Domain, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.StorageUsedBytes, &o.DeactivatedAt, &o.CreatedAt); err != nil {
-			return nil, fmt.Errorf("repository.List: scan: %w", err)
+		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.Domain, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.StorageUsedBytes, &o.RetentionDays, &o.WorkspaceCount, &o.MemberCount, &o.DeactivatedAt, &o.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		orgs = append(orgs, o)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("repository.List: %w", err)
+		return nil, 0, fmt.Errorf("repository.List: %w", err)
 	}
-	return orgs, nil
+
+	var ceilingBytes int64
+	if len(orgs) > 0 {
+		sameGroup := true
+		for i := range orgs {
+			if orgs[i].GroupID != orgs[0].GroupID {
+				sameGroup = false
+				break
+			}
+		}
+		if sameGroup {
+			ceilingGB, err := r.groupStorageCeilingGB(ctx, exec, orgs[0].GroupID)
+			if err != nil {
+				return nil, 0, fmt.Errorf("repository.List: %w", err)
+			}
+			ceilingBytes = int64(ceilingGB) * 1024 * 1024 * 1024
+		}
+	}
+	return orgs, ceilingBytes, nil
 }
 
 // Delete menghapus organisasi permanen (S3-05, US-007 AC) -- HANYA kalau

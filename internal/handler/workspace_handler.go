@@ -193,7 +193,126 @@ func (h *WorkspaceHandler) Update(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "name": req.Name}))
 }
 
-// Deactivate menangani PUT /workspaces/:wsId/deactivate (S3-11).
+// Archive menangani PUT /workspaces/:wsId/archive (S4G-04, Track S4G,
+// DIRENAME dari Deactivate lama -- lihat komentar
+// WorkspaceRepository.Archive). ARSIP: read-only, beda dari Deactivate
+// (akses diblokir total).
+func (h *WorkspaceHandler) Archive(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Archive dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Archive dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	if err := h.workspaces.ArchiveWorkspace(c.Context(), exec, workspaceID, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal mengarsipkan workspace")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "archived": true}))
+}
+
+// Unarchive menangani PUT /workspaces/:wsId/unarchive (S4G-04, kebalikan Archive).
+func (h *WorkspaceHandler) Unarchive(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Unarchive dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Unarchive dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	if err := h.workspaces.UnarchiveWorkspace(c.Context(), exec, workspaceID, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal membatalkan arsip workspace")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "archived": false}))
+}
+
+type moveWorkspaceRequest struct {
+	TargetOrgID string `json:"target_org_id"`
+}
+
+// Move menangani PUT /workspaces/:wsId/move (S4G-04, Track S4G, desain
+// "GA Workspaces.dc.html" dropdown "ORGANISASI INDUK"). Otorisasi HANYA
+// Platform Admin/Group Admin (bukan Admin Workspace), sama pola Delete --
+// lihat komentar WorkspaceService.MoveWorkspace.
+func (h *WorkspaceHandler) Move(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Move dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Move dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	var req moveWorkspaceRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if req.TargetOrgID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "target_org_id wajib diisi", nil))
+	}
+
+	if err := h.workspaces.MoveWorkspace(c.Context(), exec, workspaceID, req.TargetOrgID, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal memindahkan workspace")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "org_id": req.TargetOrgID}))
+}
+
+type reassignAdminRequest struct {
+	AdminWorkspaceUserID string `json:"admin_workspace_user_id"`
+}
+
+// ReassignAdmin menangani PUT /workspaces/:wsId/admin (S4G-04, Track S4G,
+// desain "GA Workspaces.dc.html" "ADMIN WORKSPACE PENANGGUNG JAWAB").
+// Otorisasi PA/GA saja (bukan Admin Workspace sendiri -- reassign
+// kepemilikan admin BUKAN keputusan Admin Workspace itu sendiri).
+func (h *WorkspaceHandler) ReassignAdmin(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.ReassignAdmin dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.ReassignAdmin dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	var req reassignAdminRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if req.AdminWorkspaceUserID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "admin_workspace_user_id wajib diisi", nil))
+	}
+
+	if err := h.workspaces.ReassignAdmin(c.Context(), exec, workspaceID, req.AdminWorkspaceUserID, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal mengganti admin workspace")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "admin_workspace_user_id": req.AdminWorkspaceUserID}))
+}
+
+// Deactivate menangani PUT /workspaces/:wsId/deactivate (S4G-04, Track S4G
+// -- kolom deactivated_at BARU, lihat komentar WorkspaceRepository.Deactivate;
+// task asli S3-11 dulu menunjuk archived_at, sekarang Archive/Unarchive).
 func (h *WorkspaceHandler) Deactivate(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -280,11 +399,12 @@ func (h *WorkspaceHandler) List(c *fiber.Ctx) error {
 	for i := range list {
 		w := &list[i]
 		data[i] = fiber.Map{
-			"id":          w.ID,
-			"org_id":      w.OrgID,
-			"name":        w.Name,
-			"archived_at": w.ArchivedAt,
-			"created_at":  w.CreatedAt,
+			"id":             w.ID,
+			"org_id":         w.OrgID,
+			"name":           w.Name,
+			"archived_at":    w.ArchivedAt,
+			"deactivated_at": w.DeactivatedAt,
+			"created_at":     w.CreatedAt,
 		}
 	}
 	return c.JSON(response.Success(data))
@@ -305,11 +425,12 @@ func (h *WorkspaceHandler) Get(c *fiber.Ctx) error {
 		return h.mapWorkspaceError(c, err, "Gagal mengambil data workspace")
 	}
 	return c.JSON(response.Success(fiber.Map{
-		"id":          w.ID,
-		"org_id":      w.OrgID,
-		"name":        w.Name,
-		"archived_at": w.ArchivedAt,
-		"created_at":  w.CreatedAt,
+		"id":             w.ID,
+		"org_id":         w.OrgID,
+		"name":           w.Name,
+		"archived_at":    w.ArchivedAt,
+		"deactivated_at": w.DeactivatedAt,
+		"created_at":     w.CreatedAt,
 	}))
 }
 
@@ -327,6 +448,8 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("WORKSPACE_HAS_PROJECTS", "Workspace masih punya project aktif", nil))
 	case errors.Is(err, domain.ErrOrganizationNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
+	case errors.Is(err, domain.ErrOrganizationInactive):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_INACTIVE", "Organisasi tujuan sedang nonaktif", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))

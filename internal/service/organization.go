@@ -21,12 +21,13 @@ type organizationRepository interface {
 	Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error)
 	Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error
 	UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error
-	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error
+	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Delete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	GetSummary(ctx context.Context, exec db.Executor, orgID string) (*repository.Summary, error)
-	List(ctx context.Context, exec db.Executor) ([]repository.Organization, error)
+	List(ctx context.Context, exec db.Executor) ([]repository.Organization, int64, error)
+	IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error)
 }
 
 // OrganizationService -- S3-02/03/04/05/06, US-007. Otorisasi Platform Admin
@@ -146,9 +147,10 @@ func (s *OrganizationService) UpdateSettings(ctx context.Context, exec db.Execut
 	return nil
 }
 
-// UpdateStorageQuota mengubah kuota storage organisasi (S3-34, US-011) --
-// divalidasi tidak melebihi storage_max_bytes di repository.
-func (s *OrganizationService) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, actorID, actorRole string) error {
+// UpdateStorageQuota mengubah kuota storage + retensi organisasi (S3-34/
+// US-011, retensi ditambah S4G-03/Track S4G) -- divalidasi tidak melebihi
+// storage_max_bytes dan retensi 30-365 hari di repository.
+func (s *OrganizationService) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error {
 	if orgID == "" || quotaBytes < 0 {
 		return fmt.Errorf("service.UpdateStorageQuota: %w", domain.ErrInvalidInput)
 	}
@@ -156,7 +158,7 @@ func (s *OrganizationService) UpdateStorageQuota(ctx context.Context, exec db.Ex
 		return err
 	}
 
-	if err := s.repo.UpdateStorageQuota(ctx, exec, orgID, quotaBytes, actorID, actorRole); err != nil {
+	if err := s.repo.UpdateStorageQuota(ctx, exec, orgID, quotaBytes, retentionDays, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.UpdateStorageQuota: %w", err)
 	}
 	return nil
@@ -193,15 +195,25 @@ func (s *OrganizationService) ReactivateOrganization(ctx context.Context, exec d
 	return nil
 }
 
-// ListOrganizations mengembalikan organisasi yang terlihat oleh actor --
-// scoping sepenuhnya lewat RLS (lihat repository.List), tidak ada
-// pengecekan tambahan di sini.
-func (s *OrganizationService) ListOrganizations(ctx context.Context, exec db.Executor) ([]repository.Organization, error) {
-	orgs, err := s.repo.List(ctx, exec)
+// ListOrganizations mengembalikan organisasi yang terlihat oleh actor,
+// plus plafon storage grup (lihat repository.List) -- scoping sepenuhnya
+// lewat RLS, tidak ada pengecekan tambahan di sini.
+func (s *OrganizationService) ListOrganizations(ctx context.Context, exec db.Executor) ([]repository.Organization, int64, error) {
+	orgs, ceilingBytes, err := s.repo.List(ctx, exec)
 	if err != nil {
-		return nil, fmt.Errorf("service.ListOrganizations: %w", err)
+		return nil, 0, fmt.Errorf("service.ListOrganizations: %w", err)
 	}
-	return orgs, nil
+	return orgs, ceilingBytes, nil
+}
+
+// IsActive -- pass-through tipis ke repo (S4G-04, Track S4G), dipakai
+// WorkspaceService.MoveWorkspace untuk guard org tujuan pindah workspace.
+func (s *OrganizationService) IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error) {
+	active, err := s.repo.IsActive(ctx, exec, orgID)
+	if err != nil {
+		return false, fmt.Errorf("service.IsActive: %w", err)
+	}
+	return active, nil
 }
 
 // DeleteOrganization menghapus organisasi permanen (S3-05) -- ditolak kalau

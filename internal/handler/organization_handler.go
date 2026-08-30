@@ -149,10 +149,13 @@ func (h *OrganizationHandler) UpdateSettings(c *fiber.Ctx) error {
 
 type updateStorageQuotaRequest struct {
 	StorageQuotaBytes int64 `json:"storage_quota_bytes"`
+	RetentionDays     int   `json:"retention_days"`
 }
 
-// UpdateStorageQuota menangani PUT /organizations/:id/storage-quota
-// (S3-34, US-011).
+// UpdateStorageQuota menangani PUT /organizations/:id/storage-quota (S3-34/
+// US-011, retention_days ditambah S4G-03/Track S4G -- lihat komentar
+// OrganizationRepository.UpdateStorageQuota soal kenapa digabung satu
+// endpoint dengan kuota).
 func (h *OrganizationHandler) UpdateStorageQuota(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -171,11 +174,11 @@ func (h *OrganizationHandler) UpdateStorageQuota(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
 
-	if err := h.orgs.UpdateStorageQuota(c.Context(), exec, orgID, req.StorageQuotaBytes, actorUserID, actorRole); err != nil {
+	if err := h.orgs.UpdateStorageQuota(c.Context(), exec, orgID, req.StorageQuotaBytes, req.RetentionDays, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah kuota storage")
 	}
 
-	return c.JSON(response.Success(fiber.Map{"id": orgID, "storage_quota_bytes": req.StorageQuotaBytes}))
+	return c.JSON(response.Success(fiber.Map{"id": orgID, "storage_quota_bytes": req.StorageQuotaBytes, "retention_days": req.RetentionDays}))
 }
 
 // Deactivate menangani PUT /organizations/:id/deactivate (S3-04).
@@ -230,7 +233,7 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 
-	orgs, err := h.orgs.ListOrganizations(c.Context(), exec)
+	orgs, ceilingBytes, err := h.orgs.ListOrganizations(c.Context(), exec)
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil daftar organisasi")
 	}
@@ -248,11 +251,21 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 			"storage_quota_bytes": o.StorageQuotaBytes,
 			"storage_max_bytes":   o.StorageMaxBytes,
 			"storage_used_bytes":  o.StorageUsedBytes,
+			"retention_days":      o.RetentionDays,
+			"workspace_count":     o.WorkspaceCount,
+			"member_count":        o.MemberCount,
 			"deactivated_at":      o.DeactivatedAt,
 			"created_at":          o.CreatedAt,
 		}
 	}
-	return c.JSON(response.Success(data))
+	// S4G-03, Track S4G: response dibungkus {organizations, group_storage_ceiling_bytes}
+	// (BUKAN array polos seperti sebelumnya) -- FE punya interceptor axios
+	// yang unwrap SATU level ".data" (lib/api.ts), jadi field sibling di luar
+	// "data" akan hilang begitu saja kalau dipertahankan array-di-"data"
+	// langsung. Membungkus dalam objek supaya group_storage_ceiling_bytes
+	// (plafon storage grup, dipakai stat "KUOTA TERALOKASI / plafon") ikut
+	// sampai ke FE.
+	return c.JSON(response.Success(fiber.Map{"organizations": data, "group_storage_ceiling_bytes": ceilingBytes}))
 }
 
 // Delete menangani DELETE /organizations/:id (S3-05).
@@ -320,6 +333,8 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("GROUP_STORAGE_QUOTA_EXCEEDS_CEILING", "Total kuota seluruh organisasi dalam grup akan melebihi plafon storage grup", nil))
 	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
+	case errors.Is(err, domain.ErrRetentionOutOfRange):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("RETENTION_OUT_OF_RANGE", "Retensi harus antara 30 dan 365 hari", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))
