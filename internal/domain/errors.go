@@ -103,6 +103,11 @@ var (
 	// dari Platform Admin).
 	ErrStorageQuotaExceedsMax = errors.New("storage quota exceeds max allowed")
 
+	// ErrStorageQuotaBelowUsed dikembalikan PUT /organizations/:id/storage-quota
+	// (S4G-02, Track S4G) saat kuota yang diminta lebih kecil dari storage
+	// yang sudah terpakai organisasi ini.
+	ErrStorageQuotaBelowUsed = errors.New("storage quota below currently used storage")
+
 	// ErrGroupStorageQuotaExceedsCeiling dikembalikan PUT
 	// /organizations/:id/storage-quota (S4P-12) saat total kuota seluruh
 	// organisasi dalam satu grup (termasuk perubahan yang diminta) akan
