@@ -50,7 +50,7 @@ func (f *fakeOrganizationRepo) Create(_ context.Context, _ db.Executor, groupID,
 	return f.createdOrg, nil
 }
 
-func (f *fakeOrganizationRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
+func (f *fakeOrganizationRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _, _ string) error {
 	return f.updateErr
 }
 
@@ -141,7 +141,7 @@ func TestOrganizationService_UpdateOrganization_GroupAdminOfOrgsGroup(t *testing
 	}
 	svc := NewOrganizationService(repo)
 
-	if err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "ga-1", "group_admin"); err != nil {
+	if err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "", "ga-1", "group_admin"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestOrganizationService_UpdateOrganization_GroupAdminOfOtherGroup_Forbidden
 	}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "ga-2", "group_admin")
+	err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "", "ga-2", "group_admin")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
@@ -164,7 +164,7 @@ func TestOrganizationService_UpdateOrganization_GroupAdminOfOtherGroup_Forbidden
 func TestOrganizationService_UpdateOrganization_OrgNotFound_GroupAdmin(t *testing.T) {
 	svc := NewOrganizationService(&fakeOrganizationRepo{})
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "ga-1", "group_admin")
+	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "", "ga-1", "group_admin")
 	if !errors.Is(err, domain.ErrOrganizationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrOrganizationNotFound", err)
 	}
@@ -177,9 +177,28 @@ func TestOrganizationService_UpdateOrganization_OrgNotFound_PlatformAdmin(t *tes
 	repo := &fakeOrganizationRepo{updateErr: domain.ErrOrganizationNotFound}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "pa-1", "platform_admin")
+	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrOrganizationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrOrganizationNotFound", err)
+	}
+}
+
+func TestOrganizationService_UpdateOrganization_InvalidDomain(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
+	svc := NewOrganizationService(repo)
+
+	err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme", "acme", "not-a-domain", "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestOrganizationService_UpdateOrganization_ValidDomain(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
+	svc := NewOrganizationService(repo)
+
+	if err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme", "acme", "acme.co.id", "pa-1", "platform_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

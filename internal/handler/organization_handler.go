@@ -74,13 +74,14 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 }
 
 type updateOrganizationRequest struct {
-	Name string `json:"name"`
-	Slug string `json:"slug"`
+	Name   string `json:"name"`
+	Slug   string `json:"slug"`
+	Domain string `json:"domain"`
 }
 
-// Update menangani PUT /organizations/:id (S3-03). Field yang diedit
-// name/slug -- lihat catatan sprint_backlog.md soal wording asli
-// "nama/logo/domain" yang tidak sesuai DATABASE_SCHEMA.md §5.7.
+// Update menangani PUT /organizations/:id (S3-03, domain ditambahkan
+// S4G-02/Track S4G sesuai desain "GA Organizations.dc.html" -- lihat
+// migrasi 20260910090000).
 func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -100,6 +101,7 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Slug = strings.TrimSpace(req.Slug)
+	req.Domain = strings.TrimSpace(req.Domain)
 	if req.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "name wajib diisi", nil))
 	}
@@ -108,11 +110,11 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 			[]response.FieldError{{Field: "slug", Message: "lowercase, alphanumeric, hyphen (mis. \"acme-corp\")"}}))
 	}
 
-	if err := h.orgs.UpdateOrganization(c.Context(), exec, orgID, req.Name, req.Slug, actorUserID, actorRole); err != nil {
+	if err := h.orgs.UpdateOrganization(c.Context(), exec, orgID, req.Name, req.Slug, req.Domain, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah organisasi")
 	}
 
-	return c.JSON(response.Success(fiber.Map{"id": orgID, "name": req.Name, "slug": req.Slug}))
+	return c.JSON(response.Success(fiber.Map{"id": orgID, "name": req.Name, "slug": req.Slug, "domain": req.Domain}))
 }
 
 type updateSettingsRequest struct {
@@ -241,9 +243,11 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 			"group_id":            o.GroupID,
 			"name":                o.Name,
 			"slug":                o.Slug,
+			"domain":              o.Domain,
 			"default_language":    o.DefaultLanguage,
 			"storage_quota_bytes": o.StorageQuotaBytes,
 			"storage_max_bytes":   o.StorageMaxBytes,
+			"storage_used_bytes":  o.StorageUsedBytes,
 			"deactivated_at":      o.DeactivatedAt,
 			"created_at":          o.CreatedAt,
 		}
@@ -301,7 +305,9 @@ func (h *OrganizationHandler) Summary(c *fiber.Ctx) error {
 func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
-		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid", nil))
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- domain harus format domain valid (mis. acme.co.id)", nil))
+	case errors.Is(err, domain.ErrStorageQuotaBelowUsed):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STORAGE_QUOTA_BELOW_USED", "Kuota tidak boleh lebih kecil dari storage yang sudah terpakai", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas grup/organisasi ini.", nil))
 	case errors.Is(err, domain.ErrOrganizationNotFound):
