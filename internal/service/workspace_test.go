@@ -43,6 +43,14 @@ func (f *fakeWorkspaceRepo) GetOrgID(_ context.Context, _ db.Executor, workspace
 	return orgID, nil
 }
 
+func (f *fakeWorkspaceRepo) Get(_ context.Context, _ db.Executor, workspaceID string) (*repository.Workspace, error) {
+	orgID, ok := f.orgID[workspaceID]
+	if !ok {
+		return nil, domain.ErrWorkspaceNotFound
+	}
+	return &repository.Workspace{ID: workspaceID, OrgID: orgID}, nil
+}
+
 func (f *fakeWorkspaceRepo) Update(_ context.Context, _ db.Executor, _, _, _, _ string) error {
 	return f.updateErr
 }
