@@ -28,6 +28,9 @@ type fakeOrganizationRepo struct {
 
 	listResult []repository.Organization
 	listErr    error
+
+	isActiveResult bool
+	isActiveErr    error
 }
 
 func (f *fakeOrganizationRepo) IsGroupAdminOfGroup(_ context.Context, _ db.Executor, userID, groupID string) (bool, error) {
@@ -58,8 +61,12 @@ func (f *fakeOrganizationRepo) UpdateSettings(_ context.Context, _ db.Executor, 
 	return f.settingsErr
 }
 
-func (f *fakeOrganizationRepo) UpdateStorageQuota(_ context.Context, _ db.Executor, _ string, _ int64, _, _ string) error {
+func (f *fakeOrganizationRepo) UpdateStorageQuota(_ context.Context, _ db.Executor, _ string, _ int64, _ int, _, _ string) error {
 	return f.quotaErr
+}
+
+func (f *fakeOrganizationRepo) IsActive(_ context.Context, _ db.Executor, _ string) (bool, error) {
+	return f.isActiveResult, f.isActiveErr
 }
 
 func (f *fakeOrganizationRepo) Deactivate(_ context.Context, _ db.Executor, _, _, _ string) error {
@@ -74,8 +81,8 @@ func (f *fakeOrganizationRepo) Delete(_ context.Context, _ db.Executor, _, _, _ 
 	return f.deleteErr
 }
 
-func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor) ([]repository.Organization, error) {
-	return f.listResult, f.listErr
+func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor) ([]repository.Organization, int64, error) {
+	return f.listResult, 0, f.listErr
 }
 
 func (f *fakeOrganizationRepo) GetSummary(_ context.Context, _ db.Executor, _ string) (*repository.Summary, error) {
@@ -282,7 +289,7 @@ func TestOrganizationService_UpdateStorageQuota_ExceedsMax(t *testing.T) {
 	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, quotaErr: domain.ErrStorageQuotaExceedsMax}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 999999999999, "pa-1", "platform_admin")
+	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 999999999999, 90, "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrStorageQuotaExceedsMax) {
 		t.Errorf("err = %v, want wrapped domain.ErrStorageQuotaExceedsMax", err)
 	}
@@ -292,8 +299,31 @@ func TestOrganizationService_UpdateStorageQuota_GroupAdminNotAssigned_Forbidden(
 	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 1024, "ga-1", "group_admin")
+	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 1024, 90, "ga-1", "group_admin")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
+	}
+}
+
+func TestOrganizationService_UpdateStorageQuota_RetentionOutOfRange(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, quotaErr: domain.ErrRetentionOutOfRange}
+	svc := NewOrganizationService(repo)
+
+	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 1024, 400, "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrRetentionOutOfRange) {
+		t.Errorf("err = %v, want wrapped domain.ErrRetentionOutOfRange", err)
+	}
+}
+
+func TestOrganizationService_IsActive_PassThrough(t *testing.T) {
+	repo := &fakeOrganizationRepo{isActiveResult: true}
+	svc := NewOrganizationService(repo)
+
+	active, err := svc.IsActive(context.Background(), nil, "org-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !active {
+		t.Errorf("active = %v, want true", active)
 	}
 }

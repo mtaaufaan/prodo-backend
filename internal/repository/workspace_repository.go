@@ -24,12 +24,19 @@ func NewWorkspaceRepository() *WorkspaceRepository {
 }
 
 // Workspace -- subset kolom §5.9 yang dipakai response S3-09/10/11/12.
+// DeactivatedAt (S4G-04, Track S4G, migrasi 20260911090000) -- status baru
+// TERPISAH dari ArchivedAt: ArchivedAt = ARSIP (read-only, project/task
+// tetap bisa dibuka), DeactivatedAt = NONAKTIF (akses seluruh member
+// diblokir). Sebelumnya cuma ada satu kolom (archived_at) dipakai untuk
+// kedua arti sekaligus lewat method bernama Deactivate/Reactivate -- lihat
+// catatan Archive/Unarchive di bawah soal rename.
 type Workspace struct {
-	ID         string
-	OrgID      string
-	Name       string
-	ArchivedAt *time.Time
-	CreatedAt  time.Time
+	ID            string
+	OrgID         string
+	Name          string
+	ArchivedAt    *time.Time
+	DeactivatedAt *time.Time
+	CreatedAt     time.Time
 }
 
 // Create menyimpan workspace baru + audit trail (S3-09). Assignment Admin
@@ -96,24 +103,29 @@ func (r *WorkspaceRepository) Update(ctx context.Context, exec db.Executor, work
 	return nil
 }
 
-// Deactivate menyetel archived_at (S3-11) -- soft, akses SELURUH member
-// diblokir (US-008 AC), data tetap tersimpan. Tidak idempotent, sama pola
-// OrganizationRepository.Deactivate.
-func (r *WorkspaceRepository) Deactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+// Archive menyetel archived_at (S3-11, DIRENAME S4G-04/Track S4G dari
+// Deactivate) -- ARSIP, sesuai desain "GA Workspaces.dc.html": read-only,
+// project/task tetap bisa DIBUKA, storage tetap dihitung pada kuota
+// organisasi. Nama method lama (Deactivate/Reactivate) menyesatkan --
+// kolom archived_at ini SEBENARNYA berarti "arsip", bukan "nonaktif
+// blokir akses" seperti nama methodnya dulu. Lihat Deactivate/Reactivate
+// baru di bawah untuk arti "nonaktif" yang sesungguhnya (kolom
+// deactivated_at baru, migrasi 20260911090000).
+func (r *WorkspaceRepository) Archive(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
 	return r.setArchived(ctx, exec, workspaceID, actorID, actorRole, true)
 }
 
-// Reactivate mengosongkan archived_at (kebalikan Deactivate).
-func (r *WorkspaceRepository) Reactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+// Unarchive mengosongkan archived_at (kebalikan Archive).
+func (r *WorkspaceRepository) Unarchive(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
 	return r.setArchived(ctx, exec, workspaceID, actorID, actorRole, false)
 }
 
 func (r *WorkspaceRepository) setArchived(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string, archive bool) error {
-	action := "workspace.reactivated"
+	action := "workspace.unarchived"
 	var tag pgconn.CommandTag
 	var err error
 	if archive {
-		action = "workspace.deactivated"
+		action = "workspace.archived"
 		tag, err = exec.Exec(ctx, `
 			UPDATE workspaces SET archived_at = NOW(), updated_at = NOW()
 			WHERE id = $1 AND archived_at IS NULL
@@ -137,6 +149,85 @@ func (r *WorkspaceRepository) setArchived(ctx context.Context, exec db.Executor,
 	}
 	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, action, workspaceID, orgID); err != nil {
 		return fmt.Errorf("repository.setArchived: audit: %w", err)
+	}
+	return nil
+}
+
+// Deactivate menyetel deactivated_at (S4G-04, Track S4G, migrasi
+// 20260911090000) -- NONAKTIF sesuai desain: akses SELURUH member
+// diblokir, data tidak dihapus. Kolom baru, TERPISAH dari archived_at
+// (ARSIP, lihat Archive di atas) -- keduanya independen (workspace bisa
+// ARSIP dan NONAKTIF sekaligus, walau UI cuma expose satu toggle per
+// state pada satu waktu). Flag status saja, TIDAK ditegakkan sebagai
+// blokir akses nyata di middleware/RLS mana pun -- sama persis pola
+// organizations.deactivated_at (OrganizationRepository.Deactivate) yang
+// juga belum ditegakkan, jadi bukan gap baru, konsisten dengan yang sudah
+// berjalan.
+func (r *WorkspaceRepository) Deactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	return r.setDeactivated(ctx, exec, workspaceID, actorID, actorRole, true)
+}
+
+// Reactivate mengosongkan deactivated_at (kebalikan Deactivate).
+func (r *WorkspaceRepository) Reactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	return r.setDeactivated(ctx, exec, workspaceID, actorID, actorRole, false)
+}
+
+func (r *WorkspaceRepository) setDeactivated(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string, deactivate bool) error {
+	action := "workspace.reactivated"
+	var tag pgconn.CommandTag
+	var err error
+	if deactivate {
+		action = "workspace.deactivated"
+		tag, err = exec.Exec(ctx, `
+			UPDATE workspaces SET deactivated_at = NOW(), updated_at = NOW()
+			WHERE id = $1 AND deactivated_at IS NULL
+		`, workspaceID)
+	} else {
+		tag, err = exec.Exec(ctx, `
+			UPDATE workspaces SET deactivated_at = NULL, updated_at = NOW()
+			WHERE id = $1 AND deactivated_at IS NOT NULL
+		`, workspaceID)
+	}
+	if err != nil {
+		return fmt.Errorf("repository.setDeactivated: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.setDeactivated: %w", domain.ErrWorkspaceNotFound)
+	}
+
+	orgID, err := r.GetOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("repository.setDeactivated: %w", err)
+	}
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, action, workspaceID, orgID); err != nil {
+		return fmt.Errorf("repository.setDeactivated: audit: %w", err)
+	}
+	return nil
+}
+
+// MoveToOrg memindahkan workspace ke organisasi lain (S4G-04, Track S4G,
+// desain "GA Workspaces.dc.html" -- dropdown "ORGANISASI INDUK"). TANPA
+// guard kuota storage tujuan -- workspace tidak punya angka storage
+// sendiri di skema saat ini (storage cuma dihitung di level organisasi),
+// dan satu-satunya cara menghitungnya per-workspace butuh tabel
+// task_attachments+tasks yang belum ada. Dicatat sebagai
+// implementation_gaps.md IG-33 (perluasan IG-19), dikonfirmasi user
+// 2026-08-30 -- lihat komentar WorkspaceService.MoveWorkspace untuk
+// pengecekan otorisasi+status org yang MEMANG ditegakkan di sini.
+func (r *WorkspaceRepository) MoveToOrg(ctx context.Context, exec db.Executor, workspaceID, targetOrgID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE workspaces SET org_id = $2, updated_at = NOW()
+		WHERE id = $1
+	`, workspaceID, targetOrgID)
+	if err != nil {
+		return fmt.Errorf("repository.MoveToOrg: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.MoveToOrg: %w", domain.ErrWorkspaceNotFound)
+	}
+
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.moved", workspaceID, targetOrgID); err != nil {
+		return fmt.Errorf("repository.MoveToOrg: audit: %w", err)
 	}
 	return nil
 }
@@ -187,8 +278,8 @@ func (r *WorkspaceRepository) Delete(ctx context.Context, exec db.Executor, work
 func (r *WorkspaceRepository) Get(ctx context.Context, exec db.Executor, workspaceID string) (*Workspace, error) {
 	var w Workspace
 	err := exec.QueryRow(ctx, `
-		SELECT id, org_id, name, archived_at, created_at FROM workspaces WHERE id = $1
-	`, workspaceID).Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.CreatedAt)
+		SELECT id, org_id, name, archived_at, deactivated_at, created_at FROM workspaces WHERE id = $1
+	`, workspaceID).Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.DeactivatedAt, &w.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.Get: %w", domain.ErrWorkspaceNotFound)
@@ -205,7 +296,7 @@ func (r *WorkspaceRepository) Get(ctx context.Context, exec db.Executor, workspa
 // bukan filter WHERE eksplisit di sini).
 func (r *WorkspaceRepository) List(ctx context.Context, exec db.Executor, orgID string) ([]Workspace, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, org_id, name, archived_at, created_at
+		SELECT id, org_id, name, archived_at, deactivated_at, created_at
 		FROM workspaces
 		WHERE org_id = $1
 		ORDER BY name
@@ -218,7 +309,7 @@ func (r *WorkspaceRepository) List(ctx context.Context, exec db.Executor, orgID 
 	list := make([]Workspace, 0)
 	for rows.Next() {
 		var w Workspace
-		if err := rows.Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.CreatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.DeactivatedAt, &w.CreatedAt); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		list = append(list, w)
