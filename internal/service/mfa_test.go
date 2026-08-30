@@ -14,6 +14,10 @@ type fakeMFARepository struct {
 	enabled          bool
 	err              error
 	savedBackupCodes []string
+
+	consumeBackupCodeResult bool
+	consumeBackupCodeErr    error
+	consumedCodeHash        string
 }
 
 func (f *fakeMFARepository) SaveTOTPSecret(_ context.Context, userID, secret string) error {
@@ -38,6 +42,11 @@ func (f *fakeMFARepository) GetMFAStatus(_ context.Context, _ string) (isEnabled
 func (f *fakeMFARepository) SaveBackupCodes(_ context.Context, _ string, hashedCodes []string) error {
 	f.savedBackupCodes = hashedCodes
 	return f.err
+}
+
+func (f *fakeMFARepository) ConsumeBackupCode(_ context.Context, _, codeHash string) (bool, error) {
+	f.consumedCodeHash = codeHash
+	return f.consumeBackupCodeResult, f.consumeBackupCodeErr
 }
 
 func TestMFAService_SetupTOTP_Success(t *testing.T) {
@@ -98,6 +107,75 @@ func TestMFAService_VerifyAndEnable_GeneratesBackupCodes(t *testing.T) {
 		if hashed == backupCodes[i] {
 			t.Error("kode cadangan tersimpan plaintext, harusnya sudah di-hash")
 		}
+	}
+}
+
+func TestMFAService_VerifyLoginOTP_TOTPPathUnaffected(t *testing.T) {
+	secret := generateTestTOTPSecret(t)
+	repo := &fakeMFARepository{enabled: true, savedSecret: secret}
+	svc := NewMFAService(repo)
+
+	enabled, valid, usedBackupCode, err := svc.VerifyLoginOTP(context.Background(), "user-1", currentTOTPCode(t, secret))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled || !valid {
+		t.Fatalf("enabled=%v valid=%v, want true/true untuk OTP TOTP valid", enabled, valid)
+	}
+	if usedBackupCode {
+		t.Error("usedBackupCode harus false untuk kode TOTP biasa (tidak ada strip)")
+	}
+	if repo.consumedCodeHash != "" {
+		t.Error("ConsumeBackupCode tidak boleh dipanggil untuk kode TOTP")
+	}
+}
+
+func TestMFAService_VerifyLoginOTP_BackupCodeMatched(t *testing.T) {
+	repo := &fakeMFARepository{enabled: true, consumeBackupCodeResult: true}
+	svc := NewMFAService(repo)
+
+	enabled, valid, usedBackupCode, err := svc.VerifyLoginOTP(context.Background(), "user-1", "abcd-1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled || !valid || !usedBackupCode {
+		t.Fatalf("enabled=%v valid=%v usedBackupCode=%v, want true/true/true untuk kode cadangan cocok", enabled, valid, usedBackupCode)
+	}
+	// huruf kecil harus dinormalisasi ke kapital sebelum di-hash -- kalau
+	// tidak, hash yang dicocokkan ke DB tidak akan pernah ketemu (kode
+	// cadangan disimpan hash dari bentuk KAPITAL, lihat generateBackupCode).
+	wantHash := hashBackupCode("ABCD-1234")
+	if repo.consumedCodeHash != wantHash {
+		t.Errorf("hash yang dicocokkan = %q, want %q (huruf kecil harus dinormalisasi kapital)", repo.consumedCodeHash, wantHash)
+	}
+}
+
+func TestMFAService_VerifyLoginOTP_BackupCodeWrong(t *testing.T) {
+	repo := &fakeMFARepository{enabled: true, consumeBackupCodeResult: false}
+	svc := NewMFAService(repo)
+
+	_, valid, usedBackupCode, err := svc.VerifyLoginOTP(context.Background(), "user-1", "wxyz-9999")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if valid || usedBackupCode {
+		t.Fatalf("valid=%v usedBackupCode=%v, want false/false untuk kode cadangan yang tidak cocok/sudah dipakai", valid, usedBackupCode)
+	}
+}
+
+func TestMFAService_VerifyLoginOTP_NotEnabled(t *testing.T) {
+	repo := &fakeMFARepository{enabled: false}
+	svc := NewMFAService(repo)
+
+	enabled, valid, usedBackupCode, err := svc.VerifyLoginOTP(context.Background(), "user-1", "abcd-1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled || valid || usedBackupCode {
+		t.Fatalf("enabled=%v valid=%v usedBackupCode=%v, want false/false/false kalau MFA belum pernah diaktifkan", enabled, valid, usedBackupCode)
+	}
+	if repo.consumedCodeHash != "" {
+		t.Error("ConsumeBackupCode tidak boleh dipanggil kalau MFA belum aktif")
 	}
 }
 

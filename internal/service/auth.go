@@ -20,7 +20,7 @@ type authRepository interface {
 	FindUserIDByProviderSub(ctx context.Context, providerSub string) (string, error)
 	FindUserByID(ctx context.Context, userID string) (*repository.LoginUserRecord, error)
 	CreateSSOUser(ctx context.Context, email, displayName, providerSub string) (*repository.LoginUserRecord, error)
-	RecordLogin(ctx context.Context, userID, platformRole string) error
+	RecordLogin(ctx context.Context, userID, platformRole string, usedBackupCode bool) error
 
 	// ListOrgIDsForGroupAdmin -- S3-38, dasar klaim JWT prodo_org_ids.
 	ListOrgIDsForGroupAdmin(ctx context.Context, userID string) ([]string, error)
@@ -170,25 +170,30 @@ func (s *AuthService) syncKeycloakClaims(ctx context.Context, user *repository.L
 // tidak konsisten -> domain.ErrMFASetupRequired (caller menerbitkan
 // tantangan setup, bukan menolak). Member yang belum setup MFA -> lolos
 // tanpa OTP (opsional). Kalau MFA aktif dan kode salah -> domain.ErrInvalidOTP.
-func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin, isPlatformAdmin bool, otpCode string) error {
-	enabled, valid, err := s.mfa.VerifyLoginOTP(ctx, userID, otpCode)
+//
+// usedBackupCode (2026-08-30) -- true kalau code yang diverifikasi ternyata
+// kode cadangan (bukan OTP TOTP biasa), diteruskan ke Login() supaya
+// dicatat sebagai audit trail tambahan (user.backup_code_used) -- sinyal
+// keamanan "device authenticator kemungkinan hilang/tidak bisa diakses".
+func (s *AuthService) VerifyMFA(ctx context.Context, userID string, isGroupAdmin, isPlatformAdmin bool, code string) (usedBackupCode bool, err error) {
+	enabled, valid, usedBackupCode, err := s.mfa.VerifyLoginOTP(ctx, userID, code)
 	if err != nil {
-		return fmt.Errorf("service.VerifyMFA: %w", err)
+		return false, fmt.Errorf("service.VerifyMFA: %w", err)
 	}
 	if !enabled {
 		switch {
 		case isGroupAdmin:
-			return fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFARequired)
+			return false, fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFARequired)
 		case isPlatformAdmin:
-			return fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFASetupRequired)
+			return false, fmt.Errorf("service.VerifyMFA: %w", domain.ErrMFASetupRequired)
 		default:
-			return nil
+			return false, nil
 		}
 	}
 	if !valid {
-		return fmt.Errorf("service.VerifyMFA: %w", domain.ErrInvalidOTP)
+		return false, fmt.Errorf("service.VerifyMFA: %w", domain.ErrInvalidOTP)
 	}
-	return nil
+	return usedBackupCode, nil
 }
 
 // Login adalah orkestrasi penuh POST /auth/login (S1-18, US-001): verifikasi
@@ -210,7 +215,8 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userA
 			return nil, nil, err
 		}
 	}
-	if err := s.VerifyMFA(ctx, result.User.ID, isGroupAdmin, isPlatformAdmin, otpCode); err != nil {
+	usedBackupCode, err := s.VerifyMFA(ctx, result.User.ID, isGroupAdmin, isPlatformAdmin, otpCode)
+	if err != nil {
 		if errors.Is(err, domain.ErrMFASetupRequired) {
 			challenge, setupErr := s.mfa.SetupTOTP(ctx, result.User.ID, result.User.Email)
 			if setupErr != nil {
@@ -225,7 +231,7 @@ func (s *AuthService) Login(ctx context.Context, email, password, otpCode, userA
 		return nil, nil, err
 	}
 
-	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole); err != nil {
+	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole, usedBackupCode); err != nil {
 		s.logger.Error("login berhasil tapi gagal mencatat audit trail",
 			zap.String("user_id", result.User.ID), zap.Error(err))
 		return nil, nil, fmt.Errorf("service.Login: %w", err)
@@ -356,7 +362,7 @@ func (s *AuthService) CompletePlatformAdminMFASetup(ctx context.Context, email, 
 		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", domain.ErrInvalidOTP)
 	}
 
-	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole); err != nil {
+	if err := s.repo.RecordLogin(ctx, result.User.ID, result.User.PlatformRole, false); err != nil {
 		s.logger.Error("setup MFA PA berhasil tapi gagal mencatat audit trail",
 			zap.String("user_id", result.User.ID), zap.Error(err))
 		return nil, fmt.Errorf("service.CompletePlatformAdminMFASetup: %w", err)
