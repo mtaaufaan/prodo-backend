@@ -138,6 +138,7 @@ func run() error {
 	organizationRepo := repository.NewOrganizationRepository()
 	groupRepo := repository.NewGroupRepository()
 	projectMemberRepo := repository.NewProjectMemberRepository()
+	projectRepo := repository.NewProjectRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -152,6 +153,7 @@ func run() error {
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
+	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -179,6 +181,7 @@ func run() error {
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
 	groupHandler := handler.NewGroupHandler(groupSvc, logger)
 	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
+	projectHandler := handler.NewProjectHandler(projectSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -274,6 +277,14 @@ func run() error {
 	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
 	// workspace boleh lihat daftar member workspace mereka sendiri.
 	v1.Get("/workspaces/:wsId/members", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.ListMembers)
+	// S4-04 prasyarat: nama workspace untuk header WorkspaceLayout, sama
+	// gate seperti ListMembers (semua role workspace boleh lihat).
+	v1.Get("/workspaces/:wsId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.Get)
+	// S4-02/03/04, US-012 (AW Add Project.dc.html/AW Projects.dc.html):
+	// create dibatasi AW/PM (pemilik menu "Project" di Master UI User),
+	// list boleh seluruh role workspace (sama pola ListMembers di atas).
+	v1.Post("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager"), projectHandler.Create)
+	v1.Get("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), projectHandler.List)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	v1.Post("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CreateInvitations)
@@ -328,6 +339,15 @@ func run() error {
 	// projects/project_members). TANPA middleware role -- target scope-nya
 	// projectID, aktor sah (AW/PM) platform_role-nya "member" biasa.
 	// Otorisasi penuh di ProjectMemberService.
+	// S4-02/03, US-012. TANPA middleware role (route ini tidak punya
+	// :wsId) -- otorisasi penuh di ProjectService (AW/PM/GA/PA untuk
+	// Update/Archive/Delete, GA/PA saja untuk Restore -- lihat komentar
+	// ProjectService.authorizeOrgOnly).
+	v1.Put("/projects/:id", jwtAuth, dbCtx, projectHandler.Update)
+	v1.Put("/projects/:id/archive", jwtAuth, dbCtx, projectHandler.Archive)
+	v1.Put("/projects/:id/unarchive", jwtAuth, dbCtx, projectHandler.Unarchive)
+	v1.Delete("/projects/:id", jwtAuth, dbCtx, projectHandler.Delete)
+	v1.Post("/projects/:id/restore", jwtAuth, dbCtx, projectHandler.Restore)
 	v1.Get("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.ListMembers)
 	v1.Post("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.AddMember)
 	v1.Put("/projects/:id/members/:userId/role", jwtAuth, dbCtx, projectMemberHandler.UpdateMemberRole)

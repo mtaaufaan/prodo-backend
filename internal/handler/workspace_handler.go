@@ -290,6 +290,29 @@ func (h *WorkspaceHandler) List(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
+// Get menangani GET /workspaces/:wsId (S4-04 prasyarat -- nama workspace
+// untuk header WorkspaceLayout, sebelumnya cuma ada List per org).
+func (h *WorkspaceHandler) Get(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Get dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	w, err := h.workspaces.GetWorkspace(c.Context(), exec, workspaceID)
+	if err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal mengambil data workspace")
+	}
+	return c.JSON(response.Success(fiber.Map{
+		"id":          w.ID,
+		"org_id":      w.OrgID,
+		"name":        w.Name,
+		"archived_at": w.ArchivedAt,
+		"created_at":  w.CreatedAt,
+	}))
+}
+
 func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
