@@ -59,7 +59,22 @@ func DBContextMiddleware(pool *pgxpool.Pool, users UserResolver) fiber.Handler {
 
 		handlerErr := c.Next()
 
-		if handlerErr != nil {
+		// Handler di codebase ini menandai kegagalan dengan menulis response
+		// JSON error lewat mapError (c.Status(4xx/5xx).JSON(...)) dan
+		// mengembalikan nil ke Fiber -- BUKAN dengan mengembalikan Go error
+		// literal. handlerErr saja karena itu SELALU nil untuk kegagalan
+		// bisnis biasa (validasi, conflict, dsb.), sehingga versi lama di
+		// sini selalu commit walau responsenya 4xx/5xx -- ditemukan S4G-05
+		// lewat POST /organizations yang menulis (INSERT) sebelum
+		// memvalidasi kuota: percobaan yang divalidasi GAGAL (422) tetap
+		// commit organisasi dengan kuota/retensi default, DAN percobaan
+		// berikutnya kena "current transaction is aborted" saat COMMIT
+		// (Postgres mengabort seluruh transaksi begitu satu statement error,
+		// mis. unique violation slug) -- menutupi response asli (409) dengan
+		// 500 generik "Gagal menyimpan perubahan". Cek status response,
+		// bukan cuma handlerErr, supaya rollback sesuai intent asli komentar
+		// method ini ("rollback kalau error").
+		if handlerErr != nil || c.Response().StatusCode() >= fiber.StatusBadRequest {
 			tx.Rollback(c.Context()) //nolint:errcheck // request sudah gagal, rollback best-effort
 			return handlerErr
 		}

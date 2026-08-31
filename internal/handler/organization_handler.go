@@ -28,12 +28,18 @@ func NewOrganizationHandler(orgs *service.OrganizationService, logger *zap.Logge
 }
 
 type createOrganizationRequest struct {
-	GroupID string `json:"group_id"`
-	Name    string `json:"name"`
-	Slug    string `json:"slug"`
+	GroupID           string `json:"group_id"`
+	Name              string `json:"name"`
+	Slug              string `json:"slug"`
+	Domain            string `json:"domain"`
+	DefaultLanguage   string `json:"default_language"`
+	StorageQuotaBytes int64  `json:"storage_quota_bytes"`
+	RetentionDays     int    `json:"retention_days"`
 }
 
-// Create menangani POST /organizations (S3-02).
+// Create menangani POST /organizations (S3-02, domain/default_language/
+// storage_quota_bytes/retention_days ditambahkan S4G-05/Track S4G sesuai
+// desain "GA Add Organization.dc.html" -- satu form, satu submit).
 func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -52,6 +58,7 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Slug = strings.TrimSpace(req.Slug)
+	req.Domain = strings.TrimSpace(req.Domain)
 	if req.GroupID == "" || req.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "group_id dan name wajib diisi", nil))
 	}
@@ -60,16 +67,20 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 			[]response.FieldError{{Field: "slug", Message: "lowercase, alphanumeric, hyphen (mis. \"acme-corp\")"}}))
 	}
 
-	org, err := h.orgs.CreateOrganization(c.Context(), exec, req.GroupID, req.Name, req.Slug, actorUserID, actorRole)
+	org, err := h.orgs.CreateOrganization(c.Context(), exec, req.GroupID, req.Name, req.Slug, req.Domain, req.DefaultLanguage, req.StorageQuotaBytes, req.RetentionDays, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal membuat organisasi")
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
-		"id":       org.ID,
-		"group_id": org.GroupID,
-		"name":     org.Name,
-		"slug":     org.Slug,
+		"id":                  org.ID,
+		"group_id":            org.GroupID,
+		"name":                org.Name,
+		"slug":                org.Slug,
+		"domain":              org.Domain,
+		"default_language":    org.DefaultLanguage,
+		"storage_quota_bytes": org.StorageQuotaBytes,
+		"retention_days":      org.RetentionDays,
 	}))
 }
 

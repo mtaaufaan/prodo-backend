@@ -18,7 +18,7 @@ import (
 type organizationRepository interface {
 	IsGroupAdminOfGroup(ctx context.Context, exec db.Executor, userID, groupID string) (bool, error)
 	GetGroupID(ctx context.Context, exec db.Executor, orgID string) (string, error)
-	Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error)
+	Create(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*repository.Organization, error)
 	Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error
 	UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error
 	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error
@@ -90,15 +90,24 @@ func (s *OrganizationService) AuthorizeOrgAccess(ctx context.Context, exec db.Ex
 
 // CreateOrganization membuat organisasi baru (S3-02). name/slug wajib diisi;
 // slug divalidasi format DI HANDLER (validator.IsValidSlug), bukan di sini.
-func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error) {
-	if groupID == "" || name == "" || slug == "" {
+// domain/defaultLanguage/quotaBytes/retentionDays ditambahkan S4G-05 (Track
+// S4G, desain "GA Add Organization.dc.html") -- lihat komentar
+// OrganizationRepository.Create soal reuse validasi UpdateStorageQuota.
+func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*repository.Organization, error) {
+	if groupID == "" || name == "" || slug == "" || quotaBytes <= 0 {
+		return nil, fmt.Errorf("service.CreateOrganization: %w", domain.ErrInvalidInput)
+	}
+	if orgDomain != "" && !orgDomainPattern.MatchString(orgDomain) {
+		return nil, fmt.Errorf("service.CreateOrganization: %w", domain.ErrInvalidInput)
+	}
+	if !validOrgLanguages[defaultLanguage] {
 		return nil, fmt.Errorf("service.CreateOrganization: %w", domain.ErrInvalidInput)
 	}
 	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
 		return nil, err
 	}
 
-	org, err := s.repo.Create(ctx, exec, groupID, name, slug, actorID, actorRole)
+	org, err := s.repo.Create(ctx, exec, groupID, name, slug, orgDomain, defaultLanguage, quotaBytes, retentionDays, actorID, actorRole)
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateOrganization: %w", err)
 	}

@@ -45,11 +45,11 @@ func (f *fakeOrganizationRepo) GetGroupID(_ context.Context, _ db.Executor, orgI
 	return groupID, nil
 }
 
-func (f *fakeOrganizationRepo) Create(_ context.Context, _ db.Executor, groupID, name, slug, _, _ string) (*repository.Organization, error) {
+func (f *fakeOrganizationRepo) Create(_ context.Context, _ db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, _, _ string) (*repository.Organization, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	f.createdOrg = &repository.Organization{ID: "org-new", GroupID: groupID, Name: name, Slug: slug}
+	f.createdOrg = &repository.Organization{ID: "org-new", GroupID: groupID, Name: name, Slug: slug, Domain: orgDomain, DefaultLanguage: defaultLanguage, StorageQuotaBytes: quotaBytes, RetentionDays: retentionDays}
 	return f.createdOrg, nil
 }
 
@@ -93,7 +93,7 @@ func TestOrganizationService_CreateOrganization_PlatformAdminBypass(t *testing.T
 	repo := &fakeOrganizationRepo{}
 	svc := NewOrganizationService(repo)
 
-	org, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "pa-1", "platform_admin")
+	org, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "", "id", 1_000_000_000, 90, "pa-1", "platform_admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestOrganizationService_CreateOrganization_GroupAdminAssigned(t *testing.T)
 	repo := &fakeOrganizationRepo{gaGroups: map[string]bool{"ga-1:group-1": true}}
 	svc := NewOrganizationService(repo)
 
-	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "ga-1", "group_admin")
+	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "", "id", 1_000_000_000, 90, "ga-1", "group_admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestOrganizationService_CreateOrganization_GroupAdminNotAssigned_Forbidden(
 	repo := &fakeOrganizationRepo{gaGroups: map[string]bool{}}
 	svc := NewOrganizationService(repo)
 
-	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "ga-2", "group_admin")
+	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "", "id", 1_000_000_000, 90, "ga-2", "group_admin")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
@@ -126,7 +126,7 @@ func TestOrganizationService_CreateOrganization_MemberForbidden(t *testing.T) {
 	repo := &fakeOrganizationRepo{}
 	svc := NewOrganizationService(repo)
 
-	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "member-1", "member")
+	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "", "id", 1_000_000_000, 90, "member-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
@@ -135,7 +135,25 @@ func TestOrganizationService_CreateOrganization_MemberForbidden(t *testing.T) {
 func TestOrganizationService_CreateOrganization_MissingFields(t *testing.T) {
 	svc := NewOrganizationService(&fakeOrganizationRepo{})
 
-	_, err := svc.CreateOrganization(context.Background(), nil, "", "Acme", "acme", "pa-1", "platform_admin")
+	_, err := svc.CreateOrganization(context.Background(), nil, "", "Acme", "acme", "", "id", 1_000_000_000, 90, "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestOrganizationService_CreateOrganization_InvalidLanguage(t *testing.T) {
+	svc := NewOrganizationService(&fakeOrganizationRepo{})
+
+	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "", "fr", 1_000_000_000, 90, "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestOrganizationService_CreateOrganization_InvalidDomain(t *testing.T) {
+	svc := NewOrganizationService(&fakeOrganizationRepo{})
+
+	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "not-a-domain", "id", 1_000_000_000, 90, "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
 	}

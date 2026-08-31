@@ -75,14 +75,22 @@ func (r *OrganizationRepository) GetGroupID(ctx context.Context, exec db.Executo
 
 // Create menyimpan organisasi baru + audit trail. Atomicity dijamin
 // transaksi request-scoped yang dibawa exec (S3-42, pola sama S2-11) --
-// bukan transaksi lokal di sini lagi.
-func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*Organization, error) {
-	org := &Organization{GroupID: groupID, Name: name, Slug: slug}
+// bukan transaksi lokal di sini lagi. domain/defaultLanguage/quotaBytes/
+// retentionDays ditambahkan S4G-05 (Track S4G, desain
+// "GA Add Organization.dc.html") -- sebelumnya Create cuma menyimpan
+// group_id/name/slug, memaksa GA mengisi kuota/retensi/bahasa/domain lewat
+// panggilan Update terpisah setelah organisasi dibuat (tidak sesuai alur
+// desain, satu form sekali submit). Kuota/retensi divalidasi lewat
+// UpdateStorageQuota yang sudah ada (reuse penuh: cek storage_max_bytes,
+// plafon storage grup gabungan) -- kalau validasi gagal, INSERT ini ikut
+// roll back bersama transaksi request-scoped.
+func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*Organization, error) {
+	org := &Organization{GroupID: groupID, Name: name, Slug: slug, Domain: orgDomain, DefaultLanguage: defaultLanguage}
 	err := exec.QueryRow(ctx, `
-		INSERT INTO organizations (group_id, name, slug)
-		VALUES ($1, $2, $3)
+		INSERT INTO organizations (group_id, name, slug, domain, default_language)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5::org_language)
 		RETURNING id, created_at
-	`, groupID, name, slug).Scan(&org.ID, &org.CreatedAt)
+	`, groupID, name, slug, orgDomain, defaultLanguage).Scan(&org.ID, &org.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
 	}
@@ -90,6 +98,13 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.created", org.ID); err != nil {
 		return nil, fmt.Errorf("repository.Create: audit: %w", err)
 	}
+
+	if err := r.UpdateStorageQuota(ctx, exec, org.ID, quotaBytes, retentionDays, actorID, actorRole); err != nil {
+		return nil, fmt.Errorf("repository.Create: %w", err)
+	}
+	org.StorageQuotaBytes = quotaBytes
+	org.RetentionDays = retentionDays
+
 	return org, nil
 }
 
