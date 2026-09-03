@@ -331,10 +331,10 @@ func (r *WorkspaceRepository) List(ctx context.Context, exec db.Executor, orgID 
 // py FK ke tabel tasks yang belum ada), lihat implementation_gaps.md IG-19.
 type WorkspaceListRow struct {
 	Workspace
-	OrgName           string
-	AdminName         *string
-	AdminEmail        *string
-	StorageUsedBytes  int64
+	OrgName              string
+	AdminName            *string
+	AdminEmail           *string
+	StorageUsedBytes     int64
 	OrgStorageQuotaBytes int64
 }
 
