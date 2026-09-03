@@ -9,12 +9,19 @@ import (
 )
 
 // GroupDirectoryEntry -- satu baris GET /platform/groups (S4P-34, US-083).
+// MinRetentionDays/MaxRetentionDays (S4G-08, Track S4G) -- plafon retensi
+// tier grup ini, di-clamp [30,365] (sama logika
+// OrganizationRepository.groupRetentionRange) -- dipakai FE menampilkan
+// hint "RANGE {min}-{max} (BATAS TIER {nama})" di form Buat/Kelola
+// Organisasi (desain "GA Add Organization.dc.html").
 type GroupDirectoryEntry struct {
-	ID       string
-	Name     string
-	TierName string
-	GANames  string // gabungan nama GA pengelola, dipisah ", " (bisa lebih dari satu)
-	OrgCount int
+	ID               string
+	Name             string
+	TierName         string
+	GANames          string // gabungan nama GA pengelola, dipisah ", " (bisa lebih dari satu)
+	OrgCount         int
+	MinRetentionDays int
+	MaxRetentionDays int
 }
 
 type GroupDirectoryRepository struct {
@@ -40,7 +47,9 @@ func (r *GroupDirectoryRepository) List(ctx context.Context, actorUserID, platfo
 		rows, err := tx.Query(ctx, `
 			SELECT g.id, g.name, st.name,
 			       COALESCE(ga_agg.ga_names, ''),
-			       COALESCE(org_agg.org_count, 0)
+			       COALESCE(org_agg.org_count, 0),
+			       GREATEST(30, COALESCE(st.min_retention_days, 30)),
+			       LEAST(365, COALESCE(st.max_retention_days, 365))
 			FROM groups g
 			JOIN service_tiers st ON st.id = g.tier_id
 			LEFT JOIN LATERAL (
@@ -66,7 +75,7 @@ func (r *GroupDirectoryRepository) List(ctx context.Context, actorUserID, platfo
 		defer rows.Close()
 		for rows.Next() {
 			var e GroupDirectoryEntry
-			if err := rows.Scan(&e.ID, &e.Name, &e.TierName, &e.GANames, &e.OrgCount); err != nil {
+			if err := rows.Scan(&e.ID, &e.Name, &e.TierName, &e.GANames, &e.OrgCount, &e.MinRetentionDays, &e.MaxRetentionDays); err != nil {
 				return fmt.Errorf("scan: %w", err)
 			}
 			result = append(result, e)

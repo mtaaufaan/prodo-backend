@@ -262,13 +262,6 @@ var (
 	// yang valid.
 	ErrPlatformAdminNotFound = errors.New("platform admin not found")
 
-	// ErrRetentionOutOfRange dikembalikan PUT /organizations/:id/storage-quota
-	// (S4G-03, Track S4G) saat retention_days yang diminta di luar 30-365
-	// hari -- sama batas dengan CHECK constraint ck_organizations_retention_days
-	// (DATABASE_SCHEMA.md §5.7), ditegakkan juga di sini supaya pesan error
-	// jelas (bukan constraint violation mentah), sama pola StorageQuotaExceedsMax.
-	ErrRetentionOutOfRange = errors.New("retention days out of allowed range")
-
 	// ErrOrganizationInactive dikembalikan PUT /workspaces/:wsId/move
 	// (S4G-04, Track S4G) saat organisasi tujuan pindah sedang nonaktif
 	// (deactivated_at TERISI) -- workspace tidak boleh dipindah ke organisasi
@@ -289,4 +282,25 @@ type StorageQuotaBelowUsageError struct {
 
 func (e *StorageQuotaBelowUsageError) Error() string {
 	return fmt.Sprintf("storage quota must be at least %d GB (current usage)", e.MinimumGB)
+}
+
+// RetentionOutOfRangeError dikembalikan Create/UpdateStorageQuota
+// organisasi (S4G-08, Track S4G) saat retention_days di luar plafon TIER
+// grup (service_tiers.min_retention_days/max_retention_days) --
+// sebelumnya (S4G-03) dicek terhadap angka TETAP 30-365 untuk SEMUA tier,
+// padahal kolom tier ini sudah ada sejak S4P-07 (dipakai tampilan
+// TierFactsPanel) tapi tidak pernah ditegakkan sungguhan. Rentang tier
+// di-clamp ke [30,365] (CHECK constraint ck_organizations_retention_days,
+// batas keras DB yang tidak bisa dilewati tier mana pun -- lihat
+// OrganizationRepository.groupRetentionRange). Butuh tipe error sendiri
+// (bukan sentinel biasa, gantikan ErrRetentionOutOfRange lama) karena
+// pesannya perlu menyertakan angka+nama tier aktual, sama pola
+// StorageQuotaBelowUsageError di atas.
+type RetentionOutOfRangeError struct {
+	MinDays, MaxDays int
+	TierName         string
+}
+
+func (e *RetentionOutOfRangeError) Error() string {
+	return fmt.Sprintf("retention days out of allowed range for tier %s (%d-%d)", e.TierName, e.MinDays, e.MaxDays)
 }
