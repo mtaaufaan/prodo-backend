@@ -238,13 +238,21 @@ func (h *OrganizationHandler) Reactivate(c *fiber.Ctx) error {
 // List menangani GET /organizations -- prasyarat S3-07 (FE, sama pola
 // IG-09). Scoping sepenuhnya lewat RLS (OrganizationService.ListOrganizations).
 func (h *OrganizationHandler) List(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.List dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
 		h.logger.Error("OrganizationHandler.List dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 
-	orgs, ceilingBytes, err := h.orgs.ListOrganizations(c.Context(), exec)
+	// group_id (S4G-06, Track S4G, group switcher): opsional -- scoping
+	// tambahan untuk Group Admin yang mengelola >1 grup, lihat komentar
+	// OrganizationService.ListOrganizations.
+	orgs, ceilingBytes, err := h.orgs.ListOrganizations(c.Context(), exec, c.Query("group_id"), actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil daftar organisasi")
 	}

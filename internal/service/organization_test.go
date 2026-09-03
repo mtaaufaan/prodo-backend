@@ -26,8 +26,9 @@ type fakeOrganizationRepo struct {
 	summaryResult *repository.Summary
 	summaryErr    error
 
-	listResult []repository.Organization
-	listErr    error
+	listResult      []repository.Organization
+	listErr         error
+	listCalledGroup string
 
 	isActiveResult bool
 	isActiveErr    error
@@ -81,7 +82,8 @@ func (f *fakeOrganizationRepo) Delete(_ context.Context, _ db.Executor, _, _, _ 
 	return f.deleteErr
 }
 
-func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor) ([]repository.Organization, int64, error) {
+func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor, groupID string) ([]repository.Organization, int64, error) {
+	f.listCalledGroup = groupID
 	return f.listResult, 0, f.listErr
 }
 
@@ -156,6 +158,52 @@ func TestOrganizationService_CreateOrganization_InvalidDomain(t *testing.T) {
 	_, err := svc.CreateOrganization(context.Background(), nil, "group-1", "Acme", "acme", "not-a-domain", "id", 1_000_000_000, 90, "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestOrganizationService_ListOrganizations_NoGroupFilter_PassesThrough(t *testing.T) {
+	repo := &fakeOrganizationRepo{}
+	svc := NewOrganizationService(repo)
+
+	if _, _, err := svc.ListOrganizations(context.Background(), nil, "", "pa-1", "platform_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.listCalledGroup != "" {
+		t.Errorf("listCalledGroup = %q, want empty (no filter)", repo.listCalledGroup)
+	}
+}
+
+func TestOrganizationService_ListOrganizations_GroupAdminOfGroup_Allowed(t *testing.T) {
+	repo := &fakeOrganizationRepo{gaGroups: map[string]bool{"ga-1:group-1": true}}
+	svc := NewOrganizationService(repo)
+
+	if _, _, err := svc.ListOrganizations(context.Background(), nil, "group-1", "ga-1", "group_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.listCalledGroup != "group-1" {
+		t.Errorf("listCalledGroup = %q, want %q", repo.listCalledGroup, "group-1")
+	}
+}
+
+func TestOrganizationService_ListOrganizations_GroupAdminNotOfGroup_Forbidden(t *testing.T) {
+	repo := &fakeOrganizationRepo{gaGroups: map[string]bool{}}
+	svc := NewOrganizationService(repo)
+
+	_, _, err := svc.ListOrganizations(context.Background(), nil, "group-1", "ga-2", "group_admin")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
+	}
+}
+
+func TestOrganizationService_ListOrganizations_PlatformAdminBypassesGroupCheck(t *testing.T) {
+	repo := &fakeOrganizationRepo{}
+	svc := NewOrganizationService(repo)
+
+	if _, _, err := svc.ListOrganizations(context.Background(), nil, "group-1", "pa-1", "platform_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.listCalledGroup != "group-1" {
+		t.Errorf("listCalledGroup = %q, want %q", repo.listCalledGroup, "group-1")
 	}
 }
 
