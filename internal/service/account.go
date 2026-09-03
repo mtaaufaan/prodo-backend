@@ -32,21 +32,31 @@ type accountRepository interface {
 	RegenerateInvitationToken(ctx context.Context, targetUserID, email, newTokenHash string, newExpiresAt time.Time, actorUserID string) error
 	ListGroupAdmins(ctx context.Context, limit, offset int) ([]repository.GroupAdminSummary, int, error)
 
+	// FindActiveGroupAdminByEmail/AttachExistingGroupAdminToGroup -- S4G-07,
+	// Track S4G: "Tambah Group Admin" dengan email yang sudah GA aktif
+	// menautkan ke grup baru alih-alih menolak ErrEmailAlreadyExists.
+	FindActiveGroupAdminByEmail(ctx context.Context, email string) (userID string, found bool, err error)
+	AttachExistingGroupAdminToGroup(ctx context.Context, p *repository.AttachExistingGroupAdminParams) (groupID string, err error)
+
 	// SuspendGroupAdmin/ReactivateGroupAdmin -- S4P-02, US-067.
 	SuspendGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
 	ReactivateGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
 
-	// TransferGroup/DeleteGroupAdmin -- S4P-03/04/05, IG-21.
-	TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (transferredGroupCount int, err error)
+	// TransferGroup/DeleteGroupAdmin -- S4P-03/04/05, IG-21. TransferGroup
+	// di-scope per grup sejak S4G-07 (groupID eksplisit, bukan "seluruh
+	// grup dari akun" lagi).
+	TransferGroup(ctx context.Context, groupID, fromUserID, toUserID, actorUserID string) error
 	DeleteGroupAdmin(ctx context.Context, targetUserID, actorUserID string) error
 
 	// GetGroupAdminDetail/UpdateGroupAdmin -- S4P-06/07, form "Lihat"/"Ubah"
-	// Group Admin lengkap sesuai desain.
-	GetGroupAdminDetail(ctx context.Context, targetUserID string) (*repository.GroupAdminSummary, error)
-	UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) (oldTier string, err error)
+	// Group Admin lengkap sesuai desain. groupID eksplisit sejak S4G-07
+	// (satu baris panel PA = satu grup, bukan "grup pertama" GA lagi).
+	GetGroupAdminDetail(ctx context.Context, targetUserID, groupID string) (*repository.GroupAdminSummary, error)
+	UpdateGroupAdmin(ctx context.Context, targetUserID, groupID string, p *repository.UpdateGroupAdminParams, actorUserID string) (oldTier string, err error)
 
 	// RenewGroupContract -- kontrak grup (dikonfirmasi user 2026-08-29).
-	RenewGroupContract(ctx context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error)
+	// groupID eksplisit sejak S4G-07.
+	RenewGroupContract(ctx context.Context, targetUserID, groupID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error)
 
 	// Katalog tier + lifecycle (S4P-07/11): ListServiceTiers/
 	// FindActiveServiceTierIDByName untuk assign tier ke GA; Create/Update/
@@ -146,13 +156,17 @@ type CreateGroupAdminRequest struct {
 // GroupAdminInvitation adalah hasil pembuatan akun. ActivationToken cuma
 // terisi (raw, belum di-hash) tepat setelah pembuatan -- dipakai S1-04
 // untuk mengirim email lalu dibuang; yang tersimpan permanen di DB cuma
-// hash-nya (platform_invitations.token_hash).
+// hash-nya (platform_invitations.token_hash). LinkedExistingAccount (S4G-07)
+// -- true kalau email yang diminta match GA aktif existing: TIDAK ADA akun/
+// invitation baru, ActivationToken/ExpiresAt kosong (zero value), grup baru
+// langsung ditautkan ke akun lama itu.
 type GroupAdminInvitation struct {
-	UserID          string
-	Email           string
-	DisplayName     string
-	ActivationToken string
-	ExpiresAt       time.Time
+	UserID                string
+	Email                 string
+	DisplayName           string
+	ActivationToken       string
+	ExpiresAt             time.Time
+	LinkedExistingAccount bool
 }
 
 // ListGroupAdmins mengembalikan daftar Group Admin untuk panel Platform
@@ -180,6 +194,14 @@ func (s *AccountService) ResolveActorUserID(ctx context.Context, keycloakSub str
 // MFA saat aktivasi), lalu menyimpan users/user_auth_providers/
 // platform_invitations/audit_logs dalam satu transaksi.
 //
+// S4G-07, Track S4G: kalau req.Email SUDAH terdaftar sebagai GA AKTIF
+// (bukan role lain), TIDAK dibuat akun/invitation baru -- grup baru
+// langsung ditautkan ke akun existing itu (many-to-many, DATABASE_SCHEMA.md
+// §5.6), lewat AttachExistingGroupAdminToGroup. Email yang match role LAIN
+// (member/platform_admin/dst) tetap lanjut ke alur biasa di bawah dan akan
+// ditolak domain.ErrEmailAlreadyExists seperti sebelumnya -- tidak pernah
+// diam-diam mengambil alih akun role lain.
+//
 // ponytail: kalau insert DB gagal setelah user Keycloak berhasil dibuat,
 // user Keycloak itu jadi orphan (tidak ada compensating transaction/saga) --
 // cukup di-log sebagai error supaya bisa dibersihkan manual. Upgrade ke
@@ -197,6 +219,39 @@ func (s *AccountService) CreateGroupAdmin(ctx context.Context, req *CreateGroupA
 			return nil, fmt.Errorf("service.CreateGroupAdmin: resolve default tier: %w", err)
 		}
 		req.TierID = tierID
+	}
+
+	if existingUserID, found, err := s.repo.FindActiveGroupAdminByEmail(ctx, req.Email); err != nil {
+		return nil, fmt.Errorf("service.CreateGroupAdmin: cek GA existing: %w", err)
+	} else if found {
+		groupID, err := s.repo.AttachExistingGroupAdminToGroup(ctx, &repository.AttachExistingGroupAdminParams{
+			ExistingUserID:   existingUserID,
+			GroupName:        req.GroupName,
+			JobTitle:         req.JobTitle,
+			Address:          req.Address,
+			Phone:            req.Phone,
+			TierID:           req.TierID,
+			StorageQuotaGB:   req.StorageQuotaGB,
+			AssignedByUserID: req.InvitedByUserID,
+
+			ContractStartAt:            req.ContractStartAt,
+			ContractSubscriptionPeriod: req.ContractSubscriptionPeriod,
+			ContractInvoiceNumber:      req.ContractInvoiceNumber,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("service.CreateGroupAdmin: %w", err)
+		}
+		s.logger.Info("grup baru ditautkan ke akun Group Admin existing (email sama)",
+			zap.String("user_id", existingUserID),
+			zap.String("email", req.Email),
+			zap.String("group_id", groupID),
+		)
+		return &GroupAdminInvitation{
+			UserID:                existingUserID,
+			Email:                 req.Email,
+			DisplayName:           req.DisplayName,
+			LinkedExistingAccount: true,
+		}, nil
 	}
 
 	kcUserID, err := s.keycloak.CreateDisabledUser(ctx, req.Email, req.DisplayName)
@@ -436,19 +491,19 @@ func (s *AccountService) ResetPlatformAdminMFA(ctx context.Context, targetUserID
 	return nil
 }
 
-// TransferGroup memindahkan pengelolaan seluruh grup dari satu GA ke GA
-// lain (S4P-03/04, IG-21).
-func (s *AccountService) TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (int, error) {
-	count, err := s.repo.TransferGroup(ctx, fromUserID, toUserID, actorUserID)
-	if err != nil {
-		return 0, fmt.Errorf("service.TransferGroup: %w", err)
+// TransferGroup memindahkan pengelolaan SATU grup (groupID, S4G-07) dari
+// satu GA ke GA lain (S4P-03/04, IG-21).
+func (s *AccountService) TransferGroup(ctx context.Context, groupID, fromUserID, toUserID, actorUserID string) error {
+	if err := s.repo.TransferGroup(ctx, groupID, fromUserID, toUserID, actorUserID); err != nil {
+		return fmt.Errorf("service.TransferGroup: %w", err)
 	}
-	return count, nil
+	return nil
 }
 
-// GetGroupAdminDetail -- S4P-06, mode "Lihat"/"Ubah".
-func (s *AccountService) GetGroupAdminDetail(ctx context.Context, targetUserID string) (*repository.GroupAdminSummary, error) {
-	detail, err := s.repo.GetGroupAdminDetail(ctx, targetUserID)
+// GetGroupAdminDetail -- S4P-06, mode "Lihat"/"Ubah". groupID eksplisit
+// sejak S4G-07 (satu baris panel PA = satu grup).
+func (s *AccountService) GetGroupAdminDetail(ctx context.Context, targetUserID, groupID string) (*repository.GroupAdminSummary, error) {
+	detail, err := s.repo.GetGroupAdminDetail(ctx, targetUserID, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("service.GetGroupAdminDetail: %w", err)
 	}
@@ -458,12 +513,12 @@ func (s *AccountService) GetGroupAdminDetail(ctx context.Context, targetUserID s
 // RenewGroupContract -- S4P-06 area, kontrak grup (dikonfirmasi user
 // 2026-08-29). Dipakai untuk kontrak PERTAMA (grup belum pernah punya
 // baris group_contracts) maupun PERPANJANGAN -- repository yang
-// membedakan audit action-nya.
-func (s *AccountService) RenewGroupContract(ctx context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (time.Time, error) {
+// membedakan audit action-nya. groupID eksplisit sejak S4G-07.
+func (s *AccountService) RenewGroupContract(ctx context.Context, targetUserID, groupID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (time.Time, error) {
 	if !isValidSubscriptionPeriod(subscriptionPeriod) {
 		return time.Time{}, fmt.Errorf("service.RenewGroupContract: %w", domain.ErrInvalidSubscriptionPeriod)
 	}
-	endAt, err := s.repo.RenewGroupContract(ctx, targetUserID, startAt, subscriptionPeriod, invoiceNumber, actorUserID)
+	endAt, err := s.repo.RenewGroupContract(ctx, targetUserID, groupID, startAt, subscriptionPeriod, invoiceNumber, actorUserID)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("service.RenewGroupContract: %w", err)
 	}
@@ -472,8 +527,9 @@ func (s *AccountService) RenewGroupContract(ctx context.Context, targetUserID st
 
 // UpdateGroupAdmin -- S4P-06, form "Ubah Group Admin". Validasi tier dan
 // status di sini (bukan cuma di repository) supaya pesan error konsisten
-// dengan CreateGroupAdmin.
-func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, actorUserID string) (string, error) {
+// dengan CreateGroupAdmin. groupID eksplisit sejak S4G-07 (satu baris
+// panel PA = satu grup, bukan "grup pertama" GA lagi).
+func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID, groupID string, p *repository.UpdateGroupAdminParams, actorUserID string) (string, error) {
 	if p.DisplayName == "" || p.GroupName == "" || p.TierID == "" {
 		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", domain.ErrInvalidInput)
 	}
@@ -485,7 +541,7 @@ func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID stri
 	// ini. Baca ulang UsedStorageMB (query yang sama dipakai GetGroupAdminDetail)
 	// alih-alih menduplikasi agregat SQL-nya di repository.
 	if p.StorageQuotaGB != nil {
-		detail, err := s.repo.GetGroupAdminDetail(ctx, targetUserID)
+		detail, err := s.repo.GetGroupAdminDetail(ctx, targetUserID, groupID)
 		if err != nil {
 			return "", fmt.Errorf("service.UpdateGroupAdmin: cek pemakaian: %w", err)
 		}
@@ -494,7 +550,7 @@ func (s *AccountService) UpdateGroupAdmin(ctx context.Context, targetUserID stri
 			return "", fmt.Errorf("service.UpdateGroupAdmin: %w", &domain.StorageQuotaBelowUsageError{MinimumGB: usedGB})
 		}
 	}
-	oldTier, err := s.repo.UpdateGroupAdmin(ctx, targetUserID, p, actorUserID)
+	oldTier, err := s.repo.UpdateGroupAdmin(ctx, targetUserID, groupID, p, actorUserID)
 	if err != nil {
 		return "", fmt.Errorf("service.UpdateGroupAdmin: %w", err)
 	}

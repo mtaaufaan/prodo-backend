@@ -176,6 +176,14 @@ var (
 	// (S4P-03/04) bukan akun Group Admin yang valid.
 	ErrInvalidTransferTarget = errors.New("transfer target is not a valid group admin")
 
+	// ErrGroupAdminAssignmentNotFound dikembalikan Transfer/UpdateGroupAdmin/
+	// RenewGroupContract (S4G-07, Track S4G) saat pasangan (group_id,
+	// user_id) yang diminta tidak ada -- transfer/ubah/perpanjang sekarang
+	// di-scope per grup (bukan per akun, DATABASE_SCHEMA.md §5.6
+	// many-to-many mengizinkan satu GA mengelola >1 grup), jadi actor WAJIB
+	// menyebut grup mana yang dimaksud secara eksplisit.
+	ErrGroupAdminAssignmentNotFound = errors.New("group admin does not manage this group")
+
 	// ErrGroupTransferRequired dikembalikan saat mencoba menghapus akun
 	// Group Admin (S4P-05) yang masih mengelola minimal satu grup --
 	// transfer (S4P-03/04) dulu sebelum bisa dihapus, supaya organisasi di
