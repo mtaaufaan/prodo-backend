@@ -356,7 +356,7 @@ func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {
 	}
 }
 
-// TestAccountService_CreateGroupAdmin_LinksExistingGroupAdmin -- S4G-07:
+// TestAccountService_CreateGroupAdmin_LinksExistingGroupAdmin -- S4G-33:
 // email yang match GA aktif existing menautkan grup baru ke akun itu,
 // TANPA menyentuh Keycloak/membuat user baru.
 func TestAccountService_CreateGroupAdmin_LinksExistingGroupAdmin(t *testing.T) {

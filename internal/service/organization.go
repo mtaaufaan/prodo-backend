@@ -90,7 +90,7 @@ func (s *OrganizationService) AuthorizeOrgAccess(ctx context.Context, exec db.Ex
 
 // CreateOrganization membuat organisasi baru (S3-02). name/slug wajib diisi;
 // slug divalidasi format DI HANDLER (validator.IsValidSlug), bukan di sini.
-// domain/defaultLanguage/quotaBytes/retentionDays ditambahkan S4G-05 (Track
+// domain/defaultLanguage/quotaBytes/retentionDays ditambahkan S4G-31 (Track
 // S4G, desain "GA Add Organization.dc.html") -- lihat komentar
 // OrganizationRepository.Create soal reuse validasi UpdateStorageQuota.
 func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*repository.Organization, error) {
@@ -207,7 +207,7 @@ func (s *OrganizationService) ReactivateOrganization(ctx context.Context, exec d
 // ListOrganizations mengembalikan organisasi yang terlihat oleh actor,
 // plus plafon storage grup (lihat repository.List). groupID kosong berarti
 // tidak ada filter tambahan -- scoping sepenuhnya lewat RLS, sama seperti
-// sebelumnya (dipakai Platform Admin lintas grup). groupID diisi (S4G-06,
+// sebelumnya (dipakai Platform Admin lintas grup). groupID diisi (S4G-32,
 // Track S4G, group switcher -- Group Admin yang mengelola >1 grup,
 // DATABASE_SCHEMA.md §5.6) WAJIB divalidasi actor benar-benar berwenang
 // atas grup itu di sini -- RLS sendiri cuma menjamin "grup APA SAJA yang
