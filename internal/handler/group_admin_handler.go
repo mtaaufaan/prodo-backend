@@ -124,14 +124,23 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		}
 	}
 
-	h.sendActivationEmail(c, result, "akun Group Admin dibuat tapi gagal kirim email aktivasi")
+	// S4G-07, Track S4G: LinkedExistingAccount berarti tidak ada invitation
+	// baru sama sekali (akun existing ditautkan ke grup baru) -- tidak ada
+	// email aktivasi untuk dikirim.
+	if !result.LinkedExistingAccount {
+		h.sendActivationEmail(c, result, "akun Group Admin dibuat tapi gagal kirim email aktivasi")
+	}
 
-	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
-		"id":           result.UserID,
-		"email":        result.Email,
-		"display_name": result.DisplayName,
-		"expires_at":   result.ExpiresAt.UTC().Format(time.RFC3339),
-	}))
+	resp := fiber.Map{
+		"id":                    result.UserID,
+		"email":                 result.Email,
+		"display_name":          result.DisplayName,
+		"linked_existing_admin": result.LinkedExistingAccount,
+	}
+	if !result.LinkedExistingAccount {
+		resp["expires_at"] = result.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(resp))
 }
 
 // List menangani GET /platform/group-admins -- daftar Group Admin untuk
@@ -271,10 +280,17 @@ func (h *GroupAdminHandler) setSuspension(c *fiber.Ctx, suspend bool) error {
 
 type transferGroupRequest struct {
 	ToUserID string `json:"to_user_id"`
+	// GroupID (S4G-07, Track S4G) -- WAJIB, grup SPESIFIK yang dipindahkan.
+	// Sebelumnya endpoint ini memindahkan SEMUA grup milik :id sekaligus;
+	// sejak satu GA bisa mengelola >1 grup (DATABASE_SCHEMA.md §5.6),
+	// caller (baris panel PA yang di-klik "Pindahkan") wajib menyebut grup
+	// mana secara eksplisit -- baris lain milik GA yang sama tidak ikut.
+	GroupID string `json:"group_id"`
 }
 
 // Transfer menangani POST /platform/group-admins/:id/transfer (S4P-03/04,
-// IG-21) -- pindahkan pengelolaan seluruh grup :id ke to_user_id.
+// IG-21, di-scope per grup sejak S4G-07) -- pindahkan pengelolaan SATU
+// grup (group_id di body) dari :id ke to_user_id.
 func (h *GroupAdminHandler) Transfer(c *fiber.Ctx) error {
 	claims, ok := middleware.ClaimsFromContext(c)
 	if !ok {
@@ -291,8 +307,9 @@ func (h *GroupAdminHandler) Transfer(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
 	req.ToUserID = strings.TrimSpace(req.ToUserID)
-	if req.ToUserID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "to_user_id wajib diisi", nil))
+	req.GroupID = strings.TrimSpace(req.GroupID)
+	if req.ToUserID == "" || req.GroupID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "to_user_id dan group_id wajib diisi", nil))
 	}
 
 	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
@@ -302,12 +319,14 @@ func (h *GroupAdminHandler) Transfer(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
 	}
 
-	count, err := h.accounts.TransferGroup(c.Context(), fromUserID, req.ToUserID, actorUserID)
-	if err != nil {
+	if err := h.accounts.TransferGroup(c.Context(), req.GroupID, fromUserID, req.ToUserID, actorUserID); err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidTransferTarget):
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_TRANSFER_TARGET",
 				"Target transfer bukan akun Group Admin yang valid", nil))
+		case errors.Is(err, domain.ErrGroupAdminAssignmentNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND",
+				"Group Admin ini tidak mengelola grup tersebut", nil))
 		default:
 			h.logger.Error("gagal transfer grup", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal transfer grup", nil))
@@ -315,9 +334,9 @@ func (h *GroupAdminHandler) Transfer(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(fiber.Map{
-		"from_user_id":       fromUserID,
-		"to_user_id":         req.ToUserID,
-		"transferred_groups": count,
+		"from_user_id": fromUserID,
+		"to_user_id":   req.ToUserID,
+		"group_id":     req.GroupID,
 	}))
 }
 
@@ -413,15 +432,17 @@ func formatOptionalDate(t *time.Time) *string {
 	return &s
 }
 
-// Get menangani GET /platform/group-admins/:id -- mode "Lihat"/"Ubah"
-// (S4P-06).
+// Get menangani GET /platform/group-admins/:id?group_id=X -- mode
+// "Lihat"/"Ubah" (S4P-06). group_id (S4G-07) WAJIB kalau baris panel yang
+// diklik punya grup (kosong/tidak diberikan berarti baris 0-grup) --
+// satu baris panel PA sekarang = satu grup, bukan "grup pertama" GA lagi.
 func (h *GroupAdminHandler) Get(c *fiber.Ctx) error {
 	targetUserID := c.Params("id")
 	if targetUserID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "ID user wajib diisi", nil))
 	}
 
-	detail, err := h.accounts.GetGroupAdminDetail(c.Context(), targetUserID)
+	detail, err := h.accounts.GetGroupAdminDetail(c.Context(), targetUserID, c.Query("group_id"))
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrUserNotFound):
@@ -436,6 +457,9 @@ func (h *GroupAdminHandler) Get(c *fiber.Ctx) error {
 }
 
 type updateGroupAdminRequest struct {
+	// GroupID (S4G-07) -- WAJIB, grup SPESIFIK yang diubah. Sebelumnya
+	// diresolusi diam-diam ke "grup pertama" GA itu.
+	GroupID        string `json:"group_id"`
 	DisplayName    string `json:"display_name"`
 	GroupName      string `json:"group_name"`
 	JobTitle       string `json:"job_title"`
@@ -467,8 +491,9 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 	}
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.GroupName = strings.TrimSpace(req.GroupName)
-	if req.DisplayName == "" || req.GroupName == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "display_name dan group_name wajib diisi", nil))
+	req.GroupID = strings.TrimSpace(req.GroupID)
+	if req.DisplayName == "" || req.GroupName == "" || req.GroupID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "group_id, display_name, dan group_name wajib diisi", nil))
 	}
 
 	actorUserID, err := h.accounts.ResolveActorUserID(c.Context(), claims.Subject)
@@ -478,7 +503,7 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
 	}
 
-	oldTier, err := h.accounts.UpdateGroupAdmin(c.Context(), targetUserID, &repository.UpdateGroupAdminParams{
+	oldTier, err := h.accounts.UpdateGroupAdmin(c.Context(), targetUserID, req.GroupID, &repository.UpdateGroupAdminParams{
 		DisplayName:    req.DisplayName,
 		GroupName:      req.GroupName,
 		JobTitle:       req.JobTitle,
@@ -500,6 +525,8 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 				`Status hanya bisa diubah ke "AKTIF" atau "SUSPENDED"`, nil))
 		case errors.Is(err, domain.ErrUserNotFound):
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		case errors.Is(err, domain.ErrGroupAdminAssignmentNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin ini tidak mengelola grup tersebut", nil))
 		case errors.As(err, &quotaErr):
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STORAGE_QUOTA_BELOW_USAGE",
 				fmt.Sprintf("Plafon minimal %d GB — grup ini sudah memakai %d GB. Turunkan alokasi organisasinya terlebih dahulu.", quotaErr.MinimumGB, quotaErr.MinimumGB),
@@ -510,7 +537,7 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 		}
 	}
 
-	detail, err := h.accounts.GetGroupAdminDetail(c.Context(), targetUserID)
+	detail, err := h.accounts.GetGroupAdminDetail(c.Context(), targetUserID, req.GroupID)
 	if err != nil {
 		h.logger.Error("Group Admin berhasil diubah tapi gagal membaca ulang detailnya", zap.Error(err))
 		return c.JSON(response.Success(fiber.Map{"id": targetUserID}))
@@ -529,6 +556,8 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 }
 
 type renewGroupContractRequest struct {
+	// GroupID (S4G-07) -- WAJIB, grup SPESIFIK yang diperpanjang kontraknya.
+	GroupID            string `json:"group_id"`
 	StartAt            string `json:"start_at"`
 	SubscriptionPeriod string `json:"subscription_period"`
 	InvoiceNumber      string `json:"invoice_number"`
@@ -553,6 +582,10 @@ func (h *GroupAdminHandler) RenewContract(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
+	req.GroupID = strings.TrimSpace(req.GroupID)
+	if req.GroupID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "group_id wajib diisi", nil))
+	}
 	startAt, err := time.Parse("2006-01-02", req.StartAt)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "format start_at tidak valid (YYYY-MM-DD)", nil))
@@ -565,13 +598,15 @@ func (h *GroupAdminHandler) RenewContract(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi Platform Admin", nil))
 	}
 
-	endAt, err := h.accounts.RenewGroupContract(c.Context(), targetUserID, startAt, req.SubscriptionPeriod, req.InvoiceNumber, actorUserID)
+	endAt, err := h.accounts.RenewGroupContract(c.Context(), targetUserID, req.GroupID, startAt, req.SubscriptionPeriod, req.InvoiceNumber, actorUserID)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidSubscriptionPeriod):
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("INVALID_SUBSCRIPTION_PERIOD", "Masa langganan harus monthly, quarterly, atau yearly", nil))
 		case errors.Is(err, domain.ErrUserNotFound):
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin tidak ditemukan", nil))
+		case errors.Is(err, domain.ErrGroupAdminAssignmentNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Group Admin ini tidak mengelola grup tersebut", nil))
 		default:
 			h.logger.Error("gagal memperpanjang kontrak grup", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memperpanjang kontrak", nil))

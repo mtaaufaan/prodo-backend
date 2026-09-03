@@ -174,13 +174,132 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 	return userID, nil
 }
 
-// GroupAdminSummary adalah satu baris daftar Group Admin untuk panel
-// Platform Admin (S1-12, diperkaya S4P-06 sesuai desain "PA Group
-// Admins" -- kolom TIER/SISA ORG/SISA KUOTA/SISA MEMBER/TANGGAL DAFTAR).
-// Mengambil grup PERTAMA (assigned_at paling awal) milik GA -- simplifikasi
-// yang disengaja: GA yang mengelola >1 grup (mis. setelah jadi target
-// TransferGroup, S4P-03) cuma menampilkan grup pertamanya di sini, dicatat
-// sebagai batasan yang diketahui di sprint_backlog.md, bukan bug.
+// FindActiveGroupAdminByEmail mencari akun Group Admin AKTIF (belum
+// di-soft-delete) dengan email persis (S4G-07) -- dipakai CreateGroupAdmin
+// SEBELUM memanggil Keycloak, supaya email yang match GA existing tidak
+// langsung ditolak ErrEmailAlreadyExists, melainkan ditautkan ke grup
+// baru (many-to-many, DATABASE_SCHEMA.md §5.6). Email yang match role
+// LAIN (member/platform_admin/dst) TETAP harus ditolak seperti biasa --
+// found=false di kasus itu, caller lanjut ke alur Create biasa yang akan
+// kena unique_violation di Keycloak/INSERT users.
+func (r *AccountRepository) FindActiveGroupAdminByEmail(ctx context.Context, email string) (userID string, found bool, err error) {
+	err = r.db.QueryRow(ctx, `
+		SELECT id FROM users WHERE email = $1 AND platform_role = 'group_admin' AND deleted_at IS NULL
+	`, email).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("repository.FindActiveGroupAdminByEmail: %w", err)
+	}
+	return userID, true, nil
+}
+
+// AttachExistingGroupAdminParams -- S4G-07, Track S4G: field yang sama
+// dengan CreateGroupAdminInvitationParams TAPI TANPA identitas akun
+// (Email/DisplayName/KeycloakUserID/TokenHash/ExpiresAt) -- akunnya sudah
+// ada, cuma ditautkan ke grup baru.
+type AttachExistingGroupAdminParams struct {
+	ExistingUserID   string
+	GroupName        string
+	JobTitle         string
+	Address          string
+	Phone            string
+	TierID           string
+	StorageQuotaGB   *int
+	AssignedByUserID string
+
+	ContractStartAt            *time.Time
+	ContractSubscriptionPeriod string
+	ContractInvoiceNumber      string
+}
+
+// AttachExistingGroupAdminToGroup menautkan akun GA existing (ditemukan
+// lewat FindActiveGroupAdminByEmail) sebagai pengelola grup BARU (S4G-07)
+// -- versi CreateGroupAdminInvitation TANPA insert users/
+// user_auth_providers/platform_invitations (akunnya sudah ada & sudah
+// aktif), sisanya (groups, group_admin_assignments, group_contracts,
+// audit) sama persis. Audit action `group.assigned_to_existing_admin`
+// (BEDA dari `user.invited`) supaya jelas di Audit Trail bahwa ini
+// penambahan grup ke akun lama, bukan onboarding akun baru.
+func (r *AccountRepository) AttachExistingGroupAdminToGroup(ctx context.Context, p *AttachExistingGroupAdminParams) (groupID string, err error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	var tierAssignable bool
+	if err = tx.QueryRow(ctx, `
+		SELECT deactivated_at IS NULL AND archived_at IS NULL FROM service_tiers WHERE id = $1
+	`, p.TierID).Scan(&tierAssignable); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: %w", domain.ErrInvalidTier)
+		}
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: cek tier: %w", err)
+	}
+	if !tierAssignable {
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: %w", domain.ErrInvalidTier)
+	}
+
+	if err = tx.QueryRow(ctx, `
+		INSERT INTO groups (name, tier_id, job_title, address, phone, storage_quota_gb)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id
+	`, p.GroupName, p.TierID, p.JobTitle, p.Address, p.Phone, p.StorageQuotaGB).Scan(&groupID); err != nil {
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: insert groups: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO group_admin_assignments (group_id, user_id, assigned_by)
+		VALUES ($1, $2, $3)
+	`, groupID, p.ExistingUserID, p.AssignedByUserID); err != nil {
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: insert group_admin_assignments: %w", err)
+	}
+
+	if p.ContractStartAt != nil {
+		endAt, err := addSubscriptionPeriod(*p.ContractStartAt, p.ContractSubscriptionPeriod)
+		if err != nil {
+			return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO group_contracts (group_id, start_at, subscription_period, end_at, invoice_number, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, groupID, *p.ContractStartAt, p.ContractSubscriptionPeriod, endAt, p.ContractInvoiceNumber, p.AssignedByUserID); err != nil {
+			return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: insert group_contracts: %w", err)
+		}
+		if err = logAudit(ctx, tx, p.AssignedByUserID, "platform_admin", "group.contract_created", p.ExistingUserID); err != nil {
+			return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: %w", err)
+		}
+	}
+
+	if err := writeAuditLog(ctx, tx, "platform_audit_logs", p.AssignedByUserID, "platform_admin", "group.assigned_to_existing_admin", "user", &p.ExistingUserID, map[string]any{
+		"group_id":   groupID,
+		"group_name": p.GroupName,
+	}, nil, nil); err != nil {
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: insert platform_audit_logs: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("repository.AttachExistingGroupAdminToGroup: commit tx: %w", err)
+	}
+	return groupID, nil
+}
+
+// GroupAdminSummary adalah SATU BARIS PER (GA, grup) untuk panel Platform
+// Admin (S1-12, diperkaya S4P-06 sesuai desain "PA Group Admins" -- kolom
+// TIER/SISA ORG/SISA KUOTA/SISA MEMBER/TANGGAL DAFTAR). Sebelumnya
+// (sampai S4G-07) cuma mengambil grup PERTAMA (LATERAL assigned_at
+// paling awal) per GA -- GA yang mengelola >1 grup (many-to-many,
+// DATABASE_SCHEMA.md §5.6, dicapai lewat TransferGroup S4P-03 atau
+// "email sama" saat Create, S4G-07) cuma menampilkan satu dari N
+// grupnya, sisanya (tier/kuota/kontraknya sendiri-sendiri) TIDAK PERNAH
+// terlihat PA sama sekali -- bukan cuma "grup lama tidak update", data
+// grup lain itu memang tidak pernah di-query. Sekarang setiap grup yang
+// dikelola tampil sebagai baris terpisah (GroupID sama untuk identitas
+// akun, GroupID beda untuk membedakan baris) -- GA tanpa grup sama
+// sekali (kasus transisi jarang, semua grupnya sudah ditransfer keluar)
+// tetap tampil SATU baris dengan field grup semuanya NULL.
 type GroupAdminSummary struct {
 	ID              string
 	Email           string
@@ -212,10 +331,11 @@ type GroupAdminSummary struct {
 	ContractInvoiceNum *string
 }
 
-// groupAdminSummaryQuery -- SELECT bersama ListGroupAdmins (banyak baris)
-// dan GetGroupAdminDetail (satu baris): grup pertama (LATERAL, assigned_at
-// paling awal) + katalog tier + agregat pemakaian (jumlah organisasi,
-// storage terpakai, jumlah member unik) di bawah grup itu.
+// groupAdminSummaryQuery -- SELECT bersama ListGroupAdmins (banyak baris,
+// fan-out satu baris per grup yang dikelola, S4G-07) dan GetGroupAdminDetail
+// (satu baris, di-filter ke SATU grup spesifik lewat groupID param) --
+// LEFT JOIN (bukan INNER) supaya GA yang kebetulan 0 grup tetap muncul
+// sebagai satu baris dengan field grup NULL, bukan hilang dari daftar.
 const groupAdminSummaryQuery = `
 	SELECT u.id, u.email, u.display_name, u.is_active, u.suspended_at, u.created_at,
 	       g.id, g.name, g.job_title, g.address, g.phone, g.tier_id, st.name, g.storage_quota_gb,
@@ -223,11 +343,8 @@ const groupAdminSummaryQuery = `
 	       COALESCE(org_agg.org_count, 0), COALESCE(org_agg.storage_used_mb, 0), COALESCE(mem_agg.member_count, 0),
 	       contract.start_at, contract.subscription_period, contract.end_at, contract.invoice_number
 	FROM users u
-	LEFT JOIN LATERAL (
-		SELECT gaa.group_id FROM group_admin_assignments gaa
-		WHERE gaa.user_id = u.id ORDER BY gaa.assigned_at LIMIT 1
-	) primary_group ON true
-	LEFT JOIN groups g ON g.id = primary_group.group_id
+	LEFT JOIN group_admin_assignments gaa ON gaa.user_id = u.id
+	LEFT JOIN groups g ON g.id = gaa.group_id
 	LEFT JOIN service_tiers st ON st.id = g.tier_id
 	LEFT JOIN LATERAL (
 		SELECT count(*) AS org_count, COALESCE(sum(o.storage_used_mb), 0) AS storage_used_mb
@@ -257,20 +374,26 @@ func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSumma
 	return s, err
 }
 
-// ListGroupAdmins mengembalikan seluruh user dengan platform_role='group_admin',
-// terbaru dulu, dengan pagination sederhana (docs/coding-conventions.md §7.1).
+// ListGroupAdmins mengembalikan SATU BARIS PER (GA, grup) yang dikelola
+// (S4G-07), terbaru dulu (per akun), dengan pagination sederhana
+// (docs/coding-conventions.md §7.1). `total`/pagination sekarang menghitung
+// BARIS (GA x grup), bukan akun -- konsisten dengan apa yang benar-benar
+// di-page oleh LIMIT/OFFSET di bawah (GA dengan >1 grup makan >1 slot
+// halaman, sama seperti tampilannya di panel).
 func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset int) ([]GroupAdminSummary, int, error) {
 	var total int
 	var result []GroupAdminSummary
 	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
-			SELECT count(*) FROM users WHERE platform_role = 'group_admin' AND deleted_at IS NULL
+			SELECT count(*) FROM users u
+			LEFT JOIN group_admin_assignments gaa ON gaa.user_id = u.id
+			WHERE u.platform_role = 'group_admin' AND u.deleted_at IS NULL
 		`).Scan(&total); err != nil {
 			return fmt.Errorf("count: %w", err)
 		}
 
 		rows, err := tx.Query(ctx, groupAdminSummaryQuery+`
-			ORDER BY u.created_at DESC
+			ORDER BY u.created_at DESC, gaa.assigned_at ASC
 			LIMIT $1 OFFSET $2
 		`, limit, offset)
 		if err != nil {
@@ -293,12 +416,26 @@ func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset i
 	return result, total, nil
 }
 
-// GetGroupAdminDetail mengembalikan satu Group Admin + grup pertamanya
-// untuk mode Lihat/Ubah (S4P-06). domain.ErrUserNotFound kalau tidak ada.
-func (r *AccountRepository) GetGroupAdminDetail(ctx context.Context, targetUserID string) (*GroupAdminSummary, error) {
+// GetGroupAdminDetail mengembalikan satu Group Admin UNTUK SATU GRUP
+// SPESIFIK (groupID, S4G-07) untuk mode Lihat/Ubah (S4P-06) -- baris di
+// panel PA sekarang satu per grup (lihat GroupAdminSummary), jadi "detail"
+// juga di-scope ke grup yang sama dengan baris yang diklik, bukan
+// menebak "grup pertama" lagi. groupID kosong berarti GA target memang
+// tidak mengelola grup apa pun (baris 0-grup, field gaa.group_id NULL).
+// domain.ErrUserNotFound kalau user tidak ada / bukan GA / pasangan
+// (user, grup) itu tidak match.
+func (r *AccountRepository) GetGroupAdminDetail(ctx context.Context, targetUserID, groupID string) (*GroupAdminSummary, error) {
 	var s GroupAdminSummary
 	err := withPlatformAdminRLS(ctx, r.db, func(tx pgx.Tx) error {
-		row := tx.QueryRow(ctx, groupAdminSummaryQuery+` AND u.id = $1`, targetUserID)
+		query := groupAdminSummaryQuery + ` AND u.id = $1`
+		args := []any{targetUserID}
+		if groupID == "" {
+			query += ` AND gaa.group_id IS NULL`
+		} else {
+			query += ` AND gaa.group_id = $2`
+			args = append(args, groupID)
+		}
+		row := tx.QueryRow(ctx, query, args...)
 		scanned, err := scanGroupAdminSummary(row)
 		if err != nil {
 			return err
@@ -335,22 +472,28 @@ type UpdateGroupAdminParams struct {
 // diminta (S4P-06). Semua dalam satu transaksi + audit log. Mengembalikan
 // tier SEBELUM update (S4P-09) supaya caller tahu apakah tier benar-benar
 // berubah (notifikasi/email tier_changed cuma dikirim kalau berubah).
-func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID string, p *UpdateGroupAdminParams, actorUserID string) (oldTier string, err error) {
+// groupID (S4G-07, Track S4G): grup SPESIFIK yang diubah -- sebelumnya
+// ditebak lewat "grup pertama" (ORDER BY assigned_at LIMIT 1), yang jadi
+// salah/ambigu begitu satu GA bisa mengelola >1 grup. Sekarang caller
+// (baris panel PA yang di-klik "Ubah") WAJIB menyebut grup mana secara
+// eksplisit -- domain.ErrGroupAdminAssignmentNotFound kalau targetUserID
+// tidak benar-benar mengelola groupID itu.
+func (r *AccountRepository) UpdateGroupAdmin(ctx context.Context, targetUserID, groupID string, p *UpdateGroupAdminParams, actorUserID string) (oldTier string, err error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("repository.UpdateGroupAdmin: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
-	var groupID, oldTierID string
+	var oldTierID string
 	if err := tx.QueryRow(ctx, `
-		SELECT gaa.group_id, g.tier_id, st.name FROM group_admin_assignments gaa
+		SELECT g.tier_id, st.name FROM group_admin_assignments gaa
 		JOIN groups g ON g.id = gaa.group_id
 		LEFT JOIN service_tiers st ON st.id = g.tier_id
-		WHERE gaa.user_id = $1 ORDER BY gaa.assigned_at LIMIT 1
-	`, targetUserID).Scan(&groupID, &oldTierID, &oldTier); err != nil {
+		WHERE gaa.user_id = $1 AND gaa.group_id = $2
+	`, targetUserID, groupID).Scan(&oldTierID, &oldTier); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrUserNotFound)
+			return "", fmt.Errorf("repository.UpdateGroupAdmin: %w", domain.ErrGroupAdminAssignmentNotFound)
 		}
 		return "", fmt.Errorf("repository.UpdateGroupAdmin: cari grup: %w", err)
 	}
@@ -463,10 +606,10 @@ func addSubscriptionPeriod(start time.Time, period string) (time.Time, error) {
 // Dipakai baik untuk kontrak PERTAMA suatu grup (kalau belum pernah ada
 // sama sekali) maupun PERPANJANGAN (kalau sudah ada) -- dibedakan lewat
 // count baris existing SEBELUM insert, supaya audit action-nya tepat
-// (group.contract_created vs group.contract_renewed). groupID diresolusi
-// dari targetUserID (grup PERTAMA milik GA itu) -- pola sama dengan
-// UpdateGroupAdmin.
-func (r *AccountRepository) RenewGroupContract(ctx context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error) {
+// (group.contract_created vs group.contract_renewed). groupID (S4G-07)
+// WAJIB disebut eksplisit oleh caller -- sebelumnya ditebak dari "grup
+// pertama" GA itu, ambigu begitu GA bisa mengelola >1 grup.
+func (r *AccountRepository) RenewGroupContract(ctx context.Context, targetUserID, groupID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error) {
 	endAt, err = addSubscriptionPeriod(startAt, subscriptionPeriod)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: %w", err)
@@ -478,15 +621,14 @@ func (r *AccountRepository) RenewGroupContract(ctx context.Context, targetUserID
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
-	var groupID string
+	var exists bool
 	if err := tx.QueryRow(ctx, `
-		SELECT gaa.group_id FROM group_admin_assignments gaa
-		WHERE gaa.user_id = $1 ORDER BY gaa.assigned_at LIMIT 1
-	`, targetUserID).Scan(&groupID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return time.Time{}, fmt.Errorf("repository.RenewGroupContract: %w", domain.ErrUserNotFound)
-		}
-		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: cari grup: %w", err)
+		SELECT EXISTS(SELECT 1 FROM group_admin_assignments WHERE user_id = $1 AND group_id = $2)
+	`, targetUserID, groupID).Scan(&exists); err != nil {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: cek grup: %w", err)
+	}
+	if !exists {
+		return time.Time{}, fmt.Errorf("repository.RenewGroupContract: %w", domain.ErrGroupAdminAssignmentNotFound)
 	}
 
 	var existingCount int
@@ -1487,17 +1629,20 @@ func (r *AccountRepository) ResetPlatformAdminMFA(ctx context.Context, targetUse
 	return nil
 }
 
-// TransferGroup memindahkan pengelolaan SEMUA grup dari fromUserID ke
-// toUserID (S4P-03/04, IG-21). `organizations.group_id` TIDAK disentuh --
+// TransferGroup memindahkan pengelolaan SATU grup (groupID, S4G-07 --
+// sebelumnya SEMUA grup dari fromUserID sekaligus, tidak bisa memilih
+// sebagian kalau GA-nya mengelola >1 grup) dari fromUserID ke toUserID
+// (S4P-03/04, IG-21). `organizations.group_id` TIDAK disentuh --
 // organisasi tetap berada di grup yang sama, yang berubah cuma siapa GA
 // pengelolanya (koreksi wording AC lama sprint_backlog.md yang menyebut
 // "org berpindah group_id", audit S4 H4). toUserID harus akun
 // platform_role='group_admin' yang valid, kalau tidak ->
-// domain.ErrInvalidTransferTarget.
-func (r *AccountRepository) TransferGroup(ctx context.Context, fromUserID, toUserID, actorUserID string) (transferredGroupCount int, err error) {
+// domain.ErrInvalidTransferTarget. fromUserID harus benar-benar mengelola
+// groupID, kalau tidak -> domain.ErrGroupAdminAssignmentNotFound.
+func (r *AccountRepository) TransferGroup(ctx context.Context, groupID, fromUserID, toUserID, actorUserID string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: begin tx: %w", err)
+		return fmt.Errorf("repository.TransferGroup: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
 
@@ -1505,47 +1650,36 @@ func (r *AccountRepository) TransferGroup(ctx context.Context, fromUserID, toUse
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND platform_role = 'group_admin' AND deleted_at IS NULL)
 	`, toUserID).Scan(&targetIsGA); err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: cek target: %w", err)
+		return fmt.Errorf("repository.TransferGroup: cek target: %w", err)
 	}
 	if !targetIsGA {
-		return 0, fmt.Errorf("repository.TransferGroup: %w", domain.ErrInvalidTransferTarget)
+		return fmt.Errorf("repository.TransferGroup: %w", domain.ErrInvalidTransferTarget)
 	}
 
-	rows, err := tx.Query(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE group_admin_assignments
 		SET user_id = $2, assigned_by = $3, assigned_at = NOW()
-		WHERE user_id = $1
-		RETURNING group_id
-	`, fromUserID, toUserID, actorUserID)
+		WHERE group_id = $1 AND user_id = $4
+	`, groupID, toUserID, actorUserID, fromUserID)
 	if err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: update: %w", err)
+		return fmt.Errorf("repository.TransferGroup: update: %w", err)
 	}
-	var groupIDs []string
-	for rows.Next() {
-		var gid string
-		if err := rows.Scan(&gid); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("repository.TransferGroup: scan: %w", err)
-		}
-		groupIDs = append(groupIDs, gid)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: rows: %w", err)
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.TransferGroup: %w", domain.ErrGroupAdminAssignmentNotFound)
 	}
 
 	if err := writeAuditLog(ctx, tx, "platform_audit_logs", actorUserID, "platform_admin", "group.transferred", "user", &fromUserID, map[string]any{
 		"from_user_id": fromUserID,
 		"to_user_id":   toUserID,
-		"group_ids":    groupIDs,
+		"group_id":     groupID,
 	}, nil, nil); err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: audit: %w", err)
+		return fmt.Errorf("repository.TransferGroup: audit: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("repository.TransferGroup: commit tx: %w", err)
+		return fmt.Errorf("repository.TransferGroup: commit tx: %w", err)
 	}
-	return len(groupIDs), nil
+	return nil
 }
 
 // DeleteGroupAdmin menghapus (soft-delete via users.deleted_at, konsisten
