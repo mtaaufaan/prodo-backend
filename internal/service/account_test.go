@@ -120,7 +120,7 @@ func (f *fakeAccountRepository) RenewGroupContract(_ context.Context, targetUser
 	return f.renewGroupContractEndAt, nil
 }
 
-func (f *fakeAccountRepository) FindActiveGroupAdminByEmail(_ context.Context, _ string) (string, bool, error) {
+func (f *fakeAccountRepository) FindActiveGroupAdminByEmail(_ context.Context, _ string) (userID string, found bool, err error) {
 	return f.findGAByEmailUserID, f.findGAByEmailFound, f.findGAByEmailErr
 }
 
