@@ -372,12 +372,13 @@ func TestOrganizationService_UpdateStorageQuota_GroupAdminNotAssigned_Forbidden(
 }
 
 func TestOrganizationService_UpdateStorageQuota_RetentionOutOfRange(t *testing.T) {
-	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, quotaErr: domain.ErrRetentionOutOfRange}
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, quotaErr: &domain.RetentionOutOfRangeError{MinDays: 30, MaxDays: 90, TierName: "starter"}}
 	svc := NewOrganizationService(repo)
 
 	err := svc.UpdateStorageQuota(context.Background(), nil, "org-1", 1024, 400, "pa-1", "platform_admin")
-	if !errors.Is(err, domain.ErrRetentionOutOfRange) {
-		t.Errorf("err = %v, want wrapped domain.ErrRetentionOutOfRange", err)
+	var retentionErr *domain.RetentionOutOfRangeError
+	if !errors.As(err, &retentionErr) {
+		t.Errorf("err = %v, want wrapped *domain.RetentionOutOfRangeError", err)
 	}
 }
 

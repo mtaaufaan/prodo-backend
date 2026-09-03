@@ -159,14 +159,12 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 // (batas dari Platform Admin, glossary.md "Storage Quota"). CHECK constraint
 // ck_org_storage_quota_within_max di DB adalah jaring pengaman kedua;
 // validasi di sini yang memberi pesan error jelas (bukan constraint
-// violation mentah). retentionDays divalidasi 30-365, sama batas dengan
-// CHECK constraint ck_organizations_retention_days (§5.7) -- kolom ini
-// sudah ada sejak awal tapi belum pernah ditulis kode manapun.
+// violation mentah). retentionDays divalidasi terhadap plafon TIER grup
+// (S4G-08, Track S4G -- sebelumnya angka tetap 30-365 untuk semua tier,
+// lihat groupRetentionRange) -- CHECK constraint
+// ck_organizations_retention_days (§5.7, batas keras 30-365) tetap jadi
+// jaring pengaman kedua.
 func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error {
-	if retentionDays < 30 || retentionDays > 365 {
-		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrRetentionOutOfRange)
-	}
-
 	var maxBytes, usedMB int64
 	var groupID string
 	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id, storage_used_mb FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes, &groupID, &usedMB); err != nil {
@@ -175,6 +173,15 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 		}
 		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
 	}
+
+	minDays, maxDays, tierName, err := r.groupRetentionRange(ctx, exec, groupID)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
+	}
+	if retentionDays < minDays || retentionDays > maxDays {
+		return fmt.Errorf("repository.UpdateStorageQuota: %w", &domain.RetentionOutOfRangeError{MinDays: minDays, MaxDays: maxDays, TierName: tierName})
+	}
+
 	if quotaBytes > maxBytes {
 		return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrStorageQuotaExceedsMax)
 	}
@@ -235,6 +242,29 @@ func (r *OrganizationRepository) groupStorageCeilingGB(ctx context.Context, exec
 		return 0, fmt.Errorf("cek plafon grup: %w", err)
 	}
 	return ceilingGB, nil
+}
+
+// groupRetentionRange mengembalikan plafon retensi (hari) TIER grup --
+// service_tiers.min_retention_days/max_retention_days (S4G-08, Track
+// S4G), sebelumnya kolom ini cuma dipakai tampilan TierFactsPanel (FE),
+// tidak pernah ditegakkan sungguhan (retensi organisasi selalu dicek
+// terhadap angka tetap 30-365 untuk SEMUA tier). Di-clamp ke [30,365] --
+// batas keras CHECK constraint ck_organizations_retention_days (§5.7)
+// yang tidak bisa dilewati tier mana pun, jaga-jaga kalau data tier
+// dikonfigurasi di luar rentang itu. Dipisah dari UpdateStorageQuota
+// (pola sama groupStorageCeilingGB) supaya bisa direuse Create.
+func (r *OrganizationRepository) groupRetentionRange(ctx context.Context, exec db.Executor, groupID string) (minDays, maxDays int, tierName string, err error) {
+	if err := exec.QueryRow(ctx, `
+		SELECT GREATEST(30, COALESCE(st.min_retention_days, 30)),
+		       LEAST(365, COALESCE(st.max_retention_days, 365)),
+		       COALESCE(st.name, '-')
+		FROM groups g
+		LEFT JOIN service_tiers st ON st.id = g.tier_id
+		WHERE g.id = $1
+	`, groupID).Scan(&minDays, &maxDays, &tierName); err != nil {
+		return 0, 0, "", fmt.Errorf("cek plafon retensi grup: %w", err)
+	}
+	return minDays, maxDays, tierName, nil
 }
 
 // IsActive mengecek apakah organisasi TIDAK sedang nonaktif (S4G-04, Track
