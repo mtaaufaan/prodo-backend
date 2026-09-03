@@ -177,7 +177,7 @@ var (
 	ErrInvalidTransferTarget = errors.New("transfer target is not a valid group admin")
 
 	// ErrGroupAdminAssignmentNotFound dikembalikan Transfer/UpdateGroupAdmin/
-	// RenewGroupContract (S4G-07, Track S4G) saat pasangan (group_id,
+	// RenewGroupContract (S4G-33, Track S4G) saat pasangan (group_id,
 	// user_id) yang diminta tidak ada -- transfer/ubah/perpanjang sekarang
 	// di-scope per grup (bukan per akun, DATABASE_SCHEMA.md §5.6
 	// many-to-many mengizinkan satu GA mengelola >1 grup), jadi actor WAJIB
@@ -285,7 +285,7 @@ func (e *StorageQuotaBelowUsageError) Error() string {
 }
 
 // RetentionOutOfRangeError dikembalikan Create/UpdateStorageQuota
-// organisasi (S4G-08, Track S4G) saat retention_days di luar plafon TIER
+// organisasi (S4G-34, Track S4G) saat retention_days di luar plafon TIER
 // grup (service_tiers.min_retention_days/max_retention_days) --
 // sebelumnya (S4G-03) dicek terhadap angka TETAP 30-365 untuk SEMUA tier,
 // padahal kolom tier ini sudah ada sejak S4P-07 (dipakai tampilan

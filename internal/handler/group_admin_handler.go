@@ -124,7 +124,7 @@ func (h *GroupAdminHandler) Create(c *fiber.Ctx) error {
 		}
 	}
 
-	// S4G-07, Track S4G: LinkedExistingAccount berarti tidak ada invitation
+	// S4G-33, Track S4G: LinkedExistingAccount berarti tidak ada invitation
 	// baru sama sekali (akun existing ditautkan ke grup baru) -- tidak ada
 	// email aktivasi untuk dikirim.
 	if !result.LinkedExistingAccount {
@@ -280,7 +280,7 @@ func (h *GroupAdminHandler) setSuspension(c *fiber.Ctx, suspend bool) error {
 
 type transferGroupRequest struct {
 	ToUserID string `json:"to_user_id"`
-	// GroupID (S4G-07, Track S4G) -- WAJIB, grup SPESIFIK yang dipindahkan.
+	// GroupID (S4G-33, Track S4G) -- WAJIB, grup SPESIFIK yang dipindahkan.
 	// Sebelumnya endpoint ini memindahkan SEMUA grup milik :id sekaligus;
 	// sejak satu GA bisa mengelola >1 grup (DATABASE_SCHEMA.md §5.6),
 	// caller (baris panel PA yang di-klik "Pindahkan") wajib menyebut grup
@@ -289,7 +289,7 @@ type transferGroupRequest struct {
 }
 
 // Transfer menangani POST /platform/group-admins/:id/transfer (S4P-03/04,
-// IG-21, di-scope per grup sejak S4G-07) -- pindahkan pengelolaan SATU
+// IG-21, di-scope per grup sejak S4G-33) -- pindahkan pengelolaan SATU
 // grup (group_id di body) dari :id ke to_user_id.
 func (h *GroupAdminHandler) Transfer(c *fiber.Ctx) error {
 	claims, ok := middleware.ClaimsFromContext(c)
@@ -433,7 +433,7 @@ func formatOptionalDate(t *time.Time) *string {
 }
 
 // Get menangani GET /platform/group-admins/:id?group_id=X -- mode
-// "Lihat"/"Ubah" (S4P-06). group_id (S4G-07) WAJIB kalau baris panel yang
+// "Lihat"/"Ubah" (S4P-06). group_id (S4G-33) WAJIB kalau baris panel yang
 // diklik punya grup (kosong/tidak diberikan berarti baris 0-grup) --
 // satu baris panel PA sekarang = satu grup, bukan "grup pertama" GA lagi.
 func (h *GroupAdminHandler) Get(c *fiber.Ctx) error {
@@ -457,7 +457,7 @@ func (h *GroupAdminHandler) Get(c *fiber.Ctx) error {
 }
 
 type updateGroupAdminRequest struct {
-	// GroupID (S4G-07) -- WAJIB, grup SPESIFIK yang diubah. Sebelumnya
+	// GroupID (S4G-33) -- WAJIB, grup SPESIFIK yang diubah. Sebelumnya
 	// diresolusi diam-diam ke "grup pertama" GA itu.
 	GroupID        string `json:"group_id"`
 	DisplayName    string `json:"display_name"`
@@ -556,7 +556,7 @@ func (h *GroupAdminHandler) Update(c *fiber.Ctx) error {
 }
 
 type renewGroupContractRequest struct {
-	// GroupID (S4G-07) -- WAJIB, grup SPESIFIK yang diperpanjang kontraknya.
+	// GroupID (S4G-33) -- WAJIB, grup SPESIFIK yang diperpanjang kontraknya.
 	GroupID            string `json:"group_id"`
 	StartAt            string `json:"start_at"`
 	SubscriptionPeriod string `json:"subscription_period"`

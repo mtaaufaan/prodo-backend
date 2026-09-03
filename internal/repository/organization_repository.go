@@ -76,7 +76,7 @@ func (r *OrganizationRepository) GetGroupID(ctx context.Context, exec db.Executo
 // Create menyimpan organisasi baru + audit trail. Atomicity dijamin
 // transaksi request-scoped yang dibawa exec (S3-42, pola sama S2-11) --
 // bukan transaksi lokal di sini lagi. domain/defaultLanguage/quotaBytes/
-// retentionDays ditambahkan S4G-05 (Track S4G, desain
+// retentionDays ditambahkan S4G-31 (Track S4G, desain
 // "GA Add Organization.dc.html") -- sebelumnya Create cuma menyimpan
 // group_id/name/slug, memaksa GA mengisi kuota/retensi/bahasa/domain lewat
 // panggilan Update terpisah setelah organisasi dibuat (tidak sesuai alur
@@ -160,7 +160,7 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 // ck_org_storage_quota_within_max di DB adalah jaring pengaman kedua;
 // validasi di sini yang memberi pesan error jelas (bukan constraint
 // violation mentah). retentionDays divalidasi terhadap plafon TIER grup
-// (S4G-08, Track S4G -- sebelumnya angka tetap 30-365 untuk semua tier,
+// (S4G-34, Track S4G -- sebelumnya angka tetap 30-365 untuk semua tier,
 // lihat groupRetentionRange) -- CHECK constraint
 // ck_organizations_retention_days (§5.7, batas keras 30-365) tetap jadi
 // jaring pengaman kedua.
@@ -245,7 +245,7 @@ func (r *OrganizationRepository) groupStorageCeilingGB(ctx context.Context, exec
 }
 
 // groupRetentionRange mengembalikan plafon retensi (hari) TIER grup --
-// service_tiers.min_retention_days/max_retention_days (S4G-08, Track
+// service_tiers.min_retention_days/max_retention_days (S4G-34, Track
 // S4G), sebelumnya kolom ini cuma dipakai tampilan TierFactsPanel (FE),
 // tidak pernah ditegakkan sungguhan (retensi organisasi selalu dicek
 // terhadap angka tetap 30-365 untuk SEMUA tier). Di-clamp ke [30,365] --
@@ -343,7 +343,7 @@ func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executo
 // lihat halaman ini SELALU discoped RLS ke satu grup saja).
 // groupID kosong berarti TIDAK difilter -- perilaku lama, RLS-only,
 // dipakai Platform Admin (lintas grup) dan actor yang belum menentukan
-// grup aktif. groupID diisi (S4G-06, Track S4G, group switcher) berarti
+// grup aktif. groupID diisi (S4G-32, Track S4G, group switcher) berarti
 // scoping tambahan di LEVEL APLIKASI -- RLS `orgs_select` cuma menjamin
 // "grup APA SAJA yang actor kelola", tidak ada konsep "grup yang sedang
 // aktif dipilih" (dibutuhkan begitu satu Group Admin bisa mengelola >1

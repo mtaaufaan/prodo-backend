@@ -9,7 +9,7 @@ import (
 )
 
 // GroupDirectoryEntry -- satu baris GET /platform/groups (S4P-34, US-083).
-// MinRetentionDays/MaxRetentionDays (S4G-08, Track S4G) -- plafon retensi
+// MinRetentionDays/MaxRetentionDays (S4G-34, Track S4G) -- plafon retensi
 // tier grup ini, di-clamp [30,365] (sama logika
 // OrganizationRepository.groupRetentionRange) -- dipakai FE menampilkan
 // hint "RANGE {min}-{max} (BATAS TIER {nama})" di form Buat/Kelola

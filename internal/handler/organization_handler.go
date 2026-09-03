@@ -39,7 +39,7 @@ type createOrganizationRequest struct {
 }
 
 // Create menangani POST /organizations (S3-02, domain/default_language/
-// storage_quota_bytes/retention_days ditambahkan S4G-05/Track S4G sesuai
+// storage_quota_bytes/retention_days ditambahkan S4G-31/Track S4G sesuai
 // desain "GA Add Organization.dc.html" -- satu form, satu submit).
 func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -250,7 +250,7 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 
-	// group_id (S4G-06, Track S4G, group switcher): opsional -- scoping
+	// group_id (S4G-32, Track S4G, group switcher): opsional -- scoping
 	// tambahan untuk Group Admin yang mengelola >1 grup, lihat komentar
 	// OrganizationService.ListOrganizations.
 	orgs, ceilingBytes, err := h.orgs.ListOrganizations(c.Context(), exec, c.Query("group_id"), actorUserID, actorRole)
