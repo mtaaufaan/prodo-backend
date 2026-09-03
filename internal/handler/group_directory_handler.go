@@ -39,11 +39,13 @@ func (h *GroupDirectoryHandler) List(c *fiber.Ctx) error {
 	for i := range entries {
 		e := &entries[i]
 		data[i] = fiber.Map{
-			"id":        e.ID,
-			"name":      e.Name,
-			"tier":      e.TierName,
-			"ga_names":  e.GANames,
-			"org_count": e.OrgCount,
+			"id":                 e.ID,
+			"name":               e.Name,
+			"tier":               e.TierName,
+			"ga_names":           e.GANames,
+			"org_count":          e.OrgCount,
+			"min_retention_days": e.MinRetentionDays,
+			"max_retention_days": e.MaxRetentionDays,
 		}
 	}
 	return c.JSON(response.Success(data))

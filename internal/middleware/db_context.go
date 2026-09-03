@@ -64,7 +64,7 @@ func DBContextMiddleware(pool *pgxpool.Pool, users UserResolver) fiber.Handler {
 		// mengembalikan nil ke Fiber -- BUKAN dengan mengembalikan Go error
 		// literal. handlerErr saja karena itu SELALU nil untuk kegagalan
 		// bisnis biasa (validasi, conflict, dsb.), sehingga versi lama di
-		// sini selalu commit walau responsenya 4xx/5xx -- ditemukan S4G-05
+		// sini selalu commit walau responsenya 4xx/5xx -- ditemukan S4G-31
 		// lewat POST /organizations yang menulis (INSERT) sebelum
 		// memvalidasi kuota: percobaan yang divalidasi GAGAL (422) tetap
 		// commit organisasi dengan kuota/retensi default, DAN percobaan

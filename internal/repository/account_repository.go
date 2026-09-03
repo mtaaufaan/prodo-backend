@@ -175,7 +175,7 @@ func (r *AccountRepository) CreateGroupAdminInvitation(ctx context.Context, p *C
 }
 
 // FindActiveGroupAdminByEmail mencari akun Group Admin AKTIF (belum
-// di-soft-delete) dengan email persis (S4G-07) -- dipakai CreateGroupAdmin
+// di-soft-delete) dengan email persis (S4G-33) -- dipakai CreateGroupAdmin
 // SEBELUM memanggil Keycloak, supaya email yang match GA existing tidak
 // langsung ditolak ErrEmailAlreadyExists, melainkan ditautkan ke grup
 // baru (many-to-many, DATABASE_SCHEMA.md §5.6). Email yang match role
@@ -195,7 +195,7 @@ func (r *AccountRepository) FindActiveGroupAdminByEmail(ctx context.Context, ema
 	return userID, true, nil
 }
 
-// AttachExistingGroupAdminParams -- S4G-07, Track S4G: field yang sama
+// AttachExistingGroupAdminParams -- S4G-33, Track S4G: field yang sama
 // dengan CreateGroupAdminInvitationParams TAPI TANPA identitas akun
 // (Email/DisplayName/KeycloakUserID/TokenHash/ExpiresAt) -- akunnya sudah
 // ada, cuma ditautkan ke grup baru.
@@ -215,7 +215,7 @@ type AttachExistingGroupAdminParams struct {
 }
 
 // AttachExistingGroupAdminToGroup menautkan akun GA existing (ditemukan
-// lewat FindActiveGroupAdminByEmail) sebagai pengelola grup BARU (S4G-07)
+// lewat FindActiveGroupAdminByEmail) sebagai pengelola grup BARU (S4G-33)
 // -- versi CreateGroupAdminInvitation TANPA insert users/
 // user_auth_providers/platform_invitations (akunnya sudah ada & sudah
 // aktif), sisanya (groups, group_admin_assignments, group_contracts,
@@ -289,10 +289,10 @@ func (r *AccountRepository) AttachExistingGroupAdminToGroup(ctx context.Context,
 // GroupAdminSummary adalah SATU BARIS PER (GA, grup) untuk panel Platform
 // Admin (S1-12, diperkaya S4P-06 sesuai desain "PA Group Admins" -- kolom
 // TIER/SISA ORG/SISA KUOTA/SISA MEMBER/TANGGAL DAFTAR). Sebelumnya
-// (sampai S4G-07) cuma mengambil grup PERTAMA (LATERAL assigned_at
+// (sampai S4G-33) cuma mengambil grup PERTAMA (LATERAL assigned_at
 // paling awal) per GA -- GA yang mengelola >1 grup (many-to-many,
 // DATABASE_SCHEMA.md §5.6, dicapai lewat TransferGroup S4P-03 atau
-// "email sama" saat Create, S4G-07) cuma menampilkan satu dari N
+// "email sama" saat Create, S4G-33) cuma menampilkan satu dari N
 // grupnya, sisanya (tier/kuota/kontraknya sendiri-sendiri) TIDAK PERNAH
 // terlihat PA sama sekali -- bukan cuma "grup lama tidak update", data
 // grup lain itu memang tidak pernah di-query. Sekarang setiap grup yang
@@ -332,7 +332,7 @@ type GroupAdminSummary struct {
 }
 
 // groupAdminSummaryQuery -- SELECT bersama ListGroupAdmins (banyak baris,
-// fan-out satu baris per grup yang dikelola, S4G-07) dan GetGroupAdminDetail
+// fan-out satu baris per grup yang dikelola, S4G-33) dan GetGroupAdminDetail
 // (satu baris, di-filter ke SATU grup spesifik lewat groupID param) --
 // LEFT JOIN (bukan INNER) supaya GA yang kebetulan 0 grup tetap muncul
 // sebagai satu baris dengan field grup NULL, bukan hilang dari daftar.
@@ -375,7 +375,7 @@ func scanGroupAdminSummary(row interface{ Scan(...any) error }) (GroupAdminSumma
 }
 
 // ListGroupAdmins mengembalikan SATU BARIS PER (GA, grup) yang dikelola
-// (S4G-07), terbaru dulu (per akun), dengan pagination sederhana
+// (S4G-33), terbaru dulu (per akun), dengan pagination sederhana
 // (docs/coding-conventions.md §7.1). `total`/pagination sekarang menghitung
 // BARIS (GA x grup), bukan akun -- konsisten dengan apa yang benar-benar
 // di-page oleh LIMIT/OFFSET di bawah (GA dengan >1 grup makan >1 slot
@@ -417,7 +417,7 @@ func (r *AccountRepository) ListGroupAdmins(ctx context.Context, limit, offset i
 }
 
 // GetGroupAdminDetail mengembalikan satu Group Admin UNTUK SATU GRUP
-// SPESIFIK (groupID, S4G-07) untuk mode Lihat/Ubah (S4P-06) -- baris di
+// SPESIFIK (groupID, S4G-33) untuk mode Lihat/Ubah (S4P-06) -- baris di
 // panel PA sekarang satu per grup (lihat GroupAdminSummary), jadi "detail"
 // juga di-scope ke grup yang sama dengan baris yang diklik, bukan
 // menebak "grup pertama" lagi. groupID kosong berarti GA target memang
@@ -472,7 +472,7 @@ type UpdateGroupAdminParams struct {
 // diminta (S4P-06). Semua dalam satu transaksi + audit log. Mengembalikan
 // tier SEBELUM update (S4P-09) supaya caller tahu apakah tier benar-benar
 // berubah (notifikasi/email tier_changed cuma dikirim kalau berubah).
-// groupID (S4G-07, Track S4G): grup SPESIFIK yang diubah -- sebelumnya
+// groupID (S4G-33, Track S4G): grup SPESIFIK yang diubah -- sebelumnya
 // ditebak lewat "grup pertama" (ORDER BY assigned_at LIMIT 1), yang jadi
 // salah/ambigu begitu satu GA bisa mengelola >1 grup. Sekarang caller
 // (baris panel PA yang di-klik "Ubah") WAJIB menyebut grup mana secara
@@ -606,7 +606,7 @@ func addSubscriptionPeriod(start time.Time, period string) (time.Time, error) {
 // Dipakai baik untuk kontrak PERTAMA suatu grup (kalau belum pernah ada
 // sama sekali) maupun PERPANJANGAN (kalau sudah ada) -- dibedakan lewat
 // count baris existing SEBELUM insert, supaya audit action-nya tepat
-// (group.contract_created vs group.contract_renewed). groupID (S4G-07)
+// (group.contract_created vs group.contract_renewed). groupID (S4G-33)
 // WAJIB disebut eksplisit oleh caller -- sebelumnya ditebak dari "grup
 // pertama" GA itu, ambigu begitu GA bisa mengelola >1 grup.
 func (r *AccountRepository) RenewGroupContract(ctx context.Context, targetUserID, groupID string, startAt time.Time, subscriptionPeriod, invoiceNumber, actorUserID string) (endAt time.Time, err error) {
@@ -1629,7 +1629,7 @@ func (r *AccountRepository) ResetPlatformAdminMFA(ctx context.Context, targetUse
 	return nil
 }
 
-// TransferGroup memindahkan pengelolaan SATU grup (groupID, S4G-07 --
+// TransferGroup memindahkan pengelolaan SATU grup (groupID, S4G-33 --
 // sebelumnya SEMUA grup dari fromUserID sekaligus, tidak bisa memilih
 // sebagian kalau GA-nya mengelola >1 grup) dari fromUserID ke toUserID
 // (S4P-03/04, IG-21). `organizations.group_id` TIDAK disentuh --

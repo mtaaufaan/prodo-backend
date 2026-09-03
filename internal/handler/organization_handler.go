@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -38,7 +39,7 @@ type createOrganizationRequest struct {
 }
 
 // Create menangani POST /organizations (S3-02, domain/default_language/
-// storage_quota_bytes/retention_days ditambahkan S4G-05/Track S4G sesuai
+// storage_quota_bytes/retention_days ditambahkan S4G-31/Track S4G sesuai
 // desain "GA Add Organization.dc.html" -- satu form, satu submit).
 func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -249,7 +250,7 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 
-	// group_id (S4G-06, Track S4G, group switcher): opsional -- scoping
+	// group_id (S4G-32, Track S4G, group switcher): opsional -- scoping
 	// tambahan untuk Group Admin yang mengelola >1 grup, lihat komentar
 	// OrganizationService.ListOrganizations.
 	orgs, ceilingBytes, err := h.orgs.ListOrganizations(c.Context(), exec, c.Query("group_id"), actorUserID, actorRole)
@@ -335,6 +336,7 @@ func (h *OrganizationHandler) Summary(c *fiber.Ctx) error {
 }
 
 func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
+	var retentionErr *domain.RetentionOutOfRangeError
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- domain harus format domain valid (mis. acme.co.id)", nil))
@@ -352,8 +354,10 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("GROUP_STORAGE_QUOTA_EXCEEDS_CEILING", "Total kuota seluruh organisasi dalam grup akan melebihi plafon storage grup", nil))
 	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
-	case errors.Is(err, domain.ErrRetentionOutOfRange):
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("RETENTION_OUT_OF_RANGE", "Retensi harus antara 30 dan 365 hari", nil))
+	case errors.As(err, &retentionErr):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("RETENTION_OUT_OF_RANGE",
+			fmt.Sprintf("Retensi harus antara %d dan %d hari (batas tier %s)", retentionErr.MinDays, retentionErr.MaxDays, retentionErr.TierName),
+			fiber.Map{"min_days": retentionErr.MinDays, "max_days": retentionErr.MaxDays, "tier_name": retentionErr.TierName}))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))
