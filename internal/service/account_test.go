@@ -48,7 +48,7 @@ type fakeAccountRepository struct {
 	setIPAllowlistEnabledErr error
 
 	transferErr         error
-	transferCount       int
+	transferGroupID     string
 	transferFromUserID  string
 	transferToUserID    string
 	deleteGroupAdminErr error
@@ -80,18 +80,26 @@ type fakeAccountRepository struct {
 	tierLifecycleCallID string
 
 	renewedTargetUserID       string
+	renewedGroupID            string
 	renewedStartAt            time.Time
 	renewedSubscriptionPeriod string
 	renewedInvoiceNumber      string
 	renewGroupContractEndAt   time.Time
 	renewGroupContractErr     error
+
+	findGAByEmailUserID string
+	findGAByEmailFound  bool
+	findGAByEmailErr    error
+	attachedParams      *repository.AttachExistingGroupAdminParams
+	attachGroupID       string
+	attachErr           error
 }
 
-func (f *fakeAccountRepository) GetGroupAdminDetail(_ context.Context, _ string) (*repository.GroupAdminSummary, error) {
+func (f *fakeAccountRepository) GetGroupAdminDetail(_ context.Context, _, _ string) (*repository.GroupAdminSummary, error) {
 	return f.groupAdminDetail, f.groupAdminDetailErr
 }
 
-func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID string, p *repository.UpdateGroupAdminParams, _ string) (string, error) {
+func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID, _ string, p *repository.UpdateGroupAdminParams, _ string) (string, error) {
 	f.updatedGroupAdminID = targetUserID
 	f.updatedGroupAdminParam = p
 	if f.updateGroupAdminErr != nil {
@@ -100,8 +108,9 @@ func (f *fakeAccountRepository) UpdateGroupAdmin(_ context.Context, targetUserID
 	return f.updateGroupAdminOldTier, nil
 }
 
-func (f *fakeAccountRepository) RenewGroupContract(_ context.Context, targetUserID string, startAt time.Time, subscriptionPeriod, invoiceNumber, _ string) (time.Time, error) {
+func (f *fakeAccountRepository) RenewGroupContract(_ context.Context, targetUserID, groupID string, startAt time.Time, subscriptionPeriod, invoiceNumber, _ string) (time.Time, error) {
 	f.renewedTargetUserID = targetUserID
+	f.renewedGroupID = groupID
 	f.renewedStartAt = startAt
 	f.renewedSubscriptionPeriod = subscriptionPeriod
 	f.renewedInvoiceNumber = invoiceNumber
@@ -109,6 +118,18 @@ func (f *fakeAccountRepository) RenewGroupContract(_ context.Context, targetUser
 		return time.Time{}, f.renewGroupContractErr
 	}
 	return f.renewGroupContractEndAt, nil
+}
+
+func (f *fakeAccountRepository) FindActiveGroupAdminByEmail(_ context.Context, _ string) (userID string, found bool, err error) {
+	return f.findGAByEmailUserID, f.findGAByEmailFound, f.findGAByEmailErr
+}
+
+func (f *fakeAccountRepository) AttachExistingGroupAdminToGroup(_ context.Context, p *repository.AttachExistingGroupAdminParams) (string, error) {
+	f.attachedParams = p
+	if f.attachErr != nil {
+		return "", f.attachErr
+	}
+	return f.attachGroupID, nil
 }
 
 func (f *fakeAccountRepository) ListServiceTiers(_ context.Context, includeArchived bool) ([]repository.ServiceTier, error) {
@@ -169,13 +190,11 @@ func (f *fakeAccountRepository) ReactivateGroupAdmin(_ context.Context, targetUs
 	return f.reactivateErr
 }
 
-func (f *fakeAccountRepository) TransferGroup(_ context.Context, fromUserID, toUserID, _ string) (int, error) {
+func (f *fakeAccountRepository) TransferGroup(_ context.Context, groupID, fromUserID, toUserID, _ string) error {
+	f.transferGroupID = groupID
 	f.transferFromUserID = fromUserID
 	f.transferToUserID = toUserID
-	if f.transferErr != nil {
-		return 0, f.transferErr
-	}
-	return f.transferCount, nil
+	return f.transferErr
 }
 
 func (f *fakeAccountRepository) DeleteGroupAdmin(_ context.Context, targetUserID, _ string) error {
@@ -334,6 +353,34 @@ func TestAccountService_CreateGroupAdmin_Success(t *testing.T) {
 	}
 	if repo.captured.TokenHash == "" || repo.captured.TokenHash == result.ActivationToken {
 		t.Error("TokenHash harus terisi dan berbeda dari raw token (bukti hashing, bukan plaintext)")
+	}
+}
+
+// TestAccountService_CreateGroupAdmin_LinksExistingGroupAdmin -- S4G-07:
+// email yang match GA aktif existing menautkan grup baru ke akun itu,
+// TANPA menyentuh Keycloak/membuat user baru.
+func TestAccountService_CreateGroupAdmin_LinksExistingGroupAdmin(t *testing.T) {
+	repo := &fakeAccountRepository{findGAByEmailUserID: "existing-ga-1", findGAByEmailFound: true, attachGroupID: "group-new-1"}
+	kc := &fakeKeycloakClient{userID: "should-not-be-used"}
+	svc := NewAccountService(repo, kc, zap.NewNop())
+
+	result, err := svc.CreateGroupAdmin(context.Background(), &CreateGroupAdminRequest{
+		Email: "existing-ga@example.com", DisplayName: "GA Lama", GroupName: "PT Retail Sejahtera", InvitedByUserID: "pa-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.LinkedExistingAccount {
+		t.Error("LinkedExistingAccount = false, want true")
+	}
+	if result.UserID != "existing-ga-1" {
+		t.Errorf("UserID = %q, want %q (akun existing, bukan Keycloak baru)", result.UserID, "existing-ga-1")
+	}
+	if result.ActivationToken != "" {
+		t.Error("ActivationToken seharusnya kosong -- tidak ada invitation baru")
+	}
+	if repo.attachedParams == nil || repo.attachedParams.ExistingUserID != "existing-ga-1" || repo.attachedParams.GroupName != "PT Retail Sejahtera" {
+		t.Errorf("attachedParams = %+v, want ExistingUserID=existing-ga-1 GroupName=PT Retail Sejahtera", repo.attachedParams)
 	}
 }
 
@@ -569,18 +616,15 @@ func TestAccountService_DeleteIPAllowlistEntry_NotFound(t *testing.T) {
 }
 
 func TestAccountService_TransferGroup_Success(t *testing.T) {
-	repo := &fakeAccountRepository{transferCount: 2}
+	repo := &fakeAccountRepository{}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	count, err := svc.TransferGroup(context.Background(), "ga-a", "ga-b", "pa-1")
+	err := svc.TransferGroup(context.Background(), "group-1", "ga-a", "ga-b", "pa-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if count != 2 {
-		t.Errorf("count = %d, want 2", count)
-	}
-	if repo.transferFromUserID != "ga-a" || repo.transferToUserID != "ga-b" {
-		t.Errorf("transfer args = (%q, %q), want (ga-a, ga-b)", repo.transferFromUserID, repo.transferToUserID)
+	if repo.transferGroupID != "group-1" || repo.transferFromUserID != "ga-a" || repo.transferToUserID != "ga-b" {
+		t.Errorf("transfer args = (%q, %q, %q), want (group-1, ga-a, ga-b)", repo.transferGroupID, repo.transferFromUserID, repo.transferToUserID)
 	}
 }
 
@@ -588,7 +632,7 @@ func TestAccountService_TransferGroup_InvalidTarget(t *testing.T) {
 	repo := &fakeAccountRepository{transferErr: domain.ErrInvalidTransferTarget}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.TransferGroup(context.Background(), "ga-a", "not-a-ga", "pa-1")
+	err := svc.TransferGroup(context.Background(), "group-1", "ga-a", "not-a-ga", "pa-1")
 	if !errors.Is(err, domain.ErrInvalidTransferTarget) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidTransferTarget", err)
 	}
@@ -651,7 +695,7 @@ func TestAccountService_GetGroupAdminDetail_Success(t *testing.T) {
 	repo := &fakeAccountRepository{groupAdminDetail: &repository.GroupAdminSummary{ID: "ga-1", Email: "ga@example.com"}}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	detail, err := svc.GetGroupAdminDetail(context.Background(), "ga-1")
+	detail, err := svc.GetGroupAdminDetail(context.Background(), "ga-1", "group-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -663,7 +707,7 @@ func TestAccountService_GetGroupAdminDetail_Success(t *testing.T) {
 func TestAccountService_UpdateGroupAdmin_InvalidInput(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{TierID: "tier-1"}, "pa-1")
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{TierID: "tier-1"}, "pa-1")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
 	}
@@ -675,7 +719,7 @@ func TestAccountService_UpdateGroupAdmin_InvalidInput(t *testing.T) {
 func TestAccountService_UpdateGroupAdmin_PropagatesInvalidTierFromRepo(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{updateGroupAdminErr: domain.ErrInvalidTier}, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-bad-id",
 	}, "pa-1")
 	if !errors.Is(err, domain.ErrInvalidTier) {
@@ -686,7 +730,7 @@ func TestAccountService_UpdateGroupAdmin_PropagatesInvalidTierFromRepo(t *testin
 func TestAccountService_UpdateGroupAdmin_InvalidStatusTransition(t *testing.T) {
 	svc := NewAccountService(&fakeAccountRepository{}, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-1", NewStatus: "TIDAK AKTIF",
 	}, "pa-1")
 	if !errors.Is(err, domain.ErrInvalidStatusTransition) {
@@ -698,7 +742,7 @@ func TestAccountService_UpdateGroupAdmin_Success(t *testing.T) {
 	repo := &fakeAccountRepository{}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA Baru", GroupName: "PT Contoh Baru", TierID: "tier-business-id", NewStatus: "SUSPENDED",
 	}, "pa-1")
 	if err != nil {
@@ -716,7 +760,7 @@ func TestAccountService_RenewGroupContract_InvalidPeriod(t *testing.T) {
 	repo := &fakeAccountRepository{}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	_, err := svc.RenewGroupContract(context.Background(), "ga-1", time.Now(), "weekly", "", "pa-1")
+	_, err := svc.RenewGroupContract(context.Background(), "ga-1", "group-1", time.Now(), "weekly", "", "pa-1")
 	if !errors.Is(err, domain.ErrInvalidSubscriptionPeriod) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidSubscriptionPeriod", err)
 	}
@@ -731,7 +775,7 @@ func TestAccountService_RenewGroupContract_Valid(t *testing.T) {
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	endAt, err := svc.RenewGroupContract(context.Background(), "ga-1", start, "quarterly", "INV-001", "pa-1")
+	endAt, err := svc.RenewGroupContract(context.Background(), "ga-1", "group-1", start, "quarterly", "INV-001", "pa-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -751,7 +795,7 @@ func TestAccountService_UpdateGroupAdmin_RejectsStorageQuotaBelowUsage(t *testin
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
 	newQuota := 40
-	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-1", StorageQuotaGB: &newQuota,
 	}, "pa-1")
 	var quotaErr *domain.StorageQuotaBelowUsageError
@@ -768,7 +812,7 @@ func TestAccountService_UpdateGroupAdmin_AllowsStorageQuotaAtOrAboveUsage(t *tes
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
 	newQuota := 50
-	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	_, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-1", StorageQuotaGB: &newQuota,
 	}, "pa-1")
 	if err != nil {
@@ -783,7 +827,7 @@ func TestAccountService_UpdateGroupAdmin_ReturnsOldTier(t *testing.T) {
 	repo := &fakeAccountRepository{updateGroupAdminOldTier: "starter"}
 	svc := NewAccountService(repo, &fakeKeycloakClient{}, zap.NewNop())
 
-	oldTier, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", &repository.UpdateGroupAdminParams{
+	oldTier, err := svc.UpdateGroupAdmin(context.Background(), "ga-1", "group-1", &repository.UpdateGroupAdminParams{
 		DisplayName: "GA", GroupName: "PT Contoh", TierID: "tier-enterprise-id",
 	}, "pa-1")
 	if err != nil {

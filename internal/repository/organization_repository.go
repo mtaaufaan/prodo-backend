@@ -75,14 +75,22 @@ func (r *OrganizationRepository) GetGroupID(ctx context.Context, exec db.Executo
 
 // Create menyimpan organisasi baru + audit trail. Atomicity dijamin
 // transaksi request-scoped yang dibawa exec (S3-42, pola sama S2-11) --
-// bukan transaksi lokal di sini lagi.
-func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*Organization, error) {
-	org := &Organization{GroupID: groupID, Name: name, Slug: slug}
+// bukan transaksi lokal di sini lagi. domain/defaultLanguage/quotaBytes/
+// retentionDays ditambahkan S4G-05 (Track S4G, desain
+// "GA Add Organization.dc.html") -- sebelumnya Create cuma menyimpan
+// group_id/name/slug, memaksa GA mengisi kuota/retensi/bahasa/domain lewat
+// panggilan Update terpisah setelah organisasi dibuat (tidak sesuai alur
+// desain, satu form sekali submit). Kuota/retensi divalidasi lewat
+// UpdateStorageQuota yang sudah ada (reuse penuh: cek storage_max_bytes,
+// plafon storage grup gabungan) -- kalau validasi gagal, INSERT ini ikut
+// roll back bersama transaksi request-scoped.
+func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*Organization, error) {
+	org := &Organization{GroupID: groupID, Name: name, Slug: slug, Domain: orgDomain, DefaultLanguage: defaultLanguage}
 	err := exec.QueryRow(ctx, `
-		INSERT INTO organizations (group_id, name, slug)
-		VALUES ($1, $2, $3)
+		INSERT INTO organizations (group_id, name, slug, domain, default_language)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5::org_language)
 		RETURNING id, created_at
-	`, groupID, name, slug).Scan(&org.ID, &org.CreatedAt)
+	`, groupID, name, slug, orgDomain, defaultLanguage).Scan(&org.ID, &org.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
 	}
@@ -90,6 +98,13 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.created", org.ID); err != nil {
 		return nil, fmt.Errorf("repository.Create: audit: %w", err)
 	}
+
+	if err := r.UpdateStorageQuota(ctx, exec, org.ID, quotaBytes, retentionDays, actorID, actorRole); err != nil {
+		return nil, fmt.Errorf("repository.Create: %w", err)
+	}
+	org.StorageQuotaBytes = quotaBytes
+	org.RetentionDays = retentionDays
+
 	return org, nil
 }
 
@@ -296,13 +311,22 @@ func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executo
 // LEBIH dari satu grup (kasus Platform Admin yang lihat semua organisasi
 // lintas grup -- "satu plafon" tidak bermakna di situ, GA yang biasanya
 // lihat halaman ini SELALU discoped RLS ke satu grup saja).
-func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]Organization, int64, error) {
+// groupID kosong berarti TIDAK difilter -- perilaku lama, RLS-only,
+// dipakai Platform Admin (lintas grup) dan actor yang belum menentukan
+// grup aktif. groupID diisi (S4G-06, Track S4G, group switcher) berarti
+// scoping tambahan di LEVEL APLIKASI -- RLS `orgs_select` cuma menjamin
+// "grup APA SAJA yang actor kelola", tidak ada konsep "grup yang sedang
+// aktif dipilih" (dibutuhkan begitu satu Group Admin bisa mengelola >1
+// grup, DATABASE_SCHEMA.md §5.6 many-to-many); validasi actor benar-benar
+// berwenang atas groupID ini tetap di service (authorizeGroup), di sini
+// murni filter WHERE.
+func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor, groupID string) ([]Organization, int64, error) {
 	// workspace_count/member_count (S4G-03, Track S4G, desain
 	// "GA Organizations.dc.html" kolom "WS · MEMBER") -- dihitung per baris
 	// lewat subquery correlated, sama pola GetSummary, TAPI di sini
 	// multi-row -- reuse yang sama supaya tidak N+1 request GetSummary per
 	// organisasi dari FE.
-	rows, err := exec.Query(ctx, `
+	query := `
 		SELECT o.id, o.group_id, o.name, o.slug, COALESCE(o.domain, ''), o.default_language,
 		       o.storage_quota_bytes, o.storage_max_bytes, o.storage_used_mb * 1024 * 1024, o.retention_days,
 		       COALESCE((SELECT COUNT(*) FROM workspaces w WHERE w.org_id = o.id AND w.archived_at IS NULL), 0),
@@ -310,8 +334,15 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]
 		                 JOIN workspaces w2 ON w2.id = wm.workspace_id WHERE w2.org_id = o.id), 0),
 		       o.deactivated_at, o.created_at
 		FROM organizations o
-		ORDER BY o.name
-	`)
+	`
+	args := []any{}
+	if groupID != "" {
+		query += ` WHERE o.group_id = $1`
+		args = append(args, groupID)
+	}
+	query += ` ORDER BY o.name`
+
+	rows, err := exec.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("repository.List: %w", err)
 	}
@@ -330,7 +361,21 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor) ([]
 	}
 
 	var ceilingBytes int64
-	if len(orgs) > 0 {
+	switch {
+	case groupID != "":
+		// groupID eksplisit (query param tervalidasi service) -- ceiling
+		// selalu well-defined langsung dari groupID, tidak perlu nebak dari
+		// orgs[0] (jadi juga benar untuk grup yang MEMANG kosong, 0
+		// organisasi -- bukan cuma "sameGroup" heuristik lama).
+		ceilingGB, err := r.groupStorageCeilingGB(ctx, exec, groupID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("repository.List: %w", err)
+		}
+		ceilingBytes = int64(ceilingGB) * 1024 * 1024 * 1024
+	case len(orgs) > 0:
+		// groupID tidak diberikan (mis. Platform Admin lintas grup) --
+		// heuristik lama: ceiling cuma bermakna kalau kebetulan SELURUH
+		// baris yang RLS izinkan berasal dari satu grup yang sama.
 		sameGroup := true
 		for i := range orgs {
 			if orgs[i].GroupID != orgs[0].GroupID {
