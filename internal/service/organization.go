@@ -18,7 +18,7 @@ import (
 type organizationRepository interface {
 	IsGroupAdminOfGroup(ctx context.Context, exec db.Executor, userID, groupID string) (bool, error)
 	GetGroupID(ctx context.Context, exec db.Executor, orgID string) (string, error)
-	Create(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error)
+	Create(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*repository.Organization, error)
 	Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error
 	UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error
 	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error
@@ -26,7 +26,7 @@ type organizationRepository interface {
 	Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Delete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	GetSummary(ctx context.Context, exec db.Executor, orgID string) (*repository.Summary, error)
-	List(ctx context.Context, exec db.Executor) ([]repository.Organization, int64, error)
+	List(ctx context.Context, exec db.Executor, groupID string) ([]repository.Organization, int64, error)
 	IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error)
 }
 
@@ -90,15 +90,24 @@ func (s *OrganizationService) AuthorizeOrgAccess(ctx context.Context, exec db.Ex
 
 // CreateOrganization membuat organisasi baru (S3-02). name/slug wajib diisi;
 // slug divalidasi format DI HANDLER (validator.IsValidSlug), bukan di sini.
-func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Executor, groupID, name, slug, actorID, actorRole string) (*repository.Organization, error) {
-	if groupID == "" || name == "" || slug == "" {
+// domain/defaultLanguage/quotaBytes/retentionDays ditambahkan S4G-05 (Track
+// S4G, desain "GA Add Organization.dc.html") -- lihat komentar
+// OrganizationRepository.Create soal reuse validasi UpdateStorageQuota.
+func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*repository.Organization, error) {
+	if groupID == "" || name == "" || slug == "" || quotaBytes <= 0 {
+		return nil, fmt.Errorf("service.CreateOrganization: %w", domain.ErrInvalidInput)
+	}
+	if orgDomain != "" && !orgDomainPattern.MatchString(orgDomain) {
+		return nil, fmt.Errorf("service.CreateOrganization: %w", domain.ErrInvalidInput)
+	}
+	if !validOrgLanguages[defaultLanguage] {
 		return nil, fmt.Errorf("service.CreateOrganization: %w", domain.ErrInvalidInput)
 	}
 	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
 		return nil, err
 	}
 
-	org, err := s.repo.Create(ctx, exec, groupID, name, slug, actorID, actorRole)
+	org, err := s.repo.Create(ctx, exec, groupID, name, slug, orgDomain, defaultLanguage, quotaBytes, retentionDays, actorID, actorRole)
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateOrganization: %w", err)
 	}
@@ -196,10 +205,20 @@ func (s *OrganizationService) ReactivateOrganization(ctx context.Context, exec d
 }
 
 // ListOrganizations mengembalikan organisasi yang terlihat oleh actor,
-// plus plafon storage grup (lihat repository.List) -- scoping sepenuhnya
-// lewat RLS, tidak ada pengecekan tambahan di sini.
-func (s *OrganizationService) ListOrganizations(ctx context.Context, exec db.Executor) ([]repository.Organization, int64, error) {
-	orgs, ceilingBytes, err := s.repo.List(ctx, exec)
+// plus plafon storage grup (lihat repository.List). groupID kosong berarti
+// tidak ada filter tambahan -- scoping sepenuhnya lewat RLS, sama seperti
+// sebelumnya (dipakai Platform Admin lintas grup). groupID diisi (S4G-06,
+// Track S4G, group switcher -- Group Admin yang mengelola >1 grup,
+// DATABASE_SCHEMA.md §5.6) WAJIB divalidasi actor benar-benar berwenang
+// atas grup itu di sini -- RLS sendiri cuma menjamin "grup APA SAJA yang
+// dikelola", bukan "grup yang sedang aktif dipilih actor".
+func (s *OrganizationService) ListOrganizations(ctx context.Context, exec db.Executor, groupID, actorID, actorRole string) ([]repository.Organization, int64, error) {
+	if groupID != "" {
+		if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
+			return nil, 0, err
+		}
+	}
+	orgs, ceilingBytes, err := s.repo.List(ctx, exec, groupID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("service.ListOrganizations: %w", err)
 	}
