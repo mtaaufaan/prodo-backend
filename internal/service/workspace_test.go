@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
@@ -16,17 +17,19 @@ type fakeWorkspaceRepo struct {
 	created   *repository.Workspace
 	createErr error
 
-	orgID         map[string]string
-	getOrgIDErr   error
-	updateErr     error
-	archiveErr    error
-	unarchiveErr  error
-	deactivateErr error
-	reactivateErr error
-	deleteErr     error
-	moveErr       error
-	listResult    []repository.Workspace
-	listErr       error
+	orgID          map[string]string
+	getOrgIDErr    error
+	updateErr      error
+	archiveErr     error
+	unarchiveErr   error
+	deactivateErr  error
+	reactivateErr  error
+	deleteErr      error
+	moveErr        error
+	listResult     []repository.Workspace
+	listErr        error
+	listByGroup    []repository.WorkspaceListRow
+	listByGroupErr error
 }
 
 func (f *fakeWorkspaceRepo) Create(_ context.Context, _ db.Executor, orgID, name, _, _ string) (*repository.Workspace, error) {
@@ -88,10 +91,16 @@ func (f *fakeWorkspaceRepo) MoveToOrg(_ context.Context, _ db.Executor, _, _, _,
 	return f.moveErr
 }
 
+func (f *fakeWorkspaceRepo) ListByGroup(_ context.Context, _ db.Executor, _ string) ([]repository.WorkspaceListRow, error) {
+	return f.listByGroup, f.listByGroupErr
+}
+
 type fakeOrgAuthorizer struct {
 	err            error
 	isActiveResult bool
 	isActiveErr    error
+	isGA           bool
+	isGAErr        error
 }
 
 func (f *fakeOrgAuthorizer) AuthorizeOrgAccess(_ context.Context, _ db.Executor, _, _, _ string) error {
@@ -102,9 +111,14 @@ func (f *fakeOrgAuthorizer) IsActive(_ context.Context, _ db.Executor, _ string)
 	return f.isActiveResult, f.isActiveErr
 }
 
+func (f *fakeOrgAuthorizer) IsGroupAdminOfGroup(_ context.Context, _ db.Executor, _, _ string) (bool, error) {
+	return f.isGA, f.isGAErr
+}
+
 type fakeRoleAssigner struct {
-	err     error
-	members []repository.Member
+	err        error
+	members    []repository.Member
+	candidates []repository.Member
 }
 
 func (f *fakeRoleAssigner) AssignRole(_ context.Context, _ db.Executor, _, _, _ string, _ *string, _, _ string) (*RoleChangeResult, error) {
@@ -118,10 +132,23 @@ func (f *fakeRoleAssigner) ListMembers(_ context.Context, _ db.Executor, _ strin
 	return f.members, nil
 }
 
-type fakeContactLookup struct{}
+func (f *fakeRoleAssigner) ListOrgCandidates(_ context.Context, _ db.Executor, _ string) ([]repository.Member, error) {
+	return f.candidates, nil
+}
+
+type fakeContactLookup struct {
+	emailToUserID map[string]string
+}
 
 func (f *fakeContactLookup) FindUserContactByID(_ context.Context, userID string) (*repository.UserContact, error) {
 	return &repository.UserContact{Email: userID + "@prodo.local", DisplayName: userID}, nil
+}
+
+func (f *fakeContactLookup) FindUserIDByEmail(_ context.Context, email string) (string, error) {
+	if id, ok := f.emailToUserID[email]; ok {
+		return id, nil
+	}
+	return "", pgx.ErrNoRows
 }
 
 type fakeAdminChangeNotifier struct{}
@@ -130,14 +157,25 @@ func (f *fakeAdminChangeNotifier) SendWorkspaceAdminChangedEmail(_ context.Conte
 	return nil
 }
 
+type fakeInvitationCreator struct {
+	err error
+}
+
+func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _ string) (*Invitation, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &Invitation{Email: email, WorkspaceID: workspaceID, Role: role}, nil
+}
+
 func newTestWorkspaceService(repo workspaceRepository, orgs orgAuthorizer, rbac roleAssigner) *WorkspaceService {
-	return NewWorkspaceService(repo, orgs, rbac, &fakeContactLookup{}, &fakeAdminChangeNotifier{}, zap.NewNop())
+	return NewWorkspaceService(repo, orgs, rbac, &fakeContactLookup{}, &fakeAdminChangeNotifier{}, &fakeInvitationCreator{}, zap.NewNop())
 }
 
 func TestWorkspaceService_CreateWorkspace_Success(t *testing.T) {
 	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
 
-	ws, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "aw-1", "ga-1", "group_admin")
+	ws, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "aw-1", "", "", "ga-1", "group_admin", "GA Satu")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,10 +184,44 @@ func TestWorkspaceService_CreateWorkspace_Success(t *testing.T) {
 	}
 }
 
+func TestWorkspaceService_CreateWorkspace_InviteNewEmail(t *testing.T) {
+	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
+
+	ws, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "", "baru@acme.co.id", "Admin Baru", "ga-1", "group_admin", "GA Satu")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ws.ID != "ws-new" {
+		t.Errorf("ws = %+v, unexpected", ws)
+	}
+}
+
+func TestWorkspaceService_CreateWorkspace_InviteEmailMissingName(t *testing.T) {
+	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
+
+	_, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "", "baru@acme.co.id", "", "ga-1", "group_admin", "GA Satu")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+func TestWorkspaceService_CreateWorkspace_InviteExistingEmailAssignsDirectly(t *testing.T) {
+	repo := &fakeWorkspaceRepo{}
+	svc := NewWorkspaceService(repo, &fakeOrgAuthorizer{}, &fakeRoleAssigner{}, &fakeContactLookup{emailToUserID: map[string]string{"ada@acme.co.id": "user-existing"}}, &fakeAdminChangeNotifier{}, &fakeInvitationCreator{}, zap.NewNop())
+
+	ws, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "", "ada@acme.co.id", "", "ga-1", "group_admin", "GA Satu")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ws.ID != "ws-new" {
+		t.Errorf("ws = %+v, unexpected", ws)
+	}
+}
+
 func TestWorkspaceService_CreateWorkspace_Forbidden(t *testing.T) {
 	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeRoleAssigner{})
 
-	_, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "aw-1", "ga-2", "group_admin")
+	_, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "aw-1", "", "", "ga-2", "group_admin", "GA Dua")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
@@ -158,7 +230,7 @@ func TestWorkspaceService_CreateWorkspace_Forbidden(t *testing.T) {
 func TestWorkspaceService_CreateWorkspace_MissingFields(t *testing.T) {
 	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
 
-	_, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "", "aw-1", "pa-1", "platform_admin")
+	_, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "", "aw-1", "", "", "pa-1", "platform_admin", "PA Satu")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
 	}

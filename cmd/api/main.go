@@ -150,7 +150,7 @@ func run() error {
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
 	organizationSvc := service.NewOrganizationService(organizationRepo)
 	workspaceRepo := repository.NewWorkspaceRepository()
-	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, logger)
+	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, invitationSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc)
@@ -176,7 +176,7 @@ func run() error {
 	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
-	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, logger)
+	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, accountSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
 	groupHandler := handler.NewGroupHandler(groupSvc, logger)
@@ -331,6 +331,15 @@ func run() error {
 	// S3-09, US-008. Otorisasi sama seperti organizations (reuse
 	// OrganizationService.AuthorizeOrgAccess via WorkspaceService).
 	v1.Post("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.CreateWorkspace)
+	// S4G-05, Track S4G: picker "MEMBER YANG ADA" (Tambah Workspace) + dropdown
+	// ganti admin (Kelola Workspace). Otorisasi sama seperti Create di atas.
+	v1.Get("/organizations/:orgId/candidate-admins", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.ListCandidateAdmins)
+	// S4G-05, Track S4G: grid Workspace lintas organisasi dalam satu grup
+	// (desain "GA Workspaces.dc.html") -- BEDA dari GET .../workspaces per-org
+	// di bawah. Otorisasi group_id opsional ditegakkan di dalam handler/service
+	// (sama pola OrganizationHandler.List), jadi cukup gerbang platform-role
+	// kasar requireOrgAdmin di sini.
+	v1.Get("/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.ListByGroup)
 	// S3-13 prasyarat (implementation_gaps.md IG-17) -- list dan delete
 	// workspace level-org, PA/GA saja (bukan admin_workspace, konsisten
 	// RLS workspaces_delete yang tidak punya cabang workspace_member).
