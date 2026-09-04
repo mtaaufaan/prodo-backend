@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/handler"
 	"github.com/mtaaufaan/prodo-backend/internal/keycloak"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
+	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 	"github.com/mtaaufaan/prodo-backend/internal/telemetry"
@@ -332,7 +334,22 @@ func run() error {
 	// Organization/Workspace yang sengaja tidak direplikasi, tidak ada AC
 	// terukur di situ).
 	v1.Put("/groups/:groupId/storage-allocation", jwtAuth, dbCtx, requireOrgAdmin,
-		limiter.New(limiter.Config{Max: 3, Expiration: time.Minute}),
+		limiter.New(limiter.Config{
+			Max:        3,
+			Expiration: time.Minute,
+			// Default LimitReached cuma SendStatus(429) tanpa body -- FE
+			// interceptor (lib/api.ts) mengharap body {error:{code,message}}
+			// untuk membentuk ApiError, jadi 429 polos akan jatuh ke Error
+			// generik dan retry_after hilang. Bungkus JSON sesuai konvensi
+			// response.Error, retry_after dari header Retry-After yang SUDAH
+			// diset limiter SEBELUM LimitReached dipanggil.
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Terlalu banyak perubahan alokasi kuota dalam waktu singkat (maks 3 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
 		organizationHandler.BulkUpdateStorageAllocation)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
