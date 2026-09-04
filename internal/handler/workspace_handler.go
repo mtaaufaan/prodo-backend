@@ -464,6 +464,7 @@ func (h *WorkspaceHandler) ListByGroup(c *fiber.Ctx) error {
 			"org_name":                w.OrgName,
 			"admin_name":              w.AdminName,
 			"admin_email":             w.AdminEmail,
+			"pending_admin_email":     w.PendingAdminEmail,
 			"storage_used_bytes":      w.StorageUsedBytes,
 			"org_storage_quota_bytes": w.OrgStorageQuotaBytes,
 		}
