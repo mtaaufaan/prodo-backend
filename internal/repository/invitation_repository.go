@@ -61,13 +61,48 @@ func (r *InvitationRepository) CreateInvitation(
 	return id, nil
 }
 
+// CreateExecutiveInvitation menyimpan undangan Eksekutif MURNI (email baru,
+// tanpa workspace/role -- desain "GA Members Roles.dc.html", toggle
+// "Eksekutif" di modal Undang). Constraint chk_invitation_shape (migrasi
+// 20260915090300) menjaga workspace_id/role tetap NULL di baris ini.
+func (r *InvitationRepository) CreateExecutiveInvitation(
+	ctx context.Context,
+	exec db.Executor,
+	email, groupID, invitedByUserID, tokenHash string,
+	expiresAt time.Time,
+) (string, error) {
+	var id string
+	err := exec.QueryRow(ctx, `
+		INSERT INTO user_invitations (email, group_id, is_executive_invite, invited_by, token_hash, expires_at)
+		VALUES ($1, $2, TRUE, $3, $4, $5)
+		RETURNING id
+	`, email, groupID, invitedByUserID, tokenHash, expiresAt).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("repository.CreateExecutiveInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
+	}
+
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
+		VALUES ($1, 'invitation.created', 'user_invitation', $2, jsonb_build_object('group_id', $3::uuid, 'is_executive_invite', true))
+	`, invitedByUserID, id, groupID); err != nil {
+		return "", fmt.Errorf("repository.CreateExecutiveInvitation: audit: %w", err)
+	}
+	return id, nil
+}
+
 // InvitationTarget -- undangan PENDING yang cocok dengan hash token
-// tertentu (belum accepted, belum cancelled, belum expired).
+// tertentu (belum accepted, belum cancelled, belum expired). WorkspaceID/
+// Role kosong dan GroupID terisi kalau IsExecutiveInvite true (lihat
+// chk_invitation_shape, migrasi 20260915090300) -- caller cabang di situ,
+// bukan pointer nullable, supaya alur normal (mayoritas kasus) tidak perlu
+// nil-check tambahan.
 type InvitationTarget struct {
-	ID          string
-	Email       string
-	WorkspaceID string
-	Role        string
+	ID                string
+	Email             string
+	WorkspaceID       string
+	Role              string
+	GroupID           string
+	IsExecutiveInvite bool
 }
 
 // FindPendingByTokenHash mencari undangan pending berdasarkan hash token.
@@ -79,13 +114,14 @@ type InvitationTarget struct {
 func (r *InvitationRepository) FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*InvitationTarget, error) {
 	t := &InvitationTarget{}
 	err := exec.QueryRow(ctx, `
-		SELECT id, email, workspace_id, role
+		SELECT id, email, COALESCE(workspace_id::text, ''), COALESCE(role::text, ''),
+		       COALESCE(group_id::text, ''), is_executive_invite
 		FROM user_invitations
 		WHERE token_hash = $1
 		  AND accepted_at IS NULL
 		  AND cancelled_at IS NULL
 		  AND expires_at > NOW()
-	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role)
+	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.FindPendingByTokenHash: %w", domain.ErrInvitationNotFound)
@@ -137,6 +173,54 @@ func (r *InvitationRepository) AcceptInvitation(
 
 	if err = insertInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, workspaceID); err != nil {
 		return "", fmt.Errorf("repository.AcceptInvitation: %w", err)
+	}
+	return userID, nil
+}
+
+// AcceptExecutiveInvitation -- varian AcceptInvitation untuk undangan
+// Eksekutif murni: users + user_auth_providers sama persis, tapi baris
+// keanggotaan masuk ke executive_assignments (bukan workspace_members),
+// title kosong (diisi belakangan lewat panel Kelola Member, bukan saat
+// aktivasi).
+func (r *InvitationRepository) AcceptExecutiveInvitation(
+	ctx context.Context,
+	exec db.Executor,
+	invitationID, email, displayName, keycloakUserID, groupID string,
+) (userID string, err error) {
+	err = exec.QueryRow(ctx, `
+		INSERT INTO users (email, display_name, platform_role, is_active)
+		VALUES ($1, $2, 'executive', TRUE)
+		RETURNING id
+	`, email, displayName).Scan(&userID)
+	if err != nil {
+		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: insert users: %w", classifyUniqueViolation(err, domain.ErrEmailAlreadyExists))
+	}
+
+	if _, err = exec.Exec(ctx, `
+		INSERT INTO user_auth_providers (user_id, provider, provider_sub)
+		VALUES ($1, 'local', $2)
+	`, userID, keycloakUserID); err != nil {
+		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: insert user_auth_providers: %w", err)
+	}
+
+	if _, err = exec.Exec(ctx, `
+		INSERT INTO executive_assignments (user_id, group_id, assigned_by)
+		VALUES ($1, $2, NULL)
+	`, userID, groupID); err != nil {
+		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: insert executive_assignments: %w", err)
+	}
+
+	if _, err = exec.Exec(ctx, `
+		UPDATE user_invitations SET accepted_at = NOW() WHERE id = $1
+	`, invitationID); err != nil {
+		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: update accepted_at: %w", err)
+	}
+
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
+		VALUES ($1, 'invitation.accepted', 'user_invitation', $2, jsonb_build_object('group_id', $3::uuid, 'is_executive_invite', true))
+	`, userID, invitationID, groupID); err != nil {
+		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: audit: %w", err)
 	}
 	return userID, nil
 }
@@ -229,6 +313,77 @@ func (r *InvitationRepository) ListPending(ctx context.Context, exec db.Executor
 		return nil, fmt.Errorf("repository.ListPending: rows: %w", err)
 	}
 	return invitations, nil
+}
+
+// GroupPendingInvite -- satu baris undangan pending, lintas semua workspace
+// dalam grup (direktori Members & Roles) DAN undangan Eksekutif murni grup
+// itu sendiri. WorkspaceID/WorkspaceName/OrgName/Role kosong kalau
+// IsExecutive true.
+type GroupPendingInvite struct {
+	ID            string
+	Email         string
+	Role          string
+	WorkspaceID   string
+	WorkspaceName string
+	OrgName       string
+	IsExecutive   bool
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+}
+
+// ListPendingForGroup mengembalikan seluruh undangan pending lintas semua
+// workspace dalam grup INI, digabung dengan undangan Eksekutif murni grup
+// ini (union dua bentuk baris yang beda kolom -- dipisah 2 query, bukan SQL
+// UNION, supaya scan Go tetap sederhana per bentuk).
+func (r *InvitationRepository) ListPendingForGroup(ctx context.Context, exec db.Executor, groupID string) ([]GroupPendingInvite, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT ui.id, ui.email, ui.role::text, ui.workspace_id, w.name, o.name, ui.created_at, ui.expires_at
+		FROM user_invitations ui
+		JOIN workspaces w ON w.id = ui.workspace_id
+		JOIN organizations o ON o.id = w.org_id
+		WHERE o.group_id = $1 AND ui.accepted_at IS NULL AND ui.cancelled_at IS NULL AND ui.is_executive_invite = FALSE
+		ORDER BY ui.created_at DESC
+	`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListPendingForGroup: workspace invites: %w", err)
+	}
+	var result []GroupPendingInvite
+	for rows.Next() {
+		var p GroupPendingInvite
+		if err := rows.Scan(&p.ID, &p.Email, &p.Role, &p.WorkspaceID, &p.WorkspaceName, &p.OrgName, &p.CreatedAt, &p.ExpiresAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("repository.ListPendingForGroup: scan workspace invite: %w", err)
+		}
+		result = append(result, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("repository.ListPendingForGroup: rows workspace invites: %w", err)
+	}
+	rows.Close()
+
+	execRows, err := exec.Query(ctx, `
+		SELECT id, email, created_at, expires_at
+		FROM user_invitations
+		WHERE group_id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL AND is_executive_invite = TRUE
+		ORDER BY created_at DESC
+	`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListPendingForGroup: executive invites: %w", err)
+	}
+	defer execRows.Close()
+	for execRows.Next() {
+		var p GroupPendingInvite
+		if err := execRows.Scan(&p.ID, &p.Email, &p.CreatedAt, &p.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("repository.ListPendingForGroup: scan executive invite: %w", err)
+		}
+		p.IsExecutive = true
+		result = append(result, p)
+	}
+	if err := execRows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListPendingForGroup: rows executive invites: %w", err)
+	}
+	return result, nil
 }
 
 // GetWorkspaceName -- dipakai handler untuk isi email undangan (nama

@@ -1,0 +1,4 @@
+-- PostgreSQL tidak mendukung DROP VALUE dari enum. Rollback nilai enum
+-- butuh rebuild tipe (buat tipe baru tanpa 'executive', migrasi ulang semua
+-- kolom yang memakainya, drop tipe lama) -- di luar cakupan migration
+-- down biasa. No-op yang disengaja, sesuai catatan sprint_backlog.md S16-06.

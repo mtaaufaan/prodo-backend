@@ -25,6 +25,48 @@ func NewWorkspaceMemberRepository() *WorkspaceMemberRepository {
 	return &WorkspaceMemberRepository{}
 }
 
+// MembershipRow -- satu baris hasil ListMembershipsForUser (S16-01,
+// forward-pull Track S4G: GET /me/context).
+type MembershipRow struct {
+	WorkspaceID string
+	Name        string
+	OrgName     string
+	Role        string
+}
+
+// ListMembershipsForUser mengembalikan seluruh workspace tempat user ini
+// jadi member -- dipakai switcher context GA dual-role ("PINDAH WORKSPACE").
+// RLS aman tanpa bypass: setiap baris hasil query ini adalah baris milik
+// user_id itu sendiri, jadi prodo_is_workspace_member(workspace_id) selalu
+// bernilai true untuknya (lihat wm_select).
+func (r *WorkspaceMemberRepository) ListMembershipsForUser(ctx context.Context, exec db.Executor, userID string) ([]MembershipRow, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT wm.workspace_id, w.name, o.name, wm.role
+		FROM workspace_members wm
+		JOIN workspaces w ON w.id = wm.workspace_id
+		JOIN organizations o ON o.id = w.org_id
+		WHERE wm.user_id = $1
+		ORDER BY o.name, w.name
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListMembershipsForUser: %w", err)
+	}
+	defer rows.Close()
+
+	var result []MembershipRow
+	for rows.Next() {
+		var m MembershipRow
+		if err := rows.Scan(&m.WorkspaceID, &m.Name, &m.OrgName, &m.Role); err != nil {
+			return nil, fmt.Errorf("repository.ListMembershipsForUser: scan: %w", err)
+		}
+		result = append(result, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListMembershipsForUser: rows: %w", err)
+	}
+	return result, nil
+}
+
 // GetRole mengembalikan role user saat ini di workspace -- pgx.ErrNoRows
 // (tidak di-wrap ke domain error di sini, dicek via errors.Is oleh
 // caller) kalau user belum jadi member.
