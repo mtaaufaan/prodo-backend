@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/hibiken/asynq"
@@ -18,21 +19,32 @@ import (
 // independen. Monitoring via Asynqmon, lihat
 // infra/docker-compose.observability.yml.
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+}
+
+// run mengembalikan error alih-alih memanggil log.Fatal langsung -- sama
+// pola cmd/api/main.go, supaya defer (Close pool/logger, Shutdown
+// scheduler) selalu sempat jalan sebelum proses berhenti (gocritic
+// exitAfterDefer: log.Fatal di dalam fungsi yang punya defer pending
+// membuat defer itu TIDAK PERNAH jalan sama sekali).
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("FATAL: gagal membaca konfigurasi: %v", err)
+		return fmt.Errorf("membaca konfigurasi: %w", err)
 	}
 
 	logger, err := zap.NewProduction()
 	if err != nil {
-		log.Fatalf("FATAL: setup zap logger: %v", err)
+		return fmt.Errorf("setup zap logger: %w", err)
 	}
 	defer logger.Sync() //nolint:errcheck // flush error on shutdown is not actionable
 
 	ctx := context.Background()
 	pool, err := db.NewPool(ctx, cfg.AppDatabaseURL, cfg)
 	if err != nil {
-		log.Fatalf("FATAL: konek ke database: %v", err)
+		return fmt.Errorf("konek ke database: %w", err)
 	}
 	defer pool.Close()
 
@@ -40,7 +52,7 @@ func main() {
 
 	redisOpt, err := asynq.ParseRedisURI(cfg.RedisURL)
 	if err != nil {
-		log.Fatalf("FATAL: REDIS_URL tidak valid untuk Asynq: %v", err)
+		return fmt.Errorf("REDIS_URL tidak valid untuk Asynq: %w", err)
 	}
 
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di
@@ -49,10 +61,10 @@ func main() {
 	// srv.Run(mux) di bawah, sama seperti sebelumnya.
 	scheduler := asynq.NewScheduler(redisOpt, nil)
 	if _, err := scheduler.Register("@every 1h", asynq.NewTask(worker.TypeStorageQuotaCheck, nil)); err != nil {
-		log.Fatalf("FATAL: gagal daftar jadwal StorageQuotaCheck: %v", err)
+		return fmt.Errorf("daftar jadwal StorageQuotaCheck: %w", err)
 	}
 	if err := scheduler.Start(); err != nil {
-		log.Fatalf("FATAL: gagal start scheduler: %v", err)
+		return fmt.Errorf("start scheduler: %w", err)
 	}
 	defer scheduler.Shutdown()
 
@@ -62,6 +74,7 @@ func main() {
 
 	log.Printf("PRODO Worker starting — env=%s concurrency=%d\n", cfg.AppEnv, cfg.AsynqConcurrency)
 	if err := srv.Run(worker.NewMux(pool, emailer, logger)); err != nil {
-		log.Fatalf("FATAL: worker error: %v", err)
+		return fmt.Errorf("worker error: %w", err)
 	}
+	return nil
 }
