@@ -20,6 +20,7 @@ type workspaceMemberRepository interface {
 	GetRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
+	ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]repository.Member, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 	RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error
 }
@@ -140,6 +141,16 @@ func (s *RBACService) ListMembers(ctx context.Context, exec db.Executor, workspa
 	members, err := s.repo.ListMembers(ctx, exec, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListMembers: %w", err)
+	}
+	return members, nil
+}
+
+// ListOrgCandidates -- pass-through tipis ke repo (S4G-05, Track S4G),
+// dipakai WorkspaceService.ListCandidateAdmins.
+func (s *RBACService) ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]repository.Member, error) {
+	members, err := s.repo.ListOrgCandidates(ctx, exec, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListOrgCandidates: %w", err)
 	}
 	return members, nil
 }

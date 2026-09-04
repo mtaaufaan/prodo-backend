@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
@@ -27,31 +29,54 @@ type workspaceRepository interface {
 	Reactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	Delete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	List(ctx context.Context, exec db.Executor, orgID string) ([]repository.Workspace, error)
+	ListByGroup(ctx context.Context, exec db.Executor, groupID string) ([]repository.WorkspaceListRow, error)
 	MoveToOrg(ctx context.Context, exec db.Executor, workspaceID, targetOrgID, actorID, actorRole string) error
 }
 
 // orgAuthorizer -- interface didefinisikan di consumer, §3.9.
 // Diimplementasikan *OrganizationService (AuthorizeOrgAccess). IsActive
 // ditambahkan S4G-04 (Track S4G) untuk guard MoveWorkspace -- org tujuan
-// pindah tidak boleh sedang nonaktif.
+// pindah tidak boleh sedang nonaktif. IsGroupAdminOfGroup ditambahkan
+// S4G-05 (Track S4G) untuk ListWorkspacesByGroup -- pola sama persis
+// authorizeGroup di OrganizationService/GroupService (duplikasi kecil
+// disengaja, bukan diekstrak jadi helper -- konsisten dengan pola yang
+// sudah ada di kedua service itu).
 type orgAuthorizer interface {
 	AuthorizeOrgAccess(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error)
+	IsGroupAdminOfGroup(ctx context.Context, exec db.Executor, userID, groupID string) (bool, error)
 }
 
 // roleAssigner -- interface didefinisikan di consumer, §3.9.
 // Diimplementasikan *RBACService (AssignRole S2-03, ListMembers ditambahkan
 // S4G-04 untuk ReassignAdmin -- cari siapa admin_workspace saat ini).
+// ListOrgCandidates ditambahkan S4G-05 (Track S4G) untuk picker "MEMBER
+// YANG ADA" (Tambah Workspace) dan dropdown ganti admin (Kelola Workspace).
 type roleAssigner interface {
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error)
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
+	ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]repository.Member, error)
 }
 
 // contactLookup -- interface didefinisikan di consumer, §3.9. Diimplementasikan
 // *AccountRepository.FindUserContactByID -- dipakai ReassignAdmin (S4G-04)
 // untuk tahu email+nama admin lama/baru saat mengirim notifikasi.
+// FindUserIDByEmail ditambahkan S4G-05 (Track S4G) -- CreateWorkspace jalur
+// "UNDANG BARU" cek dulu apakah email itu sudah terdaftar (kalau ya, tambah
+// langsung sebagai member alih-alih bikin undangan, sama pola S2-23
+// InvitationService.CreateBulkInvitations).
 type contactLookup interface {
 	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
+	FindUserIDByEmail(ctx context.Context, email string) (string, error)
+}
+
+// invitationCreator -- interface didefinisikan di consumer, §3.9.
+// Diimplementasikan *InvitationService.CreateInvitation -- dipakai
+// CreateWorkspace (S4G-05) jalur "UNDANG BARU" kalau email admin belum
+// terdaftar sebagai user, reuse penuh mekanisme undangan 72 jam yang sudah
+// ada (POST /workspaces/:wsId/invitations) alih-alih membangun jalur baru.
+type invitationCreator interface {
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, workspaceName, inviterName string) (*Invitation, error)
 }
 
 // adminChangeNotifier -- interface didefinisikan di consumer, §3.9.
@@ -70,19 +95,26 @@ type WorkspaceService struct {
 	rbac     roleAssigner
 	contacts contactLookup
 	email    adminChangeNotifier
+	invites  invitationCreator
 	logger   *zap.Logger
 }
 
-func NewWorkspaceService(repo workspaceRepository, orgs orgAuthorizer, rbac roleAssigner, contacts contactLookup, email adminChangeNotifier, logger *zap.Logger) *WorkspaceService {
-	return &WorkspaceService{repo: repo, orgs: orgs, rbac: rbac, contacts: contacts, email: email, logger: logger}
+func NewWorkspaceService(repo workspaceRepository, orgs orgAuthorizer, rbac roleAssigner, contacts contactLookup, email adminChangeNotifier, invites invitationCreator, logger *zap.Logger) *WorkspaceService {
+	return &WorkspaceService{repo: repo, orgs: orgs, rbac: rbac, contacts: contacts, email: email, invites: invites, logger: logger}
 }
 
-// CreateWorkspace membuat workspace baru dalam orgID + menunjuk
-// adminWorkspaceUserID sebagai Admin Workspace-nya (S3-09 AC) -- reuse
-// RBACService.AssignRole (S2-03) untuk assignment role, bukan insert
-// workspace_members manual di sini.
-func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor, orgID, name, adminWorkspaceUserID, actorID, actorRole string) (*repository.Workspace, error) {
-	if orgID == "" || name == "" || adminWorkspaceUserID == "" {
+// CreateWorkspace membuat workspace baru dalam orgID + menunjuk Admin
+// Workspace-nya (S3-09 AC, diperluas S4G-05/Track S4G sesuai desain
+// "GA Add Workspace.dc.html" 2 tab "MEMBER YANG ADA"/"UNDANG BARU").
+// PERSIS SATU dari adminWorkspaceUserID (member existing, tab pertama) ATAU
+// adminEmail (tab kedua, +adminName kalau email itu belum terdaftar sebagai
+// user) wajib diisi -- caller (handler) yang menegakkan validasi mutual
+// exclusion ini, service cuma percaya parameter yang sudah bersih.
+// inviterName disuplai caller (handler sudah resolve dari actorID, sama
+// pola InvitationHandler.CreateInvitations) -- service ini tidak query
+// ulang nama actor.
+func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor, orgID, name, adminWorkspaceUserID, adminEmail, adminName, actorID, actorRole, inviterName string) (*repository.Workspace, error) {
+	if orgID == "" || name == "" || (adminWorkspaceUserID == "" && adminEmail == "") {
 		return nil, fmt.Errorf("service.CreateWorkspace: %w", domain.ErrInvalidInput)
 	}
 	if err := s.orgs.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
@@ -94,8 +126,31 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor
 		return nil, fmt.Errorf("service.CreateWorkspace: %w", err)
 	}
 
-	if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, adminWorkspaceUserID, "admin_workspace", nil, actorID, actorRole); err != nil {
-		return nil, fmt.Errorf("service.CreateWorkspace: assign admin_workspace: %w", err)
+	if adminWorkspaceUserID != "" {
+		if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, adminWorkspaceUserID, "admin_workspace", nil, actorID, actorRole); err != nil {
+			return nil, fmt.Errorf("service.CreateWorkspace: assign admin_workspace: %w", err)
+		}
+		return ws, nil
+	}
+
+	// Jalur "UNDANG BARU" -- cek dulu email itu sudah user terdaftar atau
+	// belum (S2-23, sama pola CreateBulkInvitations): sudah terdaftar ->
+	// tambah langsung, TIDAK ADA undangan baru dikirim.
+	existingUserID, err := s.contacts.FindUserIDByEmail(ctx, adminEmail)
+	switch {
+	case err == nil:
+		if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, existingUserID, "admin_workspace", &actorID, actorID, actorRole); err != nil {
+			return nil, fmt.Errorf("service.CreateWorkspace: assign admin_workspace (email existing): %w", err)
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		if adminName == "" {
+			return nil, fmt.Errorf("service.CreateWorkspace: %w", domain.ErrInvalidInput)
+		}
+		if _, err := s.invites.CreateInvitation(ctx, exec, adminEmail, ws.ID, "admin_workspace", actorID, name, inviterName); err != nil {
+			return nil, fmt.Errorf("service.CreateWorkspace: undang admin_workspace: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("service.CreateWorkspace: cek email admin: %w", err)
 	}
 	return ws, nil
 }
@@ -310,6 +365,47 @@ func (s *WorkspaceService) ListWorkspaces(ctx context.Context, exec db.Executor,
 	list, err := s.repo.List(ctx, exec, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListWorkspaces: %w", err)
+	}
+	return list, nil
+}
+
+// ListWorkspacesByGroup mengembalikan workspace lintas SELURUH organisasi
+// dalam satu grup (S4G-05, Track S4G, desain "GA Workspaces.dc.html").
+// groupID kosong -- Platform Admin bare-render, TIDAK difilter, RLS
+// `workspaces_select` yang menentukan visibility (PA lihat semua). groupID
+// terisi -- Group Admin, ditegakkan actor benar-benar pengelola grup itu
+// (sama pola authorizeGroup di OrganizationService/GroupService).
+func (s *WorkspaceService) ListWorkspacesByGroup(ctx context.Context, exec db.Executor, groupID, actorID, actorRole string) ([]repository.WorkspaceListRow, error) {
+	if groupID != "" && actorRole != "platform_admin" {
+		isGA, err := s.orgs.IsGroupAdminOfGroup(ctx, exec, actorID, groupID)
+		if err != nil {
+			return nil, fmt.Errorf("service.ListWorkspacesByGroup: %w", err)
+		}
+		if !isGA {
+			return nil, fmt.Errorf("service.ListWorkspacesByGroup: %w", domain.ErrForbidden)
+		}
+	}
+	list, err := s.repo.ListByGroup(ctx, exec, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListWorkspacesByGroup: %w", err)
+	}
+	return list, nil
+}
+
+// ListCandidateAdmins mengembalikan member unik lintas seluruh workspace
+// dalam satu organisasi (S4G-05, Track S4G) -- picker "MEMBER YANG ADA" di
+// Tambah Workspace, dan dropdown ganti admin di Kelola Workspace. Otorisasi
+// sama seperti CreateWorkspace (Platform Admin/Group Admin pengelola org).
+func (s *WorkspaceService) ListCandidateAdmins(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) ([]repository.Member, error) {
+	if orgID == "" {
+		return nil, fmt.Errorf("service.ListCandidateAdmins: %w", domain.ErrInvalidInput)
+	}
+	if err := s.orgs.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return nil, err
+	}
+	list, err := s.rbac.ListOrgCandidates(ctx, exec, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListCandidateAdmins: %w", err)
 	}
 	return list, nil
 }

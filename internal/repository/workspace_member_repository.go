@@ -147,6 +147,40 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 	return members, nil
 }
 
+// ListOrgCandidates mengembalikan member unik lintas SELURUH workspace
+// dalam satu organisasi (S4G-05, Track S4G, desain "GA Add Workspace.dc.html"
+// picker "MEMBER YANG ADA" + dropdown ganti admin di "GA Workspaces.dc.html").
+// workspace_members cuma berisi member yang SUDAH menerima undangan (baris
+// PENDING hidup di user_invitations, tabel terpisah) -- jadi query ini
+// otomatis memenuhi syarat desain "status AKTIF" tanpa filter tambahan.
+func (r *WorkspaceMemberRepository) ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]Member, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT DISTINCT u.id, u.email, u.display_name
+		FROM workspace_members wm
+		JOIN workspaces w ON w.id = wm.workspace_id
+		JOIN users u ON u.id = wm.user_id
+		WHERE w.org_id = $1
+		ORDER BY u.display_name
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListOrgCandidates: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Member, 0)
+	for rows.Next() {
+		var m Member
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName); err != nil {
+			return nil, fmt.Errorf("repository.ListOrgCandidates: scan: %w", err)
+		}
+		list = append(list, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListOrgCandidates: %w", err)
+	}
+	return list, nil
+}
+
 // RemoveMember menghapus satu baris workspace_members (S3-15) + audit
 // trail. Akun (`users`) itu sendiri TIDAK disentuh -- cuma mencabut
 // keanggotaan workspace ini (US-009 AC: "akun masih ada di accounts").
