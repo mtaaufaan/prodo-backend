@@ -55,6 +55,19 @@ func (e *EmailService) SendWorkspaceInvitationEmail(_ context.Context, to, works
 	return nil
 }
 
+// SendExecutiveInvitationEmail -- varian SendWorkspaceInvitationEmail untuk
+// undangan Eksekutif murni (tanpa workspace/role, Members & Roles Track
+// S4G).
+func (e *EmailService) SendExecutiveInvitationEmail(_ context.Context, to, groupName, inviterName, acceptLink string, expiresAt time.Time) error {
+	msg := buildExecutiveInvitationEmailMessage(e.from, to, groupName, inviterName, acceptLink, expiresAt)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendExecutiveInvitationEmail: %w", err)
+	}
+	return nil
+}
+
 // SendPlatformAdminLoginAlertEmail mengirim notifikasi setiap login
 // Platform Admin (S4P-16, implementation_gaps.md IG-20) -- waktu, IP, dan
 // device, sesuai AC US-070. Dikirim best-effort SETELAH login benar-benar
@@ -218,6 +231,25 @@ func buildWorkspaceInvitationEmailMessage(from, to, workspaceName, inviterName, 
 			"dipakai satu kali. Jika Anda tidak mengenal pengirimnya, abaikan email ini.\r\n\r\n"+
 			"-- Tim PRODO\r\n",
 		inviterName, workspaceName, role, acceptLink, expiresAt.Format("2 January 2006 15:04 MST"),
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
+func buildExecutiveInvitationEmailMessage(from, to, groupName, inviterName, acceptLink string, expiresAt time.Time) []byte {
+	subject := fmt.Sprintf("Undangan sebagai Eksekutif Grup %s - PRODO", groupName)
+	body := fmt.Sprintf(
+		"Halo,\r\n\r\n"+
+			"%s mengundang Anda sebagai Eksekutif untuk grup \"%s\" di PRODO.\r\n"+
+			"Klik link berikut untuk menerima undangan dan menyetel password Anda:\r\n\r\n"+
+			"%s\r\n\r\n"+
+			"Link ini berlaku sampai %s (72 jam sejak dikirim) dan hanya bisa\r\n"+
+			"dipakai satu kali. Jika Anda tidak mengenal pengirimnya, abaikan email ini.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		inviterName, groupName, acceptLink, expiresAt.Format("2 January 2006 15:04 MST"),
 	)
 
 	return []byte(fmt.Sprintf(

@@ -160,6 +160,11 @@ func run() error {
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
 	groupDirectorySvc := service.NewGroupDirectoryService(groupDirectoryRepo)
+	stepUpSvc := service.NewStepUpService(mfaSvc, rdb)
+	contextRepo := repository.NewContextRepository()
+	contextSvc := service.NewContextService(workspaceMemberRepo, rdb)
+	groupMemberRepo := repository.NewGroupMemberRepository()
+	groupMemberSvc := service.NewGroupMemberService(groupMemberRepo, groupMemberRepo, invitationRepo, organizationSvc, invitationSvc)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -177,6 +182,10 @@ func run() error {
 	groupDirectoryHandler := handler.NewGroupDirectoryHandler(groupDirectorySvc, logger)
 	platformSecurityHandler := handler.NewPlatformSecurityHandler(accountSvc, logger)
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
+	stepUpHandler := handler.NewStepUpHandler(stepUpSvc, accountSvc, logger)
+	requireStepUp := middleware.RequireStepUp(stepUpSvc)
+	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, logger)
+	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, accountSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
@@ -248,6 +257,7 @@ func run() error {
 	v1.Post("/auth/login", authHandler.Login)
 	v1.Post("/auth/refresh", authHandler.Refresh)
 	v1.Post("/auth/platform/mfa-setup/verify", authHandler.CompletePlatformAdminMFASetup) // S4P-14/19
+	v1.Post("/auth/step-up", jwtAuth, stepUpHandler.Verify)                               // S16-04/05, Track S4G
 	v1.Get("/auth/sessions", jwtAuth, sessionHandler.List)
 	v1.Delete("/auth/sessions/:jti", jwtAuth, sessionHandler.Revoke)
 	v1.Delete("/auth/sessions", jwtAuth, sessionHandler.RevokeAll)
@@ -265,6 +275,11 @@ func run() error {
 	// ber-RLS) berjalan. Cuma dipasang di route /workspaces/... untuk
 	// sekarang -- lihat komentar middleware.DBContextMiddleware.
 	dbCtx := middleware.DBContextMiddleware(pool, accountSvc)
+	// S16-01/02, Track S4G: terbuka untuk SEMUA user terautentikasi (bukan
+	// cuma GA) -- workspace member biasa juga perlu tahu context-nya sendiri
+	// (selalu "workspace", ga_console_enabled selalu false untuk mereka).
+	v1.Get("/me/context", jwtAuth, dbCtx, contextHandler.Get)
+	v1.Patch("/me/context", jwtAuth, dbCtx, contextHandler.Switch)
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
 	// S3-15, US-009. Param :userId (bukan :account_id seperti wording asli
 	// task, konsisten koreksi S2-01/04). Otorisasi sama seperti UpdateMemberRole.
@@ -323,7 +338,17 @@ func run() error {
 	v1.Get("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.List)
 	v1.Post("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Create)
 	v1.Put("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Update)
-	v1.Put("/organizations/:id/deactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Deactivate)
+	v1.Put("/organizations/:id/deactivate", jwtAuth, dbCtx, requireOrgAdmin, requireStepUp, organizationHandler.Deactivate) // S16-04, Track S4G
+	// Members & Roles (forward-pull US-086, Track S4G): otorisasi group-spesifik
+	// (GA pengelola grup INI, bukan sembarang GA) di service layer, lihat
+	// GroupMemberService.authorizeGroup -- requireOrgAdmin cuma gerbang kasar
+	// platform_admin/group_admin, sama pola /organizations.
+	v1.Get("/groups/:groupId/members", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.List)
+	v1.Put("/groups/:groupId/members/:userId/executive", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.ToggleExecutive)
+	v1.Put("/groups/:groupId/members/:userId/identity", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.UpdateIdentity)
+	v1.Put("/groups/:groupId/members/:userId/reactivate", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.ReactivateAccess)
+	v1.Put("/groups/:groupId/members/:userId/deactivate", jwtAuth, dbCtx, requireOrgAdmin, requireStepUp, groupMemberHandler.DeactivateAccess)
+	v1.Post("/groups/:groupId/executive-invitations", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.InviteExecutive)
 	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)

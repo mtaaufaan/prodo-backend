@@ -1,0 +1,1 @@
+-- No-op yang disengaja -- lihat catatan di 20260915090000_executive_role_enum.down.sql.
