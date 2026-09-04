@@ -288,6 +288,42 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"organizations": data, "group_storage_ceiling_bytes": ceilingBytes}))
 }
 
+type bulkStorageAllocationRequest struct {
+	Allocations map[string]int64 `json:"allocations"`
+}
+
+// BulkUpdateStorageAllocation menangani PUT /groups/:groupId/storage-allocation
+// (S4G-07, Track S4G, desain "GA Storage Quota.dc.html" modal "Atur Alokasi
+// Kuota"). Rate-limit 3x/menit ditegakkan middleware.limiter di routing
+// (main.go), bukan di sini.
+func (h *OrganizationHandler) BulkUpdateStorageAllocation(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.BulkUpdateStorageAllocation dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.BulkUpdateStorageAllocation dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	groupID := c.Params("groupId")
+
+	var req bulkStorageAllocationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if len(req.Allocations) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "allocations wajib diisi minimal satu organisasi", nil))
+	}
+
+	if err := h.orgs.BulkUpdateStorageAllocation(c.Context(), exec, groupID, req.Allocations, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menyimpan alokasi kuota")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"group_id": groupID, "allocations": req.Allocations}))
+}
+
 // Delete menangani DELETE /organizations/:id (S3-05).
 func (h *OrganizationHandler) Delete(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -337,7 +373,10 @@ func (h *OrganizationHandler) Summary(c *fiber.Ctx) error {
 
 func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	var retentionErr *domain.RetentionOutOfRangeError
+	var bulkErr *domain.BulkAllocationError
 	switch {
+	case errors.As(err, &bulkErr):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Alokasi tidak valid untuk satu atau lebih organisasi", bulkErr.Errors))
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- domain harus format domain valid (mis. acme.co.id)", nil))
 	case errors.Is(err, domain.ErrStorageQuotaBelowUsed):
