@@ -320,6 +320,61 @@ func (r *WorkspaceRepository) List(ctx context.Context, exec db.Executor, orgID 
 	return list, nil
 }
 
+// WorkspaceListRow -- satu baris GET /workspaces?group_id= (S4G-05, Track
+// S4G, desain "GA Workspaces.dc.html" -- grid lintas organisasi dalam satu
+// grup, org jadi KOLOM bukan parameter route seperti List/GetOrgID di atas).
+// AdminName/AdminEmail nullable -- secara desain setiap workspace WAJIB
+// punya admin_workspace (ReassignAdmin/CreateWorkspace menegakkannya), tapi
+// LEFT JOIN tetap dipakai untuk jaga-jaga data lama/rusak, bukan diasumsikan
+// selalu ada. StorageUsedBytes SELALU 0 untuk sekarang -- task_attachments
+// (S4G-06) tidak py jalur JOIN ke workspace_id sama sekali (task_id belum
+// py FK ke tabel tasks yang belum ada), lihat implementation_gaps.md IG-19.
+type WorkspaceListRow struct {
+	Workspace
+	OrgName              string
+	AdminName            *string
+	AdminEmail           *string
+	StorageUsedBytes     int64
+	OrgStorageQuotaBytes int64
+}
+
+// ListByGroup mengembalikan workspace lintas SELURUH organisasi dalam satu
+// grup (S4G-05, Track S4G) -- beda dari List (satu org saja). Scoping
+// otorisasi (Platform Admin semua grup, Group Admin cuma grup yang dia
+// kelola) ditegakkan CALLER (WorkspaceService.ListWorkspacesByGroup), sama
+// pola OrganizationService.ListOrganizations -- RLS `workspaces_select`
+// tetap jalan sebagai lapis terakhir.
+func (r *WorkspaceRepository) ListByGroup(ctx context.Context, exec db.Executor, groupID string) ([]WorkspaceListRow, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT w.id, w.org_id, w.name, w.archived_at, w.deactivated_at, w.created_at,
+		       o.name, u.display_name, u.email, o.storage_quota_bytes
+		FROM workspaces w
+		JOIN organizations o ON o.id = w.org_id
+		LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.role = 'admin_workspace'
+		LEFT JOIN users u ON u.id = wm.user_id
+		WHERE o.group_id = $1
+		ORDER BY w.name
+	`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListByGroup: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]WorkspaceListRow, 0)
+	for rows.Next() {
+		var row WorkspaceListRow
+		if err := rows.Scan(&row.ID, &row.OrgID, &row.Name, &row.ArchivedAt, &row.DeactivatedAt, &row.CreatedAt,
+			&row.OrgName, &row.AdminName, &row.AdminEmail, &row.OrgStorageQuotaBytes); err != nil {
+			return nil, fmt.Errorf("repository.ListByGroup: scan: %w", err)
+		}
+		list = append(list, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListByGroup: %w", err)
+	}
+	return list, nil
+}
+
 func insertWorkspaceAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, workspaceID, orgID string) error {
 	_, err := exec.Exec(ctx, `
 		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id, workspace_id)

@@ -26,19 +26,26 @@ var validWorkspaceRoles = map[string]bool{
 type WorkspaceHandler struct {
 	rbac       *service.RBACService
 	workspaces *service.WorkspaceService
+	accounts   displayNameGetter
 	logger     *zap.Logger
 }
 
-func NewWorkspaceHandler(rbac *service.RBACService, workspaces *service.WorkspaceService, logger *zap.Logger) *WorkspaceHandler {
-	return &WorkspaceHandler{rbac: rbac, workspaces: workspaces, logger: logger}
+func NewWorkspaceHandler(rbac *service.RBACService, workspaces *service.WorkspaceService, accounts displayNameGetter, logger *zap.Logger) *WorkspaceHandler {
+	return &WorkspaceHandler{rbac: rbac, workspaces: workspaces, accounts: accounts, logger: logger}
 }
 
+// createWorkspaceRequest -- AdminWorkspaceUserID (tab "MEMBER YANG ADA") DAN
+// AdminEmail+AdminName (tab "UNDANG BARU", S4G-05/Track S4G, desain
+// "GA Add Workspace.dc.html") saling eksklusif -- PERSIS SATU wajib diisi.
 type createWorkspaceRequest struct {
 	Name                 string `json:"name"`
 	AdminWorkspaceUserID string `json:"admin_workspace_user_id"`
+	AdminEmail           string `json:"admin_workspace_email"`
+	AdminName            string `json:"admin_workspace_name"`
 }
 
-// CreateWorkspace menangani POST /organizations/:orgId/workspaces (S3-09).
+// CreateWorkspace menangani POST /organizations/:orgId/workspaces (S3-09,
+// diperluas S4G-05/Track S4G).
 func (h *WorkspaceHandler) CreateWorkspace(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -57,15 +64,28 @@ func (h *WorkspaceHandler) CreateWorkspace(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
 	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" || req.AdminWorkspaceUserID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "name dan admin_workspace_user_id wajib diisi", nil))
+	req.AdminEmail = strings.TrimSpace(req.AdminEmail)
+	req.AdminName = strings.TrimSpace(req.AdminName)
+	if req.Name == "" || (req.AdminWorkspaceUserID == "" && req.AdminEmail == "") {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR",
+			"name wajib diisi, dan salah satu dari admin_workspace_user_id atau admin_workspace_email wajib diisi", nil))
+	}
+	if req.AdminWorkspaceUserID != "" && req.AdminEmail != "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR",
+			"admin_workspace_user_id dan admin_workspace_email tidak boleh diisi bersamaan", nil))
 	}
 
-	ws, err := h.workspaces.CreateWorkspace(c.Context(), exec, orgID, req.Name, req.AdminWorkspaceUserID, actorUserID, actorRole)
+	inviterName, err := h.accounts.GetDisplayName(c.Context(), actorUserID)
+	if err != nil {
+		h.logger.Error("gagal ambil nama actor untuk isi email undangan", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat workspace", nil))
+	}
+
+	ws, err := h.workspaces.CreateWorkspace(c.Context(), exec, orgID, req.Name, req.AdminWorkspaceUserID, req.AdminEmail, req.AdminName, actorUserID, actorRole, inviterName)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidInput):
-			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid", nil))
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- admin_workspace_name wajib diisi kalau email admin belum terdaftar", nil))
 		case errors.Is(err, domain.ErrForbidden):
 			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas organisasi ini.", nil))
 		case errors.Is(err, domain.ErrOrganizationNotFound):
@@ -406,6 +426,76 @@ func (h *WorkspaceHandler) List(c *fiber.Ctx) error {
 			"deactivated_at": w.DeactivatedAt,
 			"created_at":     w.CreatedAt,
 		}
+	}
+	return c.JSON(response.Success(data))
+}
+
+// ListByGroup menangani GET /workspaces?group_id= (S4G-05, Track S4G, desain
+// "GA Workspaces.dc.html" -- grid lintas organisasi dalam satu grup).
+// group_id kosong: Platform Admin bare-render (lihat komentar
+// WorkspaceService.ListWorkspacesByGroup).
+func (h *WorkspaceHandler) ListByGroup(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.ListByGroup dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.ListByGroup dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+
+	list, err := h.workspaces.ListWorkspacesByGroup(c.Context(), exec, c.Query("group_id"), actorUserID, actorRole)
+	if err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal mengambil daftar workspace")
+	}
+
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		w := &list[i]
+		data[i] = fiber.Map{
+			"id":                      w.ID,
+			"name":                    w.Name,
+			"archived_at":             w.ArchivedAt,
+			"deactivated_at":          w.DeactivatedAt,
+			"created_at":              w.CreatedAt,
+			"org_id":                  w.OrgID,
+			"org_name":                w.OrgName,
+			"admin_name":              w.AdminName,
+			"admin_email":             w.AdminEmail,
+			"storage_used_bytes":      w.StorageUsedBytes,
+			"org_storage_quota_bytes": w.OrgStorageQuotaBytes,
+		}
+	}
+	return c.JSON(response.Success(data))
+}
+
+// ListCandidateAdmins menangani GET /organizations/:orgId/candidate-admins
+// (S4G-05, Track S4G) -- picker "MEMBER YANG ADA" (Tambah Workspace) dan
+// dropdown ganti admin (Kelola Workspace).
+func (h *WorkspaceHandler) ListCandidateAdmins(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.ListCandidateAdmins dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.ListCandidateAdmins dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("orgId")
+
+	list, err := h.workspaces.ListCandidateAdmins(c.Context(), exec, orgID, actorUserID, actorRole)
+	if err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal mengambil daftar kandidat admin")
+	}
+
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		m := &list[i]
+		data[i] = fiber.Map{"user_id": m.UserID, "email": m.Email, "display_name": m.DisplayName}
 	}
 	return c.JSON(response.Success(data))
 }
