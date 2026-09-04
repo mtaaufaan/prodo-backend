@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -223,6 +224,93 @@ func (s *OrganizationService) ListOrganizations(ctx context.Context, exec db.Exe
 		return nil, 0, fmt.Errorf("service.ListOrganizations: %w", err)
 	}
 	return orgs, ceilingBytes, nil
+}
+
+// BulkUpdateStorageAllocation menyetel storage_quota_bytes SEKALIGUS untuk
+// banyak organisasi dalam satu grup (S4G-07, Track S4G, desain
+// "GA Storage Quota.dc.html" modal "Atur Alokasi Kuota"). Validasi
+// SELURUH batch (per-org: wajib diisi, <= max, >= terpakai; total <=
+// plafon grup) dikumpulkan penuh SEBELUM ada satu pun ditulis -- beda dari
+// memanggil PUT /organizations/:id/storage-quota N kali terpisah, yang
+// bisa menulis sebagian lalu gagal di tengah. Penulisan sungguhan reuse
+// PENUH repo.UpdateStorageQuota (retention_days org itu TIDAK diubah, cuma
+// kuota) -- diurutkan PENURUNAN dulu baru KENAIKAN supaya validasi ceiling
+// gabungan di dalam UpdateStorageQuota (yang menjumlah kuota org LAIN saat
+// itu) tidak pernah false-positive di tengah batch (lihat pembuktian di
+// commit message/PR: total akhir sudah divalidasi <= cap di sini, urutan
+// turun-dulu menjamin total berjalan monoton tidak pernah melebihi total
+// akhir).
+func (s *OrganizationService) BulkUpdateStorageAllocation(ctx context.Context, exec db.Executor, groupID string, allocations map[string]int64, actorID, actorRole string) error {
+	if groupID == "" || len(allocations) == 0 {
+		return fmt.Errorf("service.BulkUpdateStorageAllocation: %w", domain.ErrInvalidInput)
+	}
+	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	orgs, ceilingBytes, err := s.repo.List(ctx, exec, groupID)
+	if err != nil {
+		return fmt.Errorf("service.BulkUpdateStorageAllocation: %w", err)
+	}
+	byID := make(map[string]*repository.Organization, len(orgs))
+	for i := range orgs {
+		byID[orgs[i].ID] = &orgs[i]
+	}
+
+	validationErrors := map[string]string{}
+	var totalBytes int64
+	type change struct {
+		orgID    string
+		newBytes int64
+	}
+	var changes []change
+	for orgID, newBytes := range allocations {
+		org, ok := byID[orgID]
+		if !ok {
+			validationErrors[orgID] = "organisasi tidak ditemukan dalam grup ini"
+			continue
+		}
+		if newBytes <= 0 {
+			validationErrors[orgID] = "alokasi wajib diisi"
+			continue
+		}
+		if newBytes > org.StorageMaxBytes {
+			validationErrors[orgID] = fmt.Sprintf("melebihi batas maksimum Platform Admin (%d GB)", org.StorageMaxBytes/(1024*1024*1024))
+			continue
+		}
+		if newBytes < org.StorageUsedBytes {
+			validationErrors[orgID] = fmt.Sprintf("di bawah pemakaian saat ini (%.1f GB)", float64(org.StorageUsedBytes)/(1024*1024*1024))
+			continue
+		}
+		totalBytes += newBytes
+		if newBytes != org.StorageQuotaBytes {
+			changes = append(changes, change{orgID: orgID, newBytes: newBytes})
+		}
+	}
+	// Org dalam grup yang TIDAK disebut di request tetap dihitung dengan
+	// nilai lama (request boleh parsial -- cuma baris yang diubah user).
+	for id, org := range byID {
+		if _, touched := allocations[id]; !touched {
+			totalBytes += org.StorageQuotaBytes
+		}
+	}
+	if ceilingBytes > 0 && totalBytes > ceilingBytes {
+		validationErrors["_total"] = fmt.Sprintf("total alokasi %d GB melebihi plafon grup %d GB", totalBytes/(1024*1024*1024), ceilingBytes/(1024*1024*1024))
+	}
+	if len(validationErrors) > 0 {
+		return fmt.Errorf("service.BulkUpdateStorageAllocation: %w", &domain.BulkAllocationError{Errors: validationErrors})
+	}
+
+	sort.Slice(changes, func(i, j int) bool {
+		return changes[i].newBytes-byID[changes[i].orgID].StorageQuotaBytes < changes[j].newBytes-byID[changes[j].orgID].StorageQuotaBytes
+	})
+	for _, c := range changes {
+		org := byID[c.orgID]
+		if err := s.repo.UpdateStorageQuota(ctx, exec, c.orgID, c.newBytes, org.RetentionDays, actorID, actorRole); err != nil {
+			return fmt.Errorf("service.BulkUpdateStorageAllocation: org %s: %w", c.orgID, err)
+		}
+	}
+	return nil
 }
 
 // IsActive -- pass-through tipis ke repo (S4G-04, Track S4G), dipakai

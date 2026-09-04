@@ -1,11 +1,20 @@
-// Package worker holds Asynq task handlers. Skeleton only for S0 (S0-21) --
-// task type sungguhan (email, notifikasi, dll.) ditambahkan mulai S1.
+// Package worker holds Asynq task handlers.
 package worker
 
-import "github.com/hibiken/asynq"
+import (
+	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 
-// NewMux membuat ServeMux Asynq. Kosong untuk S0 -- handler task ditambahkan
-// via mux.HandleFunc(TypeX, HandleX) begitu task pertama diimplementasikan.
-func NewMux() *asynq.ServeMux {
-	return asynq.NewServeMux()
+	"github.com/mtaaufaan/prodo-backend/internal/service"
+)
+
+// NewMux membuat ServeMux Asynq -- task StorageQuotaCheck (S4G-08, Track
+// S4G) adalah handler pertama yang benar-benar diisi (skeleton S0-21
+// sebelumnya kosong).
+func NewMux(pool *pgxpool.Pool, emailer *service.EmailService, logger *zap.Logger) *asynq.ServeMux {
+	mux := asynq.NewServeMux()
+	quotaHandler := NewStorageQuotaCheckHandler(pool, emailer, logger)
+	mux.HandleFunc(TypeStorageQuotaCheck, quotaHandler.Handle)
+	return mux
 }

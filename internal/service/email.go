@@ -101,6 +101,39 @@ func (e *EmailService) SendWorkspaceAdminChangedEmail(_ context.Context, to, dis
 	return nil
 }
 
+// SendStorageQuotaWarningEmail memberitahu Group Admin saat organisasi
+// melewati ambang 80%/95% kuota storage (S4G-08, Track S4G, job
+// StorageQuotaCheckJob). Best-effort seperti email lain -- gagal kirim
+// TIDAK menggagalkan penyimpanan notifikasi in-app-nya.
+func (e *EmailService) SendStorageQuotaWarningEmail(_ context.Context, to, displayName, orgName string, pct, usedGB, quotaGB float64, level string) error {
+	msg := buildStorageQuotaWarningEmailMessage(e.from, to, displayName, orgName, pct, usedGB, quotaGB, level)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendStorageQuotaWarningEmail: %w", err)
+	}
+	return nil
+}
+
+// buildStorageQuotaWarningEmailMessage -- dipisah dari
+// SendStorageQuotaWarningEmail supaya bisa di-unit-test tanpa koneksi SMTP
+// nyata (pola sama dengan buildActivationEmailMessage).
+func buildStorageQuotaWarningEmailMessage(from, to, displayName, orgName string, pct, usedGB, quotaGB float64, level string) []byte {
+	subject := fmt.Sprintf("Peringatan Kuota Storage %s - PRODO", level)
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Organisasi %s sudah memakai %.0f%% dari kuota storage-nya (%.1f dari %.0f GB).\r\n"+
+			"Tambah kuota di menu Storage & Kuota sebelum upload attachment baru diblokir pada 100%%.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, orgName, pct, usedGB, quotaGB,
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
 // buildWorkspaceAdminChangedEmailMessage -- dipisah dari
 // SendWorkspaceAdminChangedEmail supaya bisa di-unit-test tanpa koneksi
 // SMTP nyata (pola sama dengan buildActivationEmailMessage).

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/handler"
 	"github.com/mtaaufaan/prodo-backend/internal/keycloak"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
+	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 	"github.com/mtaaufaan/prodo-backend/internal/telemetry"
@@ -325,6 +327,30 @@ func run() error {
 	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
+	// S4G-07, Track S4G: modal "Atur Alokasi Kuota" (desain
+	// "GA Storage Quota.dc.html") -- rate-limit 3x/menit PER-ROUTE (bukan
+	// limiter global 1000/menit yang sudah ada di atas), sesuai AC
+	// sprint_backlog.md eksplisit (beda dari rate-limit dekoratif Create
+	// Organization/Workspace yang sengaja tidak direplikasi, tidak ada AC
+	// terukur di situ).
+	v1.Put("/groups/:groupId/storage-allocation", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Max:        3,
+			Expiration: time.Minute,
+			// Default LimitReached cuma SendStatus(429) tanpa body -- FE
+			// interceptor (lib/api.ts) mengharap body {error:{code,message}}
+			// untuk membentuk ApiError, jadi 429 polos akan jatuh ke Error
+			// generik dan retry_after hilang. Bungkus JSON sesuai konvensi
+			// response.Error, retry_after dari header Retry-After yang SUDAH
+			// diset limiter SEBELUM LimitReached dipanggil.
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Terlalu banyak perubahan alokasi kuota dalam waktu singkat (maks 3 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		organizationHandler.BulkUpdateStorageAllocation)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)
