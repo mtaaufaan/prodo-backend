@@ -325,6 +325,15 @@ func run() error {
 	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
+	// S4G-07, Track S4G: modal "Atur Alokasi Kuota" (desain
+	// "GA Storage Quota.dc.html") -- rate-limit 3x/menit PER-ROUTE (bukan
+	// limiter global 1000/menit yang sudah ada di atas), sesuai AC
+	// sprint_backlog.md eksplisit (beda dari rate-limit dekoratif Create
+	// Organization/Workspace yang sengaja tidak direplikasi, tidak ada AC
+	// terukur di situ).
+	v1.Put("/groups/:groupId/storage-allocation", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{Max: 3, Expiration: time.Minute}),
+		organizationHandler.BulkUpdateStorageAllocation)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)

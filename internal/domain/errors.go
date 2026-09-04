@@ -304,3 +304,16 @@ type RetentionOutOfRangeError struct {
 func (e *RetentionOutOfRangeError) Error() string {
 	return fmt.Sprintf("retention days out of allowed range for tier %s (%d-%d)", e.TierName, e.MinDays, e.MaxDays)
 }
+
+// BulkAllocationError -- 422 untuk PUT /groups/:groupId/storage-allocation
+// (S4G-07, Track S4G). Errors -- org_id ke pesan spesifik org itu, dikumpulkan
+// SEMUA sekaligus (bukan berhenti di kesalahan pertama) supaya FE bisa
+// menyorot tiap baris yang salah di modal Atur Alokasi, sama seperti
+// validasi live yang sudah ada di desain "GA Storage Quota.dc.html".
+type BulkAllocationError struct {
+	Errors map[string]string
+}
+
+func (e *BulkAllocationError) Error() string {
+	return fmt.Sprintf("bulk storage allocation validation failed for %d organization(s)", len(e.Errors))
+}

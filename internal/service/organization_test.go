@@ -29,9 +29,17 @@ type fakeOrganizationRepo struct {
 	listResult      []repository.Organization
 	listErr         error
 	listCalledGroup string
+	listCeiling     int64
+
+	quotaUpdates []quotaUpdate
 
 	isActiveResult bool
 	isActiveErr    error
+}
+
+type quotaUpdate struct {
+	orgID      string
+	quotaBytes int64
 }
 
 func (f *fakeOrganizationRepo) IsGroupAdminOfGroup(_ context.Context, _ db.Executor, userID, groupID string) (bool, error) {
@@ -62,8 +70,12 @@ func (f *fakeOrganizationRepo) UpdateSettings(_ context.Context, _ db.Executor, 
 	return f.settingsErr
 }
 
-func (f *fakeOrganizationRepo) UpdateStorageQuota(_ context.Context, _ db.Executor, _ string, _ int64, _ int, _, _ string) error {
-	return f.quotaErr
+func (f *fakeOrganizationRepo) UpdateStorageQuota(_ context.Context, _ db.Executor, orgID string, quotaBytes int64, _ int, _, _ string) error {
+	if f.quotaErr != nil {
+		return f.quotaErr
+	}
+	f.quotaUpdates = append(f.quotaUpdates, quotaUpdate{orgID: orgID, quotaBytes: quotaBytes})
+	return nil
 }
 
 func (f *fakeOrganizationRepo) IsActive(_ context.Context, _ db.Executor, _ string) (bool, error) {
@@ -84,7 +96,7 @@ func (f *fakeOrganizationRepo) Delete(_ context.Context, _ db.Executor, _, _, _ 
 
 func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor, groupID string) ([]repository.Organization, int64, error) {
 	f.listCalledGroup = groupID
-	return f.listResult, 0, f.listErr
+	return f.listResult, f.listCeiling, f.listErr
 }
 
 func (f *fakeOrganizationRepo) GetSummary(_ context.Context, _ db.Executor, _ string) (*repository.Summary, error) {
@@ -379,6 +391,93 @@ func TestOrganizationService_UpdateStorageQuota_RetentionOutOfRange(t *testing.T
 	var retentionErr *domain.RetentionOutOfRangeError
 	if !errors.As(err, &retentionErr) {
 		t.Errorf("err = %v, want wrapped *domain.RetentionOutOfRangeError", err)
+	}
+}
+
+const gbBytes = 1024 * 1024 * 1024
+
+func TestOrganizationService_BulkUpdateStorageAllocation_AppliesDecreaseBeforeIncrease(t *testing.T) {
+	repo := &fakeOrganizationRepo{
+		listCeiling: 100 * gbBytes,
+		listResult: []repository.Organization{
+			{ID: "org-a", GroupID: "group-1", StorageQuotaBytes: 60 * gbBytes, StorageMaxBytes: 100 * gbBytes, StorageUsedBytes: 5 * gbBytes, RetentionDays: 90},
+			{ID: "org-b", GroupID: "group-1", StorageQuotaBytes: 30 * gbBytes, StorageMaxBytes: 100 * gbBytes, StorageUsedBytes: 5 * gbBytes, RetentionDays: 90},
+			{ID: "org-c", GroupID: "group-1", StorageQuotaBytes: 10 * gbBytes, StorageMaxBytes: 100 * gbBytes, StorageUsedBytes: 5 * gbBytes, RetentionDays: 90},
+		},
+	}
+	svc := NewOrganizationService(repo)
+
+	// org-a turun 60->20, org-b naik 30->70, org-c tidak disebut (tetap
+	// 10) -- total akhir 20+70+10=100, pas di plafon.
+	err := svc.BulkUpdateStorageAllocation(context.Background(), nil, "group-1",
+		map[string]int64{"org-a": 20 * gbBytes, "org-b": 70 * gbBytes}, "pa-1", "platform_admin")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.quotaUpdates) != 2 {
+		t.Fatalf("quotaUpdates = %+v, want 2 updates", repo.quotaUpdates)
+	}
+	if repo.quotaUpdates[0].orgID != "org-a" || repo.quotaUpdates[1].orgID != "org-b" {
+		t.Errorf("quotaUpdates order = %+v, want org-a (turun) sebelum org-b (naik)", repo.quotaUpdates)
+	}
+}
+
+func TestOrganizationService_BulkUpdateStorageAllocation_BelowUsed(t *testing.T) {
+	repo := &fakeOrganizationRepo{
+		listCeiling: 100 * gbBytes,
+		listResult: []repository.Organization{
+			{ID: "org-a", GroupID: "group-1", StorageQuotaBytes: 60 * gbBytes, StorageMaxBytes: 100 * gbBytes, StorageUsedBytes: 50 * gbBytes, RetentionDays: 90},
+		},
+	}
+	svc := NewOrganizationService(repo)
+
+	err := svc.BulkUpdateStorageAllocation(context.Background(), nil, "group-1",
+		map[string]int64{"org-a": 10 * gbBytes}, "pa-1", "platform_admin")
+	var bulkErr *domain.BulkAllocationError
+	if !errors.As(err, &bulkErr) {
+		t.Fatalf("err = %v, want wrapped *domain.BulkAllocationError", err)
+	}
+	if _, ok := bulkErr.Errors["org-a"]; !ok {
+		t.Errorf("bulkErr.Errors = %+v, want key org-a", bulkErr.Errors)
+	}
+	if len(repo.quotaUpdates) != 0 {
+		t.Errorf("quotaUpdates = %+v, want no writes on validation failure", repo.quotaUpdates)
+	}
+}
+
+func TestOrganizationService_BulkUpdateStorageAllocation_ExceedsCeiling_NoPartialWrite(t *testing.T) {
+	repo := &fakeOrganizationRepo{
+		listCeiling: 50 * gbBytes,
+		listResult: []repository.Organization{
+			{ID: "org-a", GroupID: "group-1", StorageQuotaBytes: 20 * gbBytes, StorageMaxBytes: 100 * gbBytes, StorageUsedBytes: 5 * gbBytes, RetentionDays: 90},
+			{ID: "org-b", GroupID: "group-1", StorageQuotaBytes: 20 * gbBytes, StorageMaxBytes: 100 * gbBytes, StorageUsedBytes: 5 * gbBytes, RetentionDays: 90},
+		},
+	}
+	svc := NewOrganizationService(repo)
+
+	// org-a naik ke 40, org-b tetap 20 -> total 60 > plafon 50.
+	err := svc.BulkUpdateStorageAllocation(context.Background(), nil, "group-1",
+		map[string]int64{"org-a": 40 * gbBytes}, "pa-1", "platform_admin")
+	var bulkErr *domain.BulkAllocationError
+	if !errors.As(err, &bulkErr) {
+		t.Fatalf("err = %v, want wrapped *domain.BulkAllocationError", err)
+	}
+	if _, ok := bulkErr.Errors["_total"]; !ok {
+		t.Errorf("bulkErr.Errors = %+v, want key _total", bulkErr.Errors)
+	}
+	if len(repo.quotaUpdates) != 0 {
+		t.Errorf("quotaUpdates = %+v, want no writes when total exceeds ceiling", repo.quotaUpdates)
+	}
+}
+
+func TestOrganizationService_BulkUpdateStorageAllocation_Forbidden(t *testing.T) {
+	repo := &fakeOrganizationRepo{gaGroups: map[string]bool{}}
+	svc := NewOrganizationService(repo)
+
+	err := svc.BulkUpdateStorageAllocation(context.Background(), nil, "group-1",
+		map[string]int64{"org-a": 10 * gbBytes}, "ga-2", "group_admin")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
 }
 
