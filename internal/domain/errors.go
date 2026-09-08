@@ -137,6 +137,19 @@ var (
 	// sedang soft-deleted.
 	ErrWorkspaceNotDeleted = errors.New("workspace is not soft-deleted")
 
+	// ErrCSVImportNotFound dikembalikan saat csv_imports.id tidak ditemukan
+	// (Import Data).
+	ErrCSVImportNotFound = errors.New("csv import not found")
+
+	// ErrCSVImportAlreadyStarted dikembalikan POST .../execute kalau import
+	// bukan status 'pending' lagi (sudah dieksekusi/sedang berjalan).
+	ErrCSVImportAlreadyStarted = errors.New("csv import already started")
+
+	// ErrCSVTooLarge/ErrCSVTooManyRows dikembalikan saat berkas CSV
+	// melebihi batas AC desain "GA Import Data.dc.html" (≤ 10 MB, ≤ 5.000 baris).
+	ErrCSVTooLarge    = errors.New("csv file exceeds 10 MB")
+	ErrCSVTooManyRows = errors.New("csv file exceeds 5000 rows")
+
 	// ErrRetentionExportNotFound dikembalikan GET /retention-exports/:token
 	// (Data Retention) saat token tidak dikenal ATAU sudah kedaluwarsa (72
 	// jam) -- pesan sama untuk keduanya, tidak membocorkan mana yang benar.
