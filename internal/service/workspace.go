@@ -27,7 +27,8 @@ type workspaceRepository interface {
 	Unarchive(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	Reactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
-	Delete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
+	SoftDelete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
+	Restore(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	List(ctx context.Context, exec db.Executor, orgID string) ([]repository.Workspace, error)
 	ListByGroup(ctx context.Context, exec db.Executor, groupID string) ([]repository.WorkspaceListRow, error)
 	MoveToOrg(ctx context.Context, exec db.Executor, workspaceID, targetOrgID, actorID, actorRole string) error
@@ -317,7 +318,8 @@ func (s *WorkspaceService) notifyAdminChange(ctx context.Context, userID, worksp
 	}
 }
 
-// DeleteWorkspace menghapus workspace permanen (S3-12). BEDA dari Update/
+// DeleteWorkspace soft-delete workspace (Data Retention, GANTIKAN hard
+// delete lama -- lihat WorkspaceRepository.SoftDelete). BEDA dari Update/
 // Deactivate/Reactivate -- middleware routing-nya cuma gerbang platform-role
 // kasar (requireOrgAdmin), BUKAN RequireRole(admin_workspace), karena RLS
 // `workspaces_delete` sengaja TIDAK mengizinkan Admin Workspace (cuma
@@ -338,8 +340,30 @@ func (s *WorkspaceService) DeleteWorkspace(ctx context.Context, exec db.Executor
 		return err
 	}
 
-	if err := s.repo.Delete(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+	if err := s.repo.SoftDelete(ctx, exec, workspaceID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.DeleteWorkspace: %w", err)
+	}
+	return nil
+}
+
+// RestoreWorkspace membatalkan soft-delete -- otorisasi sama persis
+// DeleteWorkspace (Platform Admin/Group Admin pemilik org, bukan Admin
+// Workspace -- workspace sudah dihapus, tidak ada lagi admin_workspace
+// aktif yang bisa dicek lewat RLS workspace member biasa).
+func (s *WorkspaceService) RestoreWorkspace(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	if workspaceID == "" {
+		return fmt.Errorf("service.RestoreWorkspace: %w", domain.ErrInvalidInput)
+	}
+	orgID, err := s.repo.GetOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("service.RestoreWorkspace: %w", err)
+	}
+	if err := s.orgs.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.Restore(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.RestoreWorkspace: %w", err)
 	}
 	return nil
 }

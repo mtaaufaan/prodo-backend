@@ -374,11 +374,10 @@ func (h *WorkspaceHandler) Reactivate(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "deactivated": false}))
 }
 
-// Delete menangani DELETE /workspaces/:wsId (S3-12). Otorisasi HANYA
-// Platform Admin/Group Admin pemilik org (bukan Admin Workspace) -- lihat
-// catatan WorkspaceService.DeleteWorkspace. Guard "semua project dihapus"
-// dari wording task asli BELUM diimplementasikan -- tabel `projects` belum
-// ada (implementation_gaps.md IG-17).
+// Delete menangani DELETE /workspaces/:wsId (S3-12, soft-delete sejak Data
+// Retention 2026-09-08 -- lihat WorkspaceRepository.SoftDelete). Otorisasi
+// HANYA Platform Admin/Group Admin pemilik org (bukan Admin Workspace) --
+// lihat catatan WorkspaceService.DeleteWorkspace.
 func (h *WorkspaceHandler) Delete(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -397,6 +396,29 @@ func (h *WorkspaceHandler) Delete(c *fiber.Ctx) error {
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// Restore menangani POST /workspaces/:wsId/restore (Data Retention) --
+// membatalkan soft-delete, dipakai dari halaman GA Data Retention (tab
+// Jadwal Penghapusan). Otorisasi sama persis Delete.
+func (h *WorkspaceHandler) Restore(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Restore dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.Restore dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	if err := h.workspaces.RestoreWorkspace(c.Context(), exec, workspaceID, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal memulihkan workspace")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": workspaceID}))
 }
 
 // List menangani GET /organizations/:orgId/workspaces (S3-13 prasyarat,
@@ -536,6 +558,8 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Member tidak ditemukan di workspace ini", nil))
 	case errors.Is(err, domain.ErrWorkspaceHasProjects):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("WORKSPACE_HAS_PROJECTS", "Workspace masih punya project aktif", nil))
+	case errors.Is(err, domain.ErrWorkspaceNotDeleted):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("WORKSPACE_NOT_DELETED", "Workspace ini tidak sedang dihapus", nil))
 	case errors.Is(err, domain.ErrOrganizationNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrOrganizationInactive):

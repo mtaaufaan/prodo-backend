@@ -132,6 +132,16 @@ var (
 	// selesai (S3 H9).
 	ErrWorkspaceHasProjects = errors.New("workspace still has active projects")
 
+	// ErrWorkspaceNotDeleted dikembalikan POST /workspaces/:id/restore (Data
+	// Retention, mirror ErrProjectNotDeleted) saat workspace target tidak
+	// sedang soft-deleted.
+	ErrWorkspaceNotDeleted = errors.New("workspace is not soft-deleted")
+
+	// ErrRetentionExportNotFound dikembalikan GET /retention-exports/:token
+	// (Data Retention) saat token tidak dikenal ATAU sudah kedaluwarsa (72
+	// jam) -- pesan sama untuk keduanya, tidak membocorkan mana yang benar.
+	ErrRetentionExportNotFound = errors.New("retention export not found or expired")
+
 	// ErrMemberNotFound dikembalikan saat target bukan member workspace
 	// (S3-15) -- tidak ada baris workspace_members yang cocok.
 	ErrMemberNotFound = errors.New("workspace member not found")

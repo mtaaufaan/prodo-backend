@@ -35,6 +35,10 @@ type fakeOrganizationRepo struct {
 
 	isActiveResult bool
 	isActiveErr    error
+
+	retentionMin, retentionMax int
+	retentionTier              string
+	retentionRangeErr          error
 }
 
 type quotaUpdate struct {
@@ -80,6 +84,18 @@ func (f *fakeOrganizationRepo) UpdateStorageQuota(_ context.Context, _ db.Execut
 
 func (f *fakeOrganizationRepo) IsActive(_ context.Context, _ db.Executor, _ string) (bool, error) {
 	return f.isActiveResult, f.isActiveErr
+}
+
+func (f *fakeOrganizationRepo) GroupRetentionRange(_ context.Context, _ db.Executor, _ string) (minDays, maxDays int, tierName string, err error) {
+	minDays, maxDays = f.retentionMin, f.retentionMax
+	if minDays == 0 && maxDays == 0 {
+		minDays, maxDays = 30, 365
+	}
+	tierName = f.retentionTier
+	if tierName == "" {
+		tierName = "starter"
+	}
+	return minDays, maxDays, tierName, f.retentionRangeErr
 }
 
 func (f *fakeOrganizationRepo) Deactivate(_ context.Context, _ db.Executor, _, _, _ string) error {
