@@ -48,6 +48,20 @@ func (e *asynqCSVImportEnqueuer) Enqueue(ctx context.Context, importID string) e
 	return err
 }
 
+// asynqWebhookEnqueuer -- adapter tipis *asynq.Client -> interface
+// webhookDeliveryEnqueuer (internal/service/webhook.go), pola sama
+// asynqCSVImportEnqueuer.
+type asynqWebhookEnqueuer struct{ client *asynq.Client }
+
+func (e *asynqWebhookEnqueuer) Enqueue(ctx context.Context, webhookID, eventType string, payload []byte) error {
+	task, err := worker.NewWebhookDeliveryTask(webhookID, eventType, payload)
+	if err != nil {
+		return err
+	}
+	_, err = e.client.EnqueueContext(ctx, task)
+	return err
+}
+
 // main adalah entry point aplikasi PRODO backend.
 func main() {
 	if err := run(); err != nil {
@@ -179,6 +193,10 @@ func run() error {
 	projectRepo := repository.NewProjectRepository()
 	retentionRepo := repository.NewRetentionRepository()
 	csvImportRepo := repository.NewCSVImportRepository()
+	webhookRepo, err := repository.NewWebhookRepository(cfg.WebhookEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("setup webhook repository: %w", err)
+	}
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -193,7 +211,8 @@ func run() error {
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, invitationSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
-	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc)
+	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
+	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -235,6 +254,7 @@ func run() error {
 	projectHandler := handler.NewProjectHandler(projectSvc, logger)
 	retentionHandler := handler.NewRetentionHandler(retentionSvc, pool, logger)
 	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
+	webhookHandler := handler.NewWebhookHandler(webhookSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -457,6 +477,29 @@ func run() error {
 			},
 		}),
 		csvImportHandler.Execute)
+	// Webhook (Track S4G, desain "GA Webhook.dc.html" + "GA Add
+	// Webhook.dc.html") -- cuma 3 event nyata (implementation_gaps.md IG-44).
+	v1.Get("/groups/:groupId/webhooks", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.List)
+	v1.Post("/groups/:groupId/webhooks", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Create)
+	v1.Get("/groups/:groupId/webhooks/deliveries", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Deliveries)
+	v1.Put("/groups/:groupId/webhooks/:webhookId", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Update)
+	v1.Patch("/groups/:groupId/webhooks/:webhookId/toggle-active", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.ToggleActive)
+	v1.Post("/groups/:groupId/webhooks/:webhookId/regenerate-secret", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.RegenerateSecret)
+	v1.Delete("/groups/:groupId/webhooks/:webhookId", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Delete)
+	// Rate-limit 5x/menit sesuai AC eksplisit desain ("GA Add Webhook.dc.html":
+	// "maks 5 permintaan/menit -- sejalan dengan batas 100 event/menit per organisasi").
+	v1.Post("/groups/:groupId/webhooks/:webhookId/test", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Max:        5,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Batas pengiriman tes webhook terlampaui (maks 5 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		webhookHandler.Test)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)

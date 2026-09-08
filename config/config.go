@@ -74,6 +74,13 @@ type Config struct {
 	// (S1-06), lihat docs/DATABASE_SCHEMA.md §5.4.
 	MFAEncryptionKey string `env:"MFA_ENCRYPTION_KEY" envDefault:""`
 
+	// WebhookEncryptionKey -- passphrase pgcrypto untuk enkripsi
+	// hmac_secret webhook (Track S4G, desain "GA Add Webhook.dc.html"),
+	// key terpisah dari MFAEncryptionKey (bukan dipakai bersama) supaya
+	// kebocoran satu domain rahasia tidak otomatis membuka domain lain --
+	// pola sama alasan MFA punya key sendiri.
+	WebhookEncryptionKey string `env:"WEBHOOK_ENCRYPTION_KEY" envDefault:""`
+
 	// MinIO (Object Storage)
 	MinIOEndpoint  string `env:"MINIO_ENDPOINT" envDefault:""`
 	MinIOAccessKey string `env:"MINIO_ACCESS_KEY" envDefault:""`
