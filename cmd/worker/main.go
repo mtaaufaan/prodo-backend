@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
@@ -82,6 +83,18 @@ func run() error {
 	invitationSvc := service.NewInvitationService(invitationRepo, emailer, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
 	csvImportHandlerDeps := worker.NewCSVImportHandler(pool, csvImportRepo, invitationSvc, logger)
 
+	// WebhookDeliveryJob (Track S4G) -- worker HANYA mengirim+mencatat
+	// percobaan (DeliverAttempt) dan mengirim notifikasi exhausted, TIDAK
+	// pernah men-Dispatch/Create webhook baru -- enqueuer sengaja nil
+	// (tidak pernah dipanggil dari proses ini).
+	organizationRepo := repository.NewOrganizationRepository()
+	webhookRepo, err := repository.NewWebhookRepository(cfg.WebhookEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("setup webhook repository: %w", err)
+	}
+	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, nil, emailer, logger)
+	webhookDeliveryHandlerDeps := worker.NewWebhookDeliveryHandler(pool, webhookSvc, logger)
+
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di
 	// codebase ini, dijalankan tiap jam. Scheduler.Start() non-blocking
 	// (jalan di goroutine cron internal asynq) -- proses tetap blok di
@@ -102,10 +115,24 @@ func run() error {
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency: cfg.AsynqConcurrency,
+		// WebhookDeliveryJob (Track S4G) -- delay 1/5/15 menit PERSIS desain
+		// "GA Webhook.dc.html", diindeks per retryCount (0->1mnt sebelum
+		// percobaan ke-2, dst). Task lain pakai default Asynq (backoff
+		// eksponensial umum) -- tidak butuh jadwal presisi seperti ini.
+		RetryDelayFunc: func(n int, e error, t *asynq.Task) time.Duration {
+			if t.Type() == worker.TypeWebhookDelivery {
+				delays := []time.Duration{1 * time.Minute, 5 * time.Minute, 15 * time.Minute}
+				if n < len(delays) {
+					return delays[n]
+				}
+				return delays[len(delays)-1]
+			}
+			return asynq.DefaultRetryDelayFunc(n, e, t)
+		},
 	})
 
 	log.Printf("PRODO Worker starting — env=%s concurrency=%d\n", cfg.AppEnv, cfg.AsynqConcurrency)
-	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, logger)); err != nil {
+	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, logger)); err != nil {
 		return fmt.Errorf("worker error: %w", err)
 	}
 	return nil

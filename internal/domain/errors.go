@@ -290,6 +290,21 @@ var (
 	// (deactivated_at TERISI) -- workspace tidak boleh dipindah ke organisasi
 	// yang aksesnya sendiri sedang diblokir.
 	ErrOrganizationInactive = errors.New("target organization is deactivated")
+
+	// ErrWebhookNotFound dikembalikan saat webhook_configs.id tidak
+	// ditemukan (Webhook, Track S4G).
+	ErrWebhookNotFound = errors.New("webhook not found")
+
+	// ErrWebhookURLNotHTTPS dikembalikan saat target_url bukan HTTPS --
+	// AC eksplisit desain "GA Add Webhook.dc.html", ditegakkan lagi di
+	// service (bukan cuma validasi FE).
+	ErrWebhookURLNotHTTPS = errors.New("webhook endpoint must use https")
+
+	// ErrWebhookEventRequired dikembalikan saat events kosong ATAU berisi
+	// nilai di luar 3 event yang benar-benar punya trigger sekarang
+	// (project.created/updated/deleted) -- lihat implementation_gaps.md
+	// IG-44 untuk 7 event desain yang belum bisa dibangun.
+	ErrWebhookEventRequired = errors.New("at least one supported event is required")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id

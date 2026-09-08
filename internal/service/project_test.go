@@ -61,7 +61,7 @@ func (f *fakeProjectRepo) Restore(_ context.Context, _ db.Executor, _, _, _ stri
 
 func TestProjectService_Create_PlatformAdminBypass(t *testing.T) {
 	repo := &fakeProjectRepo{}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "project_manager"})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "project_manager"}, nil, nil)
 
 	p, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "ril", "pm-1", "pa-1", "platform_admin")
 	if err != nil {
@@ -74,7 +74,7 @@ func TestProjectService_Create_PlatformAdminBypass(t *testing.T) {
 
 func TestProjectService_Create_RejectsMissingFields(t *testing.T) {
 	repo := &fakeProjectRepo{}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "project_manager"})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "project_manager"}, nil, nil)
 
 	cases := []struct {
 		name, code, pm string
@@ -95,7 +95,7 @@ func TestProjectService_Create_RejectsMissingFields(t *testing.T) {
 
 func TestProjectService_Create_RejectsPMNotProjectManagerRole(t *testing.T) {
 	repo := &fakeProjectRepo{}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "editor"})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "editor"}, nil, nil)
 
 	_, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "user-1", "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
@@ -105,7 +105,7 @@ func TestProjectService_Create_RejectsPMNotProjectManagerRole(t *testing.T) {
 
 func TestProjectService_Update_ForbiddenForNonAWPM(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"}, nil, nil)
 
 	err := svc.Update(context.Background(), nil, "proj-1", "Nama Baru", "", "viewer-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
@@ -117,7 +117,7 @@ func TestProjectService_Delete_AllowedForWorkspacePM(t *testing.T) {
 	// Soft-delete (bukan hard-delete) sengaja mengizinkan AW/PM, bukan
 	// cuma GA/PA -- lihat komentar ProjectRepository.SoftDelete.
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"}, nil, nil)
 
 	if err := svc.Delete(context.Background(), nil, "proj-1", "pm-1", "member"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -128,7 +128,7 @@ func TestProjectService_Restore_RejectsWorkspacePM(t *testing.T) {
 	// Restore sengaja LEBIH ketat dari Delete: cuma GA/PA, AW/PM yang
 	// boleh menghapus TIDAK otomatis boleh memulihkan.
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"}, nil, nil)
 
 	err := svc.Restore(context.Background(), nil, "proj-1", "pm-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
@@ -138,7 +138,7 @@ func TestProjectService_Restore_RejectsWorkspacePM(t *testing.T) {
 
 func TestProjectService_Restore_AllowedForGroupAdmin(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
-	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""})
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""}, nil, nil)
 
 	if err := svc.Restore(context.Background(), nil, "proj-1", "ga-1", "group_admin"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
