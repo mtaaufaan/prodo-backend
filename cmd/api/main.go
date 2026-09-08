@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/config"
@@ -29,7 +30,23 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 	"github.com/mtaaufaan/prodo-backend/internal/telemetry"
+	"github.com/mtaaufaan/prodo-backend/internal/worker"
 )
+
+// asynqCSVImportEnqueuer -- adapter tipis *asynq.Client -> interface
+// csvImportEnqueuer (internal/service/csv_import.go), PERTAMA KALI proses
+// API mengantre job Asynq dengan payload (job periodik lain semuanya
+// dijadwalkan scheduler di proses worker, bukan di-enqueue proses API).
+type asynqCSVImportEnqueuer struct{ client *asynq.Client }
+
+func (e *asynqCSVImportEnqueuer) Enqueue(ctx context.Context, importID string) error {
+	task, err := worker.NewCSVImportTask(importID)
+	if err != nil {
+		return err
+	}
+	_, err = e.client.EnqueueContext(ctx, task)
+	return err
+}
 
 // main adalah entry point aplikasi PRODO backend.
 func main() {
@@ -69,6 +86,25 @@ func run() error {
 		return fmt.Errorf("konek ke Redis: %w", err)
 	}
 	defer rdb.Close() //nolint:errcheck // best-effort close on shutdown
+
+	// Asynq client -- Import Data (S4G-18): PERTAMA KALI proses API
+	// mengantre job dengan payload (bukan cuma dijadwalkan scheduler seperti
+	// StorageQuotaCheck/RetentionNotify di proses worker).
+	asynqRedisOpt, err := asynq.ParseRedisURI(cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("REDIS_URL tidak valid untuk Asynq: %w", err)
+	}
+	asynqClient := asynq.NewClient(asynqRedisOpt)
+	defer asynqClient.Close() //nolint:errcheck // best-effort close on shutdown
+
+	// StorageService (MinIO) -- Import Data: simpan berkas CSV asli sebelum
+	// diproses job. MinIO sendiri sudah jalan sejak S0, ini pemakaian
+	// pertama dari kode Go (implementation_gaps.md IG-19 soal upload lain
+	// yang masih deferred tetap berlaku, TIDAK ditutup oleh ini).
+	storageSvc, err := service.NewStorageService(cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOBucket, cfg.MinIOUseSSL)
+	if err != nil {
+		return fmt.Errorf("setup MinIO client: %w", err)
+	}
 
 	// OTEL trace exporter -- opsional untuk dev lokal (kosong = tidak
 	// terhubung ke otel-collector, span tetap dibuat tapi tidak dikirim ke
@@ -142,6 +178,7 @@ func run() error {
 	projectMemberRepo := repository.NewProjectMemberRepository()
 	projectRepo := repository.NewProjectRepository()
 	retentionRepo := repository.NewRetentionRepository()
+	csvImportRepo := repository.NewCSVImportRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -167,6 +204,7 @@ func run() error {
 	groupMemberRepo := repository.NewGroupMemberRepository()
 	groupMemberSvc := service.NewGroupMemberService(groupMemberRepo, groupMemberRepo, invitationRepo, organizationSvc, invitationSvc)
 	retentionSvc := service.NewRetentionService(retentionRepo, organizationRepo, retentionRepo, emailSvc, cfg.AppBaseURL)
+	csvImportSvc := service.NewCSVImportService(csvImportRepo, organizationRepo, workspaceRepo, accountRepo, storageSvc, &asynqCSVImportEnqueuer{client: asynqClient})
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -196,6 +234,7 @@ func run() error {
 	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
 	projectHandler := handler.NewProjectHandler(projectSvc, logger)
 	retentionHandler := handler.NewRetentionHandler(retentionSvc, pool, logger)
+	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -398,6 +437,26 @@ func run() error {
 		organizationHandler.BulkUpdateRetentionPolicy)
 	v1.Get("/groups/:groupId/retention-schedule", jwtAuth, dbCtx, requireOrgAdmin, retentionHandler.GetSchedule)
 	v1.Post("/groups/:groupId/retention-exports", jwtAuth, dbCtx, requireOrgAdmin, retentionHandler.RequestExport)
+	// Import Data (S4G-15/16/17/18, Track S4G): kind cuma "member" -- lihat
+	// komentar package internal/service/csv_import.go.
+	v1.Get("/groups/:groupId/data-import/template", jwtAuth, dbCtx, requireOrgAdmin, csvImportHandler.Template)
+	v1.Post("/groups/:groupId/data-import/validate", jwtAuth, dbCtx, requireOrgAdmin, csvImportHandler.Validate)
+	v1.Get("/groups/:groupId/data-import/history", jwtAuth, dbCtx, requireOrgAdmin, csvImportHandler.History)
+	v1.Get("/groups/:groupId/data-import/:importId", jwtAuth, dbCtx, requireOrgAdmin, csvImportHandler.Get)
+	v1.Get("/groups/:groupId/data-import/:importId/report", jwtAuth, dbCtx, requireOrgAdmin, csvImportHandler.Report)
+	// Rate-limit 2x/menit sesuai AC eksplisit desain ("GA Import Data.dc.html").
+	v1.Post("/groups/:groupId/data-import/:importId/execute", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Max:        2,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Terlalu banyak eksekusi import dalam waktu singkat (maks 2 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		csvImportHandler.Execute)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)

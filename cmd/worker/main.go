@@ -9,7 +9,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/mtaaufaan/prodo-backend/config"
+	"github.com/mtaaufaan/prodo-backend/internal/cache"
 	"github.com/mtaaufaan/prodo-backend/internal/db"
+	"github.com/mtaaufaan/prodo-backend/internal/keycloak"
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 	"github.com/mtaaufaan/prodo-backend/internal/worker"
 )
@@ -55,6 +58,30 @@ func run() error {
 		return fmt.Errorf("REDIS_URL tidak valid untuk Asynq: %w", err)
 	}
 
+	// Import Data (S4G-15/16/17/18, Track S4G): CSVImportJob menulis
+	// undangan/role lewat InvitationService.CreateBulkInvitations (reuse
+	// PENUH S2-23) -- butuh graf dependency yang sama seperti cmd/api,
+	// PERTAMA KALI proses worker perlu Keycloak+Redis (sebelumnya cukup
+	// pool+emailer saja untuk StorageQuotaCheck/RetentionNotify).
+	rdb, err := cache.New(ctx, cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("konek ke Redis: %w", err)
+	}
+	defer rdb.Close() //nolint:errcheck // best-effort close on shutdown
+
+	kcAdmin, err := keycloak.NewAdminClient(cfg.KeycloakIssuer, cfg.KeycloakAdminClientID, cfg.KeycloakAdminClientSecret)
+	if err != nil {
+		return fmt.Errorf("setup Keycloak admin client: %w", err)
+	}
+
+	accountRepo := repository.NewAccountRepository(pool)
+	invitationRepo := repository.NewInvitationRepository()
+	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
+	csvImportRepo := repository.NewCSVImportRepository()
+	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
+	invitationSvc := service.NewInvitationService(invitationRepo, emailer, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
+	csvImportHandlerDeps := worker.NewCSVImportHandler(pool, csvImportRepo, invitationSvc, logger)
+
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di
 	// codebase ini, dijalankan tiap jam. Scheduler.Start() non-blocking
 	// (jalan di goroutine cron internal asynq) -- proses tetap blok di
@@ -78,7 +105,7 @@ func run() error {
 	})
 
 	log.Printf("PRODO Worker starting — env=%s concurrency=%d\n", cfg.AppEnv, cfg.AsynqConcurrency)
-	if err := srv.Run(worker.NewMux(pool, emailer, logger)); err != nil {
+	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, logger)); err != nil {
 		return fmt.Errorf("worker error: %w", err)
 	}
 	return nil
