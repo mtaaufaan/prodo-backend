@@ -29,20 +29,20 @@ func NewGroupMemberRepository() *GroupMemberRepository {
 // terpisah oleh service (join Go-side dengan ListMemberWorkspaceRoles,
 // hindari N+1 query per user).
 type GroupMemberRow struct {
-	UserID         string
-	Email          string
-	DisplayName    string
-	IsActive       bool
-	SuspendedAt    *time.Time
-	IsGroupAdmin   bool
-	IsExecutive    bool
-	ExecutiveTitle *string
+	UserID       string
+	Email        string
+	DisplayName  string
+	Title        *string
+	IsActive     bool
+	SuspendedAt  *time.Time
+	IsGroupAdmin bool
+	IsExecutive  bool
 }
 
 func (r *GroupMemberRepository) ListMembers(ctx context.Context, exec db.Executor, groupID string) ([]GroupMemberRow, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT DISTINCT u.id, u.email, u.display_name, u.is_active, u.suspended_at,
-		       (gaa.user_id IS NOT NULL), (ea.user_id IS NOT NULL), ea.title
+		SELECT DISTINCT u.id, u.email, u.display_name, u.title, u.is_active, u.suspended_at,
+		       (gaa.user_id IS NOT NULL), (ea.user_id IS NOT NULL)
 		FROM users u
 		LEFT JOIN group_admin_assignments gaa ON gaa.user_id = u.id AND gaa.group_id = $1
 		LEFT JOIN executive_assignments ea ON ea.user_id = u.id AND ea.group_id = $1
@@ -64,8 +64,8 @@ func (r *GroupMemberRepository) ListMembers(ctx context.Context, exec db.Executo
 	var result []GroupMemberRow
 	for rows.Next() {
 		var m GroupMemberRow
-		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.IsActive, &m.SuspendedAt,
-			&m.IsGroupAdmin, &m.IsExecutive, &m.ExecutiveTitle); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.IsActive, &m.SuspendedAt,
+			&m.IsGroupAdmin, &m.IsExecutive); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		result = append(result, m)
@@ -207,18 +207,18 @@ func (r *GroupMemberRepository) RevokeExecutive(ctx context.Context, exec db.Exe
 // match), sesuai desain "GA Members Roles.dc.html" (panel identitas cuma
 // muncul untuk baris Eksekutif).
 func (r *GroupMemberRepository) UpdateIdentity(ctx context.Context, exec db.Executor, userID, groupID, displayName, title string) error {
+	// Title sekarang kolom umum di users (migrasi 20260916090000) -- berlaku
+	// untuk SEMUA member, bukan cuma Eksekutif (konsolidasi dari
+	// executive_assignments.title yang sudah dihapus). Guard keanggotaan
+	// grup dipertahankan lewat isMemberOfGroupSQL yang sama dengan
+	// SetAccess -- GA cuma boleh mengedit identitas member DALAM grupnya.
 	tag, err := exec.Exec(ctx, `
-		UPDATE executive_assignments SET title = $3 WHERE user_id = $1 AND group_id = $2
-	`, userID, groupID, title)
+		UPDATE users SET display_name = $3, title = $4 WHERE id = $1 AND `+isMemberOfGroupSQL, userID, groupID, displayName, title)
 	if err != nil {
-		return fmt.Errorf("repository.UpdateIdentity: update title: %w", err)
+		return fmt.Errorf("repository.UpdateIdentity: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.UpdateIdentity: %w", domain.ErrUserNotFound)
-	}
-
-	if _, err := exec.Exec(ctx, `UPDATE users SET display_name = $2 WHERE id = $1`, userID, displayName); err != nil {
-		return fmt.Errorf("repository.UpdateIdentity: update display_name: %w", err)
 	}
 	return nil
 }

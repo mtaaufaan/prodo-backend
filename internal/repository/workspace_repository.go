@@ -323,23 +323,22 @@ func (r *WorkspaceRepository) List(ctx context.Context, exec db.Executor, orgID 
 // WorkspaceListRow -- satu baris GET /workspaces?group_id= (S4G-05, Track
 // S4G, desain "GA Workspaces.dc.html" -- grid lintas organisasi dalam satu
 // grup, org jadi KOLOM bukan parameter route seperti List/GetOrgID di atas).
-// AdminName/AdminEmail nullable -- NULL kalau Admin Workspace-nya masih
-// undangan PENDING (belum menerima, workspace_members belum punya baris
-// sama sekali) -- lihat PendingAdminEmail untuk kasus itu, DITEMUKAN
-// 2026-09-04 lewat laporan user "admin workspace tidak terdeteksi": FE
-// sebelumnya mengasumsikan AdminEmail terisi untuk kasus pending juga,
-// tapi kolom itu HANYA pernah terisi dari workspace_members (member yang
-// SUDAH diterima) -- baris pending betul-betul tidak muncul di mana pun,
-// bukan cuma label yang salah. StorageUsedBytes SELALU 0 untuk sekarang --
-// task_attachments (S4G-06) tidak py jalur JOIN ke workspace_id sama
-// sekali (task_id belum py FK ke tabel tasks yang belum ada), lihat
-// implementation_gaps.md IG-19.
+// AdminCount/PendingAdminCount (bukan AdminName/AdminEmail/PendingAdminEmail
+// tunggal lagi -- diganti 2026-09-08 atas permintaan user, "nama admin
+// workspace dihilangkan, ganti jadi angka": 1 workspace bisa punya LEBIH
+// dari 1 admin_workspace sekaligus, lihat ManageWorkspaceModal.tsx yang
+// sudah lebih dulu diubah dari dropdown ganti-admin jadi daftar
+// tambah/cabut) -- COUNT baris workspace_members role='admin_workspace'
+// (diterima) dan user_invitations role='admin_workspace' yang masih
+// pending (belum diterima/dibatalkan/kedaluwarsa). StorageUsedBytes SELALU
+// 0 untuk sekarang -- task_attachments (S4G-06) tidak py jalur JOIN ke
+// workspace_id sama sekali (task_id belum py FK ke tabel tasks yang belum
+// ada), lihat implementation_gaps.md IG-19.
 type WorkspaceListRow struct {
 	Workspace
 	OrgName              string
-	AdminName            *string
-	AdminEmail           *string
-	PendingAdminEmail    *string
+	AdminCount           int
+	PendingAdminCount    int
 	StorageUsedBytes     int64
 	OrgStorageQuotaBytes int64
 }
@@ -349,25 +348,20 @@ type WorkspaceListRow struct {
 // otorisasi (Platform Admin semua grup, Group Admin cuma grup yang dia
 // kelola) ditegakkan CALLER (WorkspaceService.ListWorkspacesByGroup), sama
 // pola OrganizationService.ListOrganizations -- RLS `workspaces_select`
-// tetap jalan sebagai lapis terakhir. LEFT JOIN user_invitations
-// (implementation_gaps.md IG-40) -- undangan admin_workspace yang masih
-// pending (belum diterima/dibatalkan/kedaluwarsa) untuk workspace yang
-// belum punya admin_workspace di workspace_members sama sekali.
+// tetap jalan sebagai lapis terakhir. Subquery COUNT (bukan LEFT JOIN
+// workspace_members langsung) -- versi lama sengaja diganti karena LEFT
+// JOIN tanpa LIMIT 1 akan mengalikan baris workspace begitu ada lebih dari
+// satu admin_workspace per workspace (kasus nyata sejak fitur daftar admin
+// multi-baris, lihat komentar WorkspaceListRow).
 func (r *WorkspaceRepository) ListByGroup(ctx context.Context, exec db.Executor, groupID string) ([]WorkspaceListRow, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT w.id, w.org_id, w.name, w.archived_at, w.deactivated_at, w.created_at,
-		       o.name, u.display_name, u.email, o.storage_quota_bytes, ui.email
+		       o.name, o.storage_quota_bytes,
+		       (SELECT COUNT(*) FROM workspace_members wm WHERE wm.workspace_id = w.id AND wm.role = 'admin_workspace'),
+		       (SELECT COUNT(*) FROM user_invitations ui WHERE ui.workspace_id = w.id AND ui.role = 'admin_workspace'
+		          AND ui.accepted_at IS NULL AND ui.cancelled_at IS NULL AND ui.expires_at > NOW())
 		FROM workspaces w
 		JOIN organizations o ON o.id = w.org_id
-		LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.role = 'admin_workspace'
-		LEFT JOIN users u ON u.id = wm.user_id
-		LEFT JOIN LATERAL (
-			SELECT email FROM user_invitations
-			WHERE workspace_id = w.id AND role = 'admin_workspace'
-			  AND accepted_at IS NULL AND cancelled_at IS NULL AND expires_at > NOW()
-			ORDER BY created_at DESC
-			LIMIT 1
-		) ui ON true
 		WHERE o.group_id = $1
 		ORDER BY w.name
 	`, groupID)
@@ -380,7 +374,7 @@ func (r *WorkspaceRepository) ListByGroup(ctx context.Context, exec db.Executor,
 	for rows.Next() {
 		var row WorkspaceListRow
 		if err := rows.Scan(&row.ID, &row.OrgID, &row.Name, &row.ArchivedAt, &row.DeactivatedAt, &row.CreatedAt,
-			&row.OrgName, &row.AdminName, &row.AdminEmail, &row.OrgStorageQuotaBytes, &row.PendingAdminEmail); err != nil {
+			&row.OrgName, &row.OrgStorageQuotaBytes, &row.AdminCount, &row.PendingAdminCount); err != nil {
 			return nil, fmt.Errorf("repository.ListByGroup: scan: %w", err)
 		}
 		list = append(list, row)
