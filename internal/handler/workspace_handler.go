@@ -572,6 +572,7 @@ func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 			"user_id":      m.UserID,
 			"email":        m.Email,
 			"display_name": m.DisplayName,
+			"title":        m.Title,
 			"role":         m.Role,
 			"joined_at":    m.JoinedAt,
 		}

@@ -281,6 +281,7 @@ type PendingInvitation struct {
 	ID        string
 	Email     string
 	Role      string
+	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
@@ -291,7 +292,7 @@ type PendingInvitation struct {
 // task backend terpisah -- lihat implementation_gaps.md IG-09.
 func (r *InvitationRepository) ListPending(ctx context.Context, exec db.Executor, workspaceID string) ([]PendingInvitation, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, email, role, expires_at
+		SELECT id, email, role, created_at, expires_at
 		FROM user_invitations
 		WHERE workspace_id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL
 		ORDER BY created_at DESC
@@ -304,7 +305,7 @@ func (r *InvitationRepository) ListPending(ctx context.Context, exec db.Executor
 	var invitations []PendingInvitation
 	for rows.Next() {
 		var inv PendingInvitation
-		if err := rows.Scan(&inv.ID, &inv.Email, &inv.Role, &inv.ExpiresAt); err != nil {
+		if err := rows.Scan(&inv.ID, &inv.Email, &inv.Role, &inv.CreatedAt, &inv.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("repository.ListPending: scan: %w", err)
 		}
 		invitations = append(invitations, inv)
