@@ -67,11 +67,27 @@ func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, 
 	return fmt.Sprintf("inv-%d", r.nextID), nil
 }
 
+func (r *stubInvitationRepo) CreateExecutiveInvitation(_ context.Context, _ db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error) {
+	if r.createErr != nil {
+		return "", r.createErr
+	}
+	if r.failCreateFor != "" && email == r.failCreateFor {
+		return "", domain.ErrInvitationAlreadyPending
+	}
+	r.nextID++
+	r.created = append(r.created, recordedInvitation{email, groupID, "", invitedByUserID, tokenHash, expiresAt})
+	return fmt.Sprintf("inv-%d", r.nextID), nil
+}
+
 func (r *stubInvitationRepo) FindPendingByTokenHash(_ context.Context, _ db.Executor, _ string) (*repository.InvitationTarget, error) {
 	return r.findPendingResult, r.findPendingErr
 }
 
 func (r *stubInvitationRepo) AcceptInvitation(_ context.Context, _ db.Executor, _, _, _, _, _, _ string) (string, error) {
+	return r.acceptedUserID, r.acceptErr
+}
+
+func (r *stubInvitationRepo) AcceptExecutiveInvitation(_ context.Context, _ db.Executor, _, _, _, _, _ string) (string, error) {
 	return r.acceptedUserID, r.acceptErr
 }
 
@@ -106,6 +122,14 @@ func (e *stubInvitationEmailer) SendWorkspaceInvitationEmail(_ context.Context, 
 		return e.sendErr
 	}
 	e.sent = append(e.sent, sentInvitationEmail{to, workspaceName, inviterName, role, acceptLink, expiresAt})
+	return nil
+}
+
+func (e *stubInvitationEmailer) SendExecutiveInvitationEmail(_ context.Context, to, groupName, inviterName, acceptLink string, expiresAt time.Time) error {
+	if e.sendErr != nil {
+		return e.sendErr
+	}
+	e.sent = append(e.sent, sentInvitationEmail{to, groupName, inviterName, "", acceptLink, expiresAt})
 	return nil
 }
 

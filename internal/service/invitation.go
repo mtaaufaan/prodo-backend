@@ -29,8 +29,10 @@ const invitationTTL = 72 * time.Hour
 // publik (lihat komentar AcceptInvitation).
 type invitationRepository interface {
 	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
+	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*repository.InvitationTarget, error)
 	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, keycloakUserID, workspaceID, role string) (string, error)
+	AcceptExecutiveInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, keycloakUserID, groupID string) (string, error)
 	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error
 	Resend(ctx context.Context, exec db.Executor, workspaceID, invitationID, newTokenHash string, newExpiresAt time.Time) (*repository.ResendTarget, error)
 	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
@@ -41,6 +43,7 @@ type invitationRepository interface {
 // diimplementasikan *EmailService.
 type invitationEmailSender interface {
 	SendWorkspaceInvitationEmail(ctx context.Context, to, workspaceName, inviterName, role, acceptLink string, expiresAt time.Time) error
+	SendExecutiveInvitationEmail(ctx context.Context, to, groupName, inviterName, acceptLink string, expiresAt time.Time) error
 }
 
 // existingUserFinder -- interface didefinisikan di consumer,
@@ -115,6 +118,34 @@ func (s *InvitationService) CreateInvitation(
 	}
 
 	return &Invitation{ID: id, Email: email, WorkspaceID: workspaceID, Role: role, ExpiresAt: expiresAt}, nil
+}
+
+// CreateExecutiveInvitation membuat undangan Eksekutif MURNI -- email baru
+// yang belum punya akun sama sekali, diundang langsung sebagai Eksekutif
+// grup tanpa workspace. groupName dipakai untuk isi email (disuplai
+// caller, sama pola CreateInvitation).
+func (s *InvitationService) CreateExecutiveInvitation(
+	ctx context.Context,
+	exec db.Executor,
+	email, groupID, invitedByUserID, groupName, inviterName string,
+) (*Invitation, error) {
+	rawToken, tokenHash, err := generateActivationToken()
+	if err != nil {
+		return nil, fmt.Errorf("service.CreateExecutiveInvitation: %w", err)
+	}
+	expiresAt := time.Now().Add(invitationTTL)
+
+	id, err := s.repo.CreateExecutiveInvitation(ctx, exec, email, groupID, invitedByUserID, tokenHash, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("service.CreateExecutiveInvitation: %w", err)
+	}
+
+	acceptLink := fmt.Sprintf("%s/invitations/accept?token=%s", s.appBaseURL, rawToken)
+	if err := s.emailer.SendExecutiveInvitationEmail(ctx, email, groupName, inviterName, acceptLink, expiresAt); err != nil {
+		return nil, fmt.Errorf("service.CreateExecutiveInvitation: %w", err)
+	}
+
+	return &Invitation{ID: id, Email: email, ExpiresAt: expiresAt}, nil
 }
 
 // BulkInvitationResult -- hasil CreateBulkInvitations. Created: undangan
@@ -288,6 +319,19 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 	}
 	if err := s.keycloak.EnableUser(ctx, kcUserID); err != nil {
 		return nil, fmt.Errorf("service.AcceptInvitation: %w", err)
+	}
+
+	if target.IsExecutiveInvite {
+		userID, err := s.repo.AcceptExecutiveInvitation(ctx, exec, target.ID, target.Email, displayName, kcUserID, target.GroupID)
+		if err != nil {
+			s.logger.Error("user Keycloak berhasil dibuat tapi gagal simpan PRODO (undangan eksekutif) -- kemungkinan orphan, perlu cleanup manual",
+				zap.String("email", target.Email),
+				zap.String("keycloak_user_id", kcUserID),
+				zap.Error(err),
+			)
+			return nil, fmt.Errorf("service.AcceptInvitation: %w", err)
+		}
+		return &AcceptedInvitation{UserID: userID, Email: target.Email}, nil
 	}
 
 	userID, err := s.repo.AcceptInvitation(ctx, exec, target.ID, target.Email, displayName, kcUserID, target.WorkspaceID, target.Role)

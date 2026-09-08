@@ -28,6 +28,17 @@ type Account struct {
 	OrgName     string
 }
 
+// GetName -- dipakai isi email undangan Eksekutif (Members & Roles, Track
+// S4G) supaya subjek email pakai nama grup, bukan UUID. groups TIDAK
+// ber-RLS (tabel level-platform), query polos aman lewat exec mana pun.
+func (r *GroupRepository) GetName(ctx context.Context, exec db.Executor, groupID string) (string, error) {
+	var name string
+	if err := exec.QueryRow(ctx, `SELECT name FROM groups WHERE id = $1`, groupID).Scan(&name); err != nil {
+		return "", fmt.Errorf("repository.GetName: %w", err)
+	}
+	return name, nil
+}
+
 // IsProjectManagerInGroup mengecek apakah actor (dari session RLS, exec)
 // punya role project_manager di SALAH SATU workspace dalam grup groupID.
 func (r *GroupRepository) IsProjectManagerInGroup(ctx context.Context, exec db.Executor, groupID string) (bool, error) {
