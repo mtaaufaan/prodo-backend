@@ -37,18 +37,18 @@ type Webhook struct {
 }
 
 type WebhookDelivery struct {
-	ID             string
-	WebhookID      string
-	WebhookName    string
-	EventType      string
-	Payload        json.RawMessage
-	AttemptNumber  int
-	Status         string
-	HTTPStatus     *int
-	ResponseBody   *string
-	ErrorMessage   *string
-	DurationMs     *int
-	CreatedAt      time.Time
+	ID            string
+	WebhookID     string
+	WebhookName   string
+	EventType     string
+	Payload       json.RawMessage
+	AttemptNumber int
+	Status        string
+	HTTPStatus    *int
+	ResponseBody  *string
+	ErrorMessage  *string
+	DurationMs    *int
+	CreatedAt     time.Time
 }
 
 type WebhookRepository struct {
