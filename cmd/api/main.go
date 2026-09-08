@@ -141,6 +141,7 @@ func run() error {
 	groupRepo := repository.NewGroupRepository()
 	projectMemberRepo := repository.NewProjectMemberRepository()
 	projectRepo := repository.NewProjectRepository()
+	retentionRepo := repository.NewRetentionRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -165,6 +166,7 @@ func run() error {
 	contextSvc := service.NewContextService(workspaceMemberRepo, rdb)
 	groupMemberRepo := repository.NewGroupMemberRepository()
 	groupMemberSvc := service.NewGroupMemberService(groupMemberRepo, groupMemberRepo, invitationRepo, organizationSvc, invitationSvc)
+	retentionSvc := service.NewRetentionService(retentionRepo, organizationRepo, retentionRepo, emailSvc, cfg.AppBaseURL)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -193,6 +195,7 @@ func run() error {
 	groupHandler := handler.NewGroupHandler(groupSvc, logger)
 	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
 	projectHandler := handler.NewProjectHandler(projectSvc, logger)
+	retentionHandler := handler.NewRetentionHandler(retentionSvc, pool, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -315,6 +318,9 @@ func run() error {
 	// terpisah -- lihat implementation_gaps.md IG-09.
 	v1.Get("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.ListPendingInvitations)
 	v1.Post("/auth/invitations/accept", invitationHandler.AcceptInvitation)
+	// Data Retention: tautan unduhan ekspor dari email, TANPA jwtAuth/dbCtx
+	// sama pola AcceptInvitation -- otorisasi lewat kepemilikan token.
+	v1.Get("/retention-exports/:token", retentionHandler.DownloadExport)
 	v1.Delete("/workspaces/:wsId/invitations/:invId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CancelInvitation)
 	v1.Post("/workspaces/:wsId/invitations/:invId/resend", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.ResendInvitation)
 
@@ -376,6 +382,22 @@ func run() error {
 			},
 		}),
 		organizationHandler.BulkUpdateStorageAllocation)
+	// Data Retention: modal "Atur Kebijakan" (desain "GA Data Retention.dc.html")
+	// -- rate-limit 3x/menit sama pola storage-allocation di atas (AC eksplisit).
+	v1.Put("/groups/:groupId/retention-policy", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Max:        3,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Terlalu banyak perubahan kebijakan retensi dalam waktu singkat (maks 3 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		organizationHandler.BulkUpdateRetentionPolicy)
+	v1.Get("/groups/:groupId/retention-schedule", jwtAuth, dbCtx, requireOrgAdmin, retentionHandler.GetSchedule)
+	v1.Post("/groups/:groupId/retention-exports", jwtAuth, dbCtx, requireOrgAdmin, retentionHandler.RequestExport)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)
@@ -396,6 +418,9 @@ func run() error {
 	// RLS workspaces_delete yang tidak punya cabang workspace_member).
 	v1.Get("/organizations/:orgId/workspaces", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.List)
 	v1.Delete("/workspaces/:wsId", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.Delete)
+	// Data Retention (2026-09-08): Delete di atas sekarang soft-delete --
+	// Restore membatalkannya, dipakai dari tab Jadwal Penghapusan.
+	v1.Post("/workspaces/:wsId/restore", jwtAuth, dbCtx, requireOrgAdmin, workspaceHandler.Restore)
 	// S4G-04, Track S4G, desain "GA Workspaces.dc.html": pindah org + ganti
 	// Admin Workspace. Gate PA/GA saja (bukan admin_workspace), sama pola
 	// Delete -- lihat komentar WorkspaceService.MoveWorkspace/ReassignAdmin.

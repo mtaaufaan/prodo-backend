@@ -25,6 +25,7 @@ type fakeWorkspaceRepo struct {
 	deactivateErr  error
 	reactivateErr  error
 	deleteErr      error
+	restoreErr     error
 	moveErr        error
 	listResult     []repository.Workspace
 	listErr        error
@@ -79,8 +80,12 @@ func (f *fakeWorkspaceRepo) Reactivate(_ context.Context, _ db.Executor, _, _, _
 	return f.reactivateErr
 }
 
-func (f *fakeWorkspaceRepo) Delete(_ context.Context, _ db.Executor, _, _, _ string) error {
+func (f *fakeWorkspaceRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _ string) error {
 	return f.deleteErr
+}
+
+func (f *fakeWorkspaceRepo) Restore(_ context.Context, _ db.Executor, _, _, _ string) error {
+	return f.restoreErr
 }
 
 func (f *fakeWorkspaceRepo) List(_ context.Context, _ db.Executor, _ string) ([]repository.Workspace, error) {

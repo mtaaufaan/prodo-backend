@@ -253,6 +253,14 @@ func (r *OrganizationRepository) groupStorageCeilingGB(ctx context.Context, exec
 // yang tidak bisa dilewati tier mana pun, jaga-jaga kalau data tier
 // dikonfigurasi di luar rentang itu. Dipisah dari UpdateStorageQuota
 // (pola sama groupStorageCeilingGB) supaya bisa direuse Create.
+// GroupRetentionRange -- wrapper exported dari groupRetentionRange, dipakai
+// OrganizationService.BulkUpdateRetentionPolicy (Data Retention, modal
+// "Atur Kebijakan") untuk validasi SEKALI di depan sebelum menulis banyak
+// organisasi sekaligus (rentang sama untuk seluruh grup, bukan per-org).
+func (r *OrganizationRepository) GroupRetentionRange(ctx context.Context, exec db.Executor, groupID string) (minDays, maxDays int, tierName string, err error) {
+	return r.groupRetentionRange(ctx, exec, groupID)
+}
+
 func (r *OrganizationRepository) groupRetentionRange(ctx context.Context, exec db.Executor, groupID string) (minDays, maxDays int, tierName string, err error) {
 	if err := exec.QueryRow(ctx, `
 		SELECT GREATEST(30, COALESCE(st.min_retention_days, 30)),

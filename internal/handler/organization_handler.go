@@ -324,6 +324,42 @@ func (h *OrganizationHandler) BulkUpdateStorageAllocation(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"group_id": groupID, "allocations": req.Allocations}))
 }
 
+type bulkRetentionPolicyRequest struct {
+	Retentions map[string]int `json:"retentions"`
+}
+
+// BulkUpdateRetentionPolicy menangani PUT /groups/:groupId/retention-policy
+// (Data Retention, desain "GA Data Retention.dc.html" modal "Atur
+// Kebijakan") -- reuse pola BulkUpdateStorageAllocation persis (rate-limit
+// 3x/menit di route, lihat cmd/api/main.go).
+func (h *OrganizationHandler) BulkUpdateRetentionPolicy(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.BulkUpdateRetentionPolicy dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.BulkUpdateRetentionPolicy dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	groupID := c.Params("groupId")
+
+	var req bulkRetentionPolicyRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if len(req.Retentions) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "retentions wajib diisi minimal satu organisasi", nil))
+	}
+
+	if err := h.orgs.BulkUpdateRetentionPolicy(c.Context(), exec, groupID, req.Retentions, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menyimpan kebijakan retensi")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"group_id": groupID, "retentions": req.Retentions}))
+}
+
 // Delete menangani DELETE /organizations/:id (S3-05).
 func (h *OrganizationHandler) Delete(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
