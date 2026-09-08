@@ -16,5 +16,7 @@ func NewMux(pool *pgxpool.Pool, emailer *service.EmailService, logger *zap.Logge
 	mux := asynq.NewServeMux()
 	quotaHandler := NewStorageQuotaCheckHandler(pool, emailer, logger)
 	mux.HandleFunc(TypeStorageQuotaCheck, quotaHandler.Handle)
+	retentionHandler := NewRetentionNotifyHandler(pool, emailer, logger)
+	mux.HandleFunc(TypeRetentionNotify, retentionHandler.Handle)
 	return mux
 }

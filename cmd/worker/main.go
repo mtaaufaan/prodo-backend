@@ -63,6 +63,11 @@ func run() error {
 	if _, err := scheduler.Register("@every 1h", asynq.NewTask(worker.TypeStorageQuotaCheck, nil)); err != nil {
 		return fmt.Errorf("daftar jadwal StorageQuotaCheck: %w", err)
 	}
+	// RetentionNotifyJob (Data Retention, Track S4G) -- harian, cukup untuk
+	// notifikasi H-60/H-80 (granularitas hari, bukan jam).
+	if _, err := scheduler.Register("@every 24h", asynq.NewTask(worker.TypeRetentionNotify, nil)); err != nil {
+		return fmt.Errorf("daftar jadwal RetentionNotify: %w", err)
+	}
 	if err := scheduler.Start(); err != nil {
 		return fmt.Errorf("start scheduler: %w", err)
 	}

@@ -128,6 +128,33 @@ func (e *EmailService) SendStorageQuotaWarningEmail(_ context.Context, to, displ
 	return nil
 }
 
+// SendRetentionExportEmail mengirim tautan unduhan arsip ekspor sebelum
+// penghapusan (Data Retention, desain "GA Data Retention.dc.html" modal
+// "Ekspor Data Sebelum Penghapusan") -- berlaku RetentionExportTTL (72 jam).
+func (e *EmailService) SendRetentionExportEmail(_ context.Context, to, displayName, itemName, downloadLink string, expiresAt time.Time) error {
+	msg := buildRetentionExportEmailMessage(e.from, to, displayName, itemName, downloadLink, expiresAt)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendRetentionExportEmail: %w", err)
+	}
+	return nil
+}
+
+// SendRetentionWarningEmail memberitahu Group Admin saat organisasi
+// mencapai ambang H-60/H-80 sejak dinonaktifkan (Data Retention, job
+// RetentionNotifyJob) -- sekali per ambang, sama dedup pola
+// StorageQuotaCheckJob.
+func (e *EmailService) SendRetentionWarningEmail(_ context.Context, to, displayName, orgName string, daysSince, daysUntilPurge int) error {
+	msg := buildRetentionWarningEmailMessage(e.from, to, displayName, orgName, daysSince, daysUntilPurge)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendRetentionWarningEmail: %w", err)
+	}
+	return nil
+}
+
 // buildStorageQuotaWarningEmailMessage -- dipisah dari
 // SendStorageQuotaWarningEmail supaya bisa di-unit-test tanpa koneksi SMTP
 // nyata (pola sama dengan buildActivationEmailMessage).
@@ -272,6 +299,48 @@ func buildActivationEmailMessage(from, to, displayName, activationLink string, e
 			"satu kali. Jika Anda tidak merasa meminta ini, abaikan email ini.\r\n\r\n"+
 			"-- Tim PRODO\r\n",
 		displayName, activationLink, expiresAt.Format("2 January 2006 15:04 MST"),
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
+// buildRetentionExportEmailMessage -- dipisah dari SendRetentionExportEmail
+// supaya bisa di-unit-test tanpa koneksi SMTP nyata.
+func buildRetentionExportEmailMessage(from, to, displayName, itemName, downloadLink string, expiresAt time.Time) []byte {
+	subject := fmt.Sprintf("Arsip Ekspor Siap Diunduh - %s - PRODO", itemName)
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Arsip ekspor data untuk \"%s\" sudah siap. Klik link berikut untuk\r\n"+
+			"melihat dan mengunduh manifest-nya:\r\n\r\n"+
+			"%s\r\n\r\n"+
+			"Link ini berlaku sampai %s (72 jam sejak dibuat). Ekspor tidak\r\n"+
+			"membatalkan jadwal penghapusan -- gunakan Pulihkan di menu Data\r\n"+
+			"Retention bila data masih dibutuhkan aktif.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, itemName, downloadLink, expiresAt.Format("2 January 2006 15:04 MST"),
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
+// buildRetentionWarningEmailMessage -- dipisah dari SendRetentionWarningEmail
+// supaya bisa di-unit-test tanpa koneksi SMTP nyata.
+func buildRetentionWarningEmailMessage(from, to, displayName, orgName string, daysSince, daysUntilPurge int) []byte {
+	subject := fmt.Sprintf("Peringatan Retensi Data - %s - PRODO", orgName)
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Organisasi %s sudah %d hari dinonaktifkan. Data operasionalnya\r\n"+
+			"dijadwalkan dihapus permanen dalam %d hari lagi.\r\n\r\n"+
+			"Aktifkan kembali organisasi ini di menu Organisasi, atau ekspor\r\n"+
+			"datanya dari menu Data Retention sebelum jadwal penghapusan tiba.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, orgName, daysSince, daysUntilPurge,
 	)
 
 	return []byte(fmt.Sprintf(

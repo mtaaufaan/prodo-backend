@@ -29,6 +29,7 @@ type organizationRepository interface {
 	GetSummary(ctx context.Context, exec db.Executor, orgID string) (*repository.Summary, error)
 	List(ctx context.Context, exec db.Executor, groupID string) ([]repository.Organization, int64, error)
 	IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error)
+	GroupRetentionRange(ctx context.Context, exec db.Executor, groupID string) (minDays, maxDays int, tierName string, err error)
 }
 
 // OrganizationService -- S3-02/03/04/05/06, US-007. Otorisasi Platform Admin
@@ -308,6 +309,71 @@ func (s *OrganizationService) BulkUpdateStorageAllocation(ctx context.Context, e
 		org := byID[c.orgID]
 		if err := s.repo.UpdateStorageQuota(ctx, exec, c.orgID, c.newBytes, org.RetentionDays, actorID, actorRole); err != nil {
 			return fmt.Errorf("service.BulkUpdateStorageAllocation: org %s: %w", c.orgID, err)
+		}
+	}
+	return nil
+}
+
+// BulkUpdateRetentionPolicy menyetel retention_days SEKALIGUS untuk banyak
+// organisasi dalam satu grup (Data Retention, desain "GA Data
+// Retention.dc.html" modal "Atur Kebijakan"). Beda dari
+// BulkUpdateStorageAllocation: rentang retensi (tier grup) SAMA untuk
+// seluruh organisasi dalam satu grup (bukan per-org, tidak ada dependensi
+// SUM seperti kuota) -- diambil SEKALI lewat GroupRetentionRange, divalidasi
+// penuh SEBELUM ada satu pun ditulis. Penulisan sungguhan reuse PENUH
+// repo.UpdateStorageQuota (kuota storage org itu TIDAK diubah, cuma
+// retensi) -- validasi kuota di dalamnya otomatis lolos karena quotaBytes
+// yang dikirim persis nilai lama org itu sendiri.
+func (s *OrganizationService) BulkUpdateRetentionPolicy(ctx context.Context, exec db.Executor, groupID string, retentions map[string]int, actorID, actorRole string) error {
+	if groupID == "" || len(retentions) == 0 {
+		return fmt.Errorf("service.BulkUpdateRetentionPolicy: %w", domain.ErrInvalidInput)
+	}
+	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	orgs, _, err := s.repo.List(ctx, exec, groupID)
+	if err != nil {
+		return fmt.Errorf("service.BulkUpdateRetentionPolicy: %w", err)
+	}
+	byID := make(map[string]*repository.Organization, len(orgs))
+	for i := range orgs {
+		byID[orgs[i].ID] = &orgs[i]
+	}
+
+	minDays, maxDays, _, err := s.repo.GroupRetentionRange(ctx, exec, groupID)
+	if err != nil {
+		return fmt.Errorf("service.BulkUpdateRetentionPolicy: %w", err)
+	}
+
+	validationErrors := map[string]string{}
+	type change struct {
+		orgID string
+		days  int
+	}
+	var changes []change
+	for orgID, days := range retentions {
+		org, ok := byID[orgID]
+		if !ok {
+			validationErrors[orgID] = "organisasi tidak ditemukan dalam grup ini"
+			continue
+		}
+		if days < minDays || days > maxDays {
+			validationErrors[orgID] = fmt.Sprintf("harus antara %d dan %d hari", minDays, maxDays)
+			continue
+		}
+		if days != org.RetentionDays {
+			changes = append(changes, change{orgID: orgID, days: days})
+		}
+	}
+	if len(validationErrors) > 0 {
+		return fmt.Errorf("service.BulkUpdateRetentionPolicy: %w", &domain.BulkAllocationError{Errors: validationErrors})
+	}
+
+	for _, c := range changes {
+		org := byID[c.orgID]
+		if err := s.repo.UpdateStorageQuota(ctx, exec, c.orgID, org.StorageQuotaBytes, c.days, actorID, actorRole); err != nil {
+			return fmt.Errorf("service.BulkUpdateRetentionPolicy: org %s: %w", c.orgID, err)
 		}
 	}
 	return nil

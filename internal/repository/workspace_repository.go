@@ -37,6 +37,7 @@ type Workspace struct {
 	ArchivedAt    *time.Time
 	DeactivatedAt *time.Time
 	CreatedAt     time.Time
+	DeletedAt     *time.Time
 }
 
 // Create menyimpan workspace baru + audit trail (S3-09). Assignment Admin
@@ -84,7 +85,7 @@ func (r *WorkspaceRepository) GetOrgID(ctx context.Context, exec db.Executor, wo
 func (r *WorkspaceRepository) Update(ctx context.Context, exec db.Executor, workspaceID, name, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE workspaces SET name = $2, updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 	`, workspaceID, name)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
@@ -128,12 +129,12 @@ func (r *WorkspaceRepository) setArchived(ctx context.Context, exec db.Executor,
 		action = "workspace.archived"
 		tag, err = exec.Exec(ctx, `
 			UPDATE workspaces SET archived_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND archived_at IS NULL
+			WHERE id = $1 AND deleted_at IS NULL AND archived_at IS NULL
 		`, workspaceID)
 	} else {
 		tag, err = exec.Exec(ctx, `
 			UPDATE workspaces SET archived_at = NULL, updated_at = NOW()
-			WHERE id = $1 AND archived_at IS NOT NULL
+			WHERE id = $1 AND deleted_at IS NULL AND archived_at IS NOT NULL
 		`, workspaceID)
 	}
 	if err != nil {
@@ -180,12 +181,12 @@ func (r *WorkspaceRepository) setDeactivated(ctx context.Context, exec db.Execut
 		action = "workspace.deactivated"
 		tag, err = exec.Exec(ctx, `
 			UPDATE workspaces SET deactivated_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND deactivated_at IS NULL
+			WHERE id = $1 AND deleted_at IS NULL AND deactivated_at IS NULL
 		`, workspaceID)
 	} else {
 		tag, err = exec.Exec(ctx, `
 			UPDATE workspaces SET deactivated_at = NULL, updated_at = NOW()
-			WHERE id = $1 AND deactivated_at IS NOT NULL
+			WHERE id = $1 AND deleted_at IS NULL AND deactivated_at IS NOT NULL
 		`, workspaceID)
 	}
 	if err != nil {
@@ -217,7 +218,7 @@ func (r *WorkspaceRepository) setDeactivated(ctx context.Context, exec db.Execut
 func (r *WorkspaceRepository) MoveToOrg(ctx context.Context, exec db.Executor, workspaceID, targetOrgID, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE workspaces SET org_id = $2, updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 	`, workspaceID, targetOrgID)
 	if err != nil {
 		return fmt.Errorf("repository.MoveToOrg: %w", err)
@@ -232,42 +233,78 @@ func (r *WorkspaceRepository) MoveToOrg(ctx context.Context, exec db.Executor, w
 	return nil
 }
 
-// Delete menghapus workspace permanen (S3-12). ⚠️ Wording task asli
-// ("soft-delete", "row tetap ada di DB dengan deleted_at") TIDAK COCOK
-// skema: §5.9 tidak punya kolom deleted_at (cuma archived_at, sudah
-// dipakai Deactivate di atas untuk arti berbeda) -- direalisasikan sebagai
-// hard DELETE, sama pola OrganizationRepository.Delete. Guard "semua
-// project dihapus" AWALNYA di-DEFERRED (tabel projects belum ada,
-// implementation_gaps.md IG-17) -- ditambahkan di sini begitu tabel
-// projects ada (forward-pull S3 H9), sesuai rekomendasi IG-17 sendiri:
-// "WAJIB ditutup bersamaan dengan migrasi projects, jangan dibiarkan
-// tanpa guard setelah fitur project benar-benar ada."
-func (r *WorkspaceRepository) Delete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+// SoftDelete menandai workspace dihapus (Data Retention, dikonfirmasi user
+// 2026-09-08 -- GANTIKAN hard DELETE lama). Desain "GA Data Retention.dc.html"
+// mengasumsikan workspace yang dihapus ikut masuk Jadwal Penghapusan dan
+// bisa dipulihkan, sama seperti project (ProjectRepository.SoftDelete) --
+// sebelumnya workspace SATU-SATUNYA entitas tanpa jejak retensi sama
+// sekali (hard DELETE permanen, tanpa deleted_at). purge_scheduled_at
+// dihitung dari organizations.retention_days pemilik workspace ini
+// langsung (beda dari project yang harus JOIN lewat workspace, di sini
+// org_id sudah ada di baris yang sama) -- job purge otomatis belum
+// dibangun, sama status projects.purge_scheduled_at.
+//
+// Guard "semua project dihapus" (IG-17, ditambahkan begitu tabel projects
+// ada) DIPERTAHANKAN apa adanya -- konversi hard->soft delete TIDAK
+// mengubah aturan bisnis ini, cuma cara penghapusannya.
+func (r *WorkspaceRepository) SoftDelete(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
 	orgID, err := r.GetOrgID(ctx, exec, workspaceID)
 	if err != nil {
-		return fmt.Errorf("repository.Delete: %w", err)
+		return fmt.Errorf("repository.SoftDelete: %w", err)
 	}
 
 	var hasActiveProjects bool
 	if err := exec.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM projects WHERE workspace_id = $1 AND is_archived = FALSE)
+		SELECT EXISTS(SELECT 1 FROM projects WHERE workspace_id = $1 AND is_archived = FALSE AND deleted_at IS NULL)
 	`, workspaceID).Scan(&hasActiveProjects); err != nil {
-		return fmt.Errorf("repository.Delete: cek project aktif: %w", err)
+		return fmt.Errorf("repository.SoftDelete: cek project aktif: %w", err)
 	}
 	if hasActiveProjects {
-		return fmt.Errorf("repository.Delete: %w", domain.ErrWorkspaceHasProjects)
+		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrWorkspaceHasProjects)
+	}
+
+	tag, err := exec.Exec(ctx, `
+		UPDATE workspaces w
+		SET deleted_at = NOW(),
+		    purge_scheduled_at = NOW() + (
+		      SELECT (o.retention_days || ' days')::interval FROM organizations o WHERE o.id = w.org_id
+		    ),
+		    updated_at = NOW()
+		WHERE w.id = $1 AND w.deleted_at IS NULL
+	`, workspaceID)
+	if err != nil {
+		return fmt.Errorf("repository.SoftDelete: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrWorkspaceNotFound)
 	}
 
 	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.deleted", workspaceID, orgID); err != nil {
-		return fmt.Errorf("repository.Delete: audit: %w", err)
+		return fmt.Errorf("repository.SoftDelete: audit: %w", err)
 	}
+	return nil
+}
 
-	tag, err := exec.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, workspaceID)
+// Restore membatalkan soft-delete (mirror ProjectRepository.Restore) --
+// otorisasi digerbangi di service, bukan di sini.
+func (r *WorkspaceRepository) Restore(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE workspaces SET deleted_at = NULL, purge_scheduled_at = NULL, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NOT NULL
+	`, workspaceID)
 	if err != nil {
-		return fmt.Errorf("repository.Delete: %w", err)
+		return fmt.Errorf("repository.Restore: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.Delete: %w", domain.ErrWorkspaceNotFound)
+		return fmt.Errorf("repository.Restore: %w", domain.ErrWorkspaceNotDeleted)
+	}
+
+	orgID, err := r.GetOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("repository.Restore: %w", err)
+	}
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.restored", workspaceID, orgID); err != nil {
+		return fmt.Errorf("repository.Restore: audit: %w", err)
 	}
 	return nil
 }
@@ -278,7 +315,7 @@ func (r *WorkspaceRepository) Delete(ctx context.Context, exec db.Executor, work
 func (r *WorkspaceRepository) Get(ctx context.Context, exec db.Executor, workspaceID string) (*Workspace, error) {
 	var w Workspace
 	err := exec.QueryRow(ctx, `
-		SELECT id, org_id, name, archived_at, deactivated_at, created_at FROM workspaces WHERE id = $1
+		SELECT id, org_id, name, archived_at, deactivated_at, created_at FROM workspaces WHERE id = $1 AND deleted_at IS NULL
 	`, workspaceID).Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.DeactivatedAt, &w.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -298,7 +335,7 @@ func (r *WorkspaceRepository) List(ctx context.Context, exec db.Executor, orgID 
 	rows, err := exec.Query(ctx, `
 		SELECT id, org_id, name, archived_at, deactivated_at, created_at
 		FROM workspaces
-		WHERE org_id = $1
+		WHERE org_id = $1 AND deleted_at IS NULL
 		ORDER BY name
 	`, orgID)
 	if err != nil {
@@ -362,7 +399,7 @@ func (r *WorkspaceRepository) ListByGroup(ctx context.Context, exec db.Executor,
 		          AND ui.accepted_at IS NULL AND ui.cancelled_at IS NULL AND ui.expires_at > NOW())
 		FROM workspaces w
 		JOIN organizations o ON o.id = w.org_id
-		WHERE o.group_id = $1
+		WHERE o.group_id = $1 AND w.deleted_at IS NULL
 		ORDER BY w.name
 	`, groupID)
 	if err != nil {
