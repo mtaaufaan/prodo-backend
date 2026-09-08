@@ -153,6 +153,7 @@ type Member struct {
 	UserID      string
 	Email       string
 	DisplayName string
+	Title       *string
 	Role        string
 	JoinedAt    time.Time
 }
@@ -164,7 +165,7 @@ type Member struct {
 // RolePickerModal S2-07/08).
 func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]Member, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT wm.user_id, u.email, u.display_name, wm.role, wm.joined_at
+		SELECT wm.user_id, u.email, u.display_name, u.title, wm.role, wm.joined_at
 		FROM workspace_members wm
 		JOIN users u ON u.id = wm.user_id
 		WHERE wm.workspace_id = $1
@@ -178,7 +179,7 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Role, &m.JoinedAt); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.Role, &m.JoinedAt); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		members = append(members, m)

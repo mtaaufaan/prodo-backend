@@ -194,6 +194,7 @@ func (h *InvitationHandler) ListPendingInvitations(c *fiber.Ctx) error {
 			"id":         inv.ID,
 			"email":      inv.Email,
 			"role":       inv.Role,
+			"created_at": inv.CreatedAt,
 			"expires_at": inv.ExpiresAt,
 		}
 	}

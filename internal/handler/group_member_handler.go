@@ -86,7 +86,7 @@ func (h *GroupMemberHandler) List(c *fiber.Ctx) error {
 			"suspended":       m.Suspended,
 			"is_group_admin":  m.IsGroupAdmin,
 			"is_executive":    m.IsExecutive,
-			"executive_title": m.ExecutiveTitle,
+			"title":           m.Title,
 			"workspace_roles": roles,
 		})
 	}

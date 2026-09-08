@@ -91,11 +91,11 @@ type GroupMember struct {
 	UserID         string
 	Email          string
 	DisplayName    string
+	Title          string
 	IsActive       bool
 	Suspended      bool
 	IsGroupAdmin   bool
 	IsExecutive    bool
-	ExecutiveTitle string
 	WorkspaceRoles []repository.MemberWorkspaceRole
 }
 
@@ -127,18 +127,18 @@ func (s *GroupMemberService) ListDirectory(ctx context.Context, exec db.Executor
 	result := make([]GroupMember, 0, len(members))
 	for _, m := range members {
 		title := ""
-		if m.ExecutiveTitle != nil {
-			title = *m.ExecutiveTitle
+		if m.Title != nil {
+			title = *m.Title
 		}
 		result = append(result, GroupMember{
 			UserID:         m.UserID,
 			Email:          m.Email,
 			DisplayName:    m.DisplayName,
+			Title:          title,
 			IsActive:       m.IsActive,
 			Suspended:      m.SuspendedAt != nil,
 			IsGroupAdmin:   m.IsGroupAdmin,
 			IsExecutive:    m.IsExecutive,
-			ExecutiveTitle: title,
 			WorkspaceRoles: rolesByUser[m.UserID],
 		})
 	}
