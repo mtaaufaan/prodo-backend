@@ -58,6 +58,21 @@ func (r *WorkspaceRepository) Create(ctx context.Context, exec db.Executor, orgI
 	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.created", ws.ID, orgID); err != nil {
 		return nil, fmt.Errorf("repository.Create: audit: %w", err)
 	}
+	// Task Management Core Phase 1 (forward-pull): 5 status sistem di-seed
+	// untuk SETIAP workspace baru, sama seperti backfill migrasi
+	// 20260924090000 untuk workspace yang sudah ada -- task tidak bisa
+	// dibuat sama sekali tanpa status default (custom_statuses.status_id
+	// NOT NULL).
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO custom_statuses (scope_type, scope_id, name, color_token, position, is_system)
+		VALUES ('workspace', $1, 'BACKLOG', 'grey', 0, TRUE),
+		       ('workspace', $1, 'IN PROGRESS', 'accent', 1, TRUE),
+		       ('workspace', $1, 'UNDER REVIEW', 'violet', 2, TRUE),
+		       ('workspace', $1, 'DONE', 'mint', 3, TRUE),
+		       ('workspace', $1, 'BLOCKED', 'red', 4, TRUE)
+	`, ws.ID); err != nil {
+		return nil, fmt.Errorf("repository.Create: seed status sistem: %w", err)
+	}
 	return ws, nil
 }
 
