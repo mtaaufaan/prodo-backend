@@ -188,6 +188,10 @@ func run() error {
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	invitationRepo := repository.NewInvitationRepository()
 	organizationRepo := repository.NewOrganizationRepository()
+	ssoConfigRepo, err := repository.NewSSOConfigRepository(cfg.SSOEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("setup sso config repository: %w", err)
+	}
 	groupRepo := repository.NewGroupRepository()
 	projectMemberRepo := repository.NewProjectMemberRepository()
 	projectRepo := repository.NewProjectRepository()
@@ -215,6 +219,7 @@ func run() error {
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
 	organizationSvc := service.NewOrganizationService(organizationRepo)
+	ssoConfigSvc := service.NewSSOConfigService(ssoConfigRepo, organizationSvc)
 	workspaceRepo := repository.NewWorkspaceRepository()
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, invitationSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
@@ -264,6 +269,7 @@ func run() error {
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, accountSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
+	ssoConfigHandler := handler.NewSSOConfigHandler(ssoConfigSvc, logger)
 	groupHandler := handler.NewGroupHandler(groupSvc, logger)
 	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
 	projectHandler := handler.NewProjectHandler(projectSvc, logger)
@@ -442,6 +448,10 @@ func run() error {
 	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
+	// SSO Config (US-074, Track S4G S4G-23) -- cakupan lebih kecil dari
+	// draft S12-27..33, lihat komentar migrasi 20261002090000_sso_configs.
+	v1.Get("/organizations/:id/sso-config", jwtAuth, dbCtx, requireOrgAdmin, ssoConfigHandler.Get)
+	v1.Put("/organizations/:id/sso-config", jwtAuth, dbCtx, requireOrgAdmin, ssoConfigHandler.Update)
 	// S4G-07, Track S4G: modal "Atur Alokasi Kuota" (desain
 	// "GA Storage Quota.dc.html") -- rate-limit 3x/menit PER-ROUTE (bukan
 	// limiter global 1000/menit yang sudah ada di atas), sesuai AC

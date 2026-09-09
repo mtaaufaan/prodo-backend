@@ -81,6 +81,11 @@ type Config struct {
 	// pola sama alasan MFA punya key sendiri.
 	WebhookEncryptionKey string `env:"WEBHOOK_ENCRYPTION_KEY" envDefault:""`
 
+	// SSOEncryptionKey -- passphrase pgcrypto untuk enkripsi client_secret
+	// OIDC (US-074, Track S4G S4G-23), key terpisah dari MFA/Webhook -- pola
+	// sama alasan MFA/Webhook punya key sendiri.
+	SSOEncryptionKey string `env:"SSO_ENCRYPTION_KEY" envDefault:""`
+
 	// MinIO (Object Storage)
 	MinIOEndpoint  string `env:"MINIO_ENDPOINT" envDefault:""`
 	MinIOAccessKey string `env:"MINIO_ACCESS_KEY" envDefault:""`

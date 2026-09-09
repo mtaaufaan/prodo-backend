@@ -385,6 +385,16 @@ var (
 	// ErrWorkAlreadyStarted dikembalikan POST /tasks/:id/start-work saat
 	// sesi aktif task ini sudah punya `work_started_at` terisi.
 	ErrWorkAlreadyStarted = errors.New("work already started for the active status session")
+
+	// ErrInvalidSsoProtocol dikembalikan PUT /organizations/:id/sso-config
+	// (US-074, Track S4G S4G-23) saat protocol bukan 'saml2'/'oidc'.
+	ErrInvalidSsoProtocol = errors.New("protocol must be 'saml2' or 'oidc'")
+
+	// ErrInvalidSsoMetadata dikembalikan saat metadata wajib untuk protocol
+	// terpilih kosong/tidak valid -- OIDC butuh discovery_url berformat URL
+	// https, SAML butuh idp_metadata_xml berupa XML well-formed (atau
+	// idp_metadata_url sebagai alternatif).
+	ErrInvalidSsoMetadata = errors.New("required metadata for the selected protocol is missing or invalid")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
