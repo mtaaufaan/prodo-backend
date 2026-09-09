@@ -228,6 +228,7 @@ func run() error {
 	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
 	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
 	groupLocaleSvc := service.NewGroupLocaleService(groupRepo, organizationRepo)
+	groupSummarySvc := service.NewGroupSummaryService(organizationRepo, groupAuditRepo, retentionRepo, invitationRepo, organizationRepo)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
@@ -280,6 +281,7 @@ func run() error {
 	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
 	groupPerformanceHandler := handler.NewGroupPerformanceHandler(groupPerformanceSvc, logger)
 	groupLocaleHandler := handler.NewGroupLocaleHandler(groupLocaleSvc, logger)
+	groupSummaryHandler := handler.NewGroupSummaryHandler(groupSummarySvc, logger)
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
@@ -558,6 +560,7 @@ func run() error {
 	v1.Get("/groups/:groupId/performance", jwtAuth, dbCtx, requireOrgAdmin, groupPerformanceHandler.Summary)
 	v1.Get("/groups/:groupId/locale", jwtAuth, dbCtx, requireOrgAdmin, groupLocaleHandler.Get)
 	v1.Put("/groups/:groupId/locale", jwtAuth, dbCtx, requireOrgAdmin, groupLocaleHandler.Update)
+	v1.Get("/groups/:groupId/summary", jwtAuth, dbCtx, requireOrgAdmin, groupSummaryHandler.Get)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)
