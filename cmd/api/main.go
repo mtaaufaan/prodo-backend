@@ -202,6 +202,7 @@ func run() error {
 	sprintRepo := repository.NewSprintRepository()
 	taskRepo := repository.NewTaskRepository()
 	taskPicRepo := repository.NewTaskPicRepository()
+	taskDependencyRepo := repository.NewTaskDependencyRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -221,8 +222,9 @@ func run() error {
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
-	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
+	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -268,7 +270,7 @@ func run() error {
 	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
-	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, logger)
+	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
 	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
@@ -614,6 +616,10 @@ func run() error {
 	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.List)
 	v1.Post("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.Add)
 	v1.Delete("/projects/:id/pic-groups/:statusId/:userId", jwtAuth, dbCtx, picGroupHandler.Remove)
+	v1.Put("/tasks/:id/completeness", jwtAuth, dbCtx, taskHandler.Completeness)
+	v1.Get("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.Dependencies)
+	v1.Post("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.AddDependency)
+	v1.Delete("/tasks/:id/dependencies/:predecessorId", jwtAuth, dbCtx, taskHandler.RemoveDependency)
 
 	serverErr := make(chan error, 1)
 	go func() {

@@ -15,17 +15,18 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
-// TaskHandler -- Task Management Core Phase 1/2 (US-014, US-017 PIC
-// Handoff). Dependency hard-block/story-point enforcement penuh adalah
-// Phase 3-4.
+// TaskHandler -- Task Management Core Phase 1/2/3 (US-014, US-017 PIC
+// Handoff, US-017c completeness + US-018 dependencies). Story-point/time
+// tracking enforcement penuh adalah Phase 4.
 type TaskHandler struct {
 	tasks  *service.TaskService
 	pics   *service.TaskPicService
+	deps   *service.TaskDependencyService
 	logger *zap.Logger
 }
 
-func NewTaskHandler(tasks *service.TaskService, pics *service.TaskPicService, logger *zap.Logger) *TaskHandler {
-	return &TaskHandler{tasks: tasks, pics: pics, logger: logger}
+func NewTaskHandler(tasks *service.TaskService, pics *service.TaskPicService, deps *service.TaskDependencyService, logger *zap.Logger) *TaskHandler {
+	return &TaskHandler{tasks: tasks, pics: pics, deps: deps, logger: logger}
 }
 
 type taskRequest struct {
@@ -206,6 +207,106 @@ func (h *TaskHandler) PicHistory(c *fiber.Ctx) error {
 	return c.JSON(response.Success(picPhasesJSON(list)))
 }
 
+type taskCompletenessRequest struct {
+	Completeness string `json:"completeness"`
+}
+
+// Completeness menangani PUT /tasks/:id/completeness (Phase 3, S4-44).
+func (h *TaskHandler) Completeness(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	taskID := c.Params("id")
+
+	var body taskCompletenessRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	if err := h.tasks.SetCompleteness(c.Context(), exec, taskID, body.Completeness, actorUserID); err != nil {
+		return h.mapError(c, err, "Gagal mengubah status kelengkapan task")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID, "completeness": body.Completeness}))
+}
+
+// Dependencies menangani GET /tasks/:id/dependencies (Phase 3, US-018).
+func (h *TaskHandler) Dependencies(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	predecessors, successors, err := h.deps.List(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil dependency task")
+	}
+	return c.JSON(response.Success(fiber.Map{
+		"predecessors": dependencyEndpointsJSON(predecessors, true),
+		"successors":   dependencyEndpointsJSON(successors, false),
+	}))
+}
+
+type taskDependencyRequest struct {
+	PredecessorTaskID string `json:"predecessor_task_id"`
+}
+
+// AddDependency menangani POST /tasks/:id/dependencies (Phase 3, S4-51).
+func (h *TaskHandler) AddDependency(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	taskID := c.Params("id")
+
+	var body taskDependencyRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	dep, err := h.deps.Add(c.Context(), exec, taskID, body.PredecessorTaskID, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal menambah dependency task")
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
+		"predecessor_id": dep.PredecessorID, "successor_id": dep.SuccessorID, "created_at": dep.CreatedAt,
+	}))
+}
+
+// RemoveDependency menangani DELETE /tasks/:id/dependencies/:predecessorId.
+func (h *TaskHandler) RemoveDependency(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	if err := h.deps.Remove(c.Context(), exec, c.Params("id"), c.Params("predecessorId"), actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menghapus dependency task")
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func dependencyEndpointsJSON(list []repository.TaskDependency, wantPredecessor bool) []fiber.Map {
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		d := &list[i]
+		if wantPredecessor {
+			data[i] = fiber.Map{"task_id": d.PredecessorID, "task_code": d.PredecessorCode, "title": d.PredecessorTitle, "status": d.PredecessorStatusName}
+		} else {
+			data[i] = fiber.Map{"task_id": d.SuccessorID, "task_code": d.SuccessorCode, "title": d.SuccessorTitle, "status": d.SuccessorStatusName}
+		}
+	}
+	return data
+}
+
 // Delete menangani DELETE /tasks/:id.
 func (h *TaskHandler) Delete(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -234,7 +335,7 @@ func taskJSON(t *repository.Task) fiber.Map {
 		"title": t.Title, "description": t.Description, "priority": t.Priority, "completeness": t.Completeness,
 		"due_date": t.DueDate, "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
 		"task_code": t.TaskCode, "created_by": t.CreatedBy, "created_at": t.CreatedAt, "updated_at": t.UpdatedAt,
-		"completed_at": t.CompletedAt, "assignees": assignees,
+		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "assignees": assignees,
 	}
 }
 
@@ -253,7 +354,29 @@ func picPhasesJSON(list []repository.TaskPicPhase) []fiber.Map {
 }
 
 func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
+	var blockErr *domain.PredecessorBlockingError
+	var cycleErr *domain.CircularDependencyError
 	switch {
+	case errors.As(err, &blockErr):
+		blocking := make([]fiber.Map, len(blockErr.BlockingTasks))
+		for i, t := range blockErr.BlockingTasks {
+			blocking[i] = fiber.Map{"task_code": t.TaskCode, "title": t.Title}
+		}
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("DEPENDENCY_HARD_BLOCK", "Task ini memiliki predecessor yang belum selesai.", fiber.Map{"blocking_tasks": blocking}))
+	case errors.As(err, &cycleErr):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("CIRCULAR_DEPENDENCY", "Menambahkan dependency ini akan membuat circular dependency.", fiber.Map{"cycle_path": cycleErr.CyclePath}))
+	case errors.Is(err, domain.ErrTaskIncomplete):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TASK_INCOMPLETE", "Task ini masih ditandai Belum Lengkap -- selesaikan kelengkapannya dulu sebelum mengubah status.", nil))
+	case errors.Is(err, domain.ErrCompletenessInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "completeness harus 'complete' atau 'incomplete'", nil))
+	case errors.Is(err, domain.ErrDependencySelfReference):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("DEPENDENCY_SELF_REFERENCE", "Task tidak bisa menjadi predecessor untuk dirinya sendiri.", nil))
+	case errors.Is(err, domain.ErrDependencyCrossProject):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("DEPENDENCY_CROSS_PROJECT", "Dependency hanya bisa dibuat antar task dalam project yang sama.", nil))
+	case errors.Is(err, domain.ErrDependencyAlreadyExists):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("DEPENDENCY_ALREADY_EXISTS", "Dependency ini sudah ada.", nil))
+	case errors.Is(err, domain.ErrDependencyNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Dependency tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- judul task minimal 3 karakter, priority harus critical/high/medium/low, dan story point (kalau diisi) harus salah satu dari 1/2/3/5/8/13", nil))
 	case errors.Is(err, domain.ErrTaskAssigneeRequired):

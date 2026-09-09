@@ -137,6 +137,19 @@ func (r *TaskPicRepository) ListHistoryForTask(ctx context.Context, exec db.Exec
 	return list, rows.Err()
 }
 
+// IsActivePic -- dipakai guard PUT /tasks/:id/completeness (Phase 3,
+// S4-44: "hanya pembuat task dan PIC aktif").
+func (r *TaskPicRepository) IsActivePic(ctx context.Context, exec db.Executor, taskID, userID string) (bool, error) {
+	var exists bool
+	err := exec.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM task_pic_phases WHERE task_id = $1 AND user_id = $2 AND is_active = TRUE)
+	`, taskID, userID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repository.IsActivePic: %w", err)
+	}
+	return exists, nil
+}
+
 // Acknowledge -- S4-33, PIC aktif konfirmasi menerima serah terima.
 // tag.RowsAffected()==0 berarti actor bukan PIC aktif task ini (atau sudah
 // acknowledge sebelumnya) -- pemanggil (service) menerjemahkan ke error.

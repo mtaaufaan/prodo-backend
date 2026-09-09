@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -339,6 +340,35 @@ var (
 	// ErrNotActivePic dikembalikan POST /tasks/:id/pic/acknowledge saat
 	// actor bukan PIC aktif task ini, atau sudah acknowledge sebelumnya.
 	ErrNotActivePic = errors.New("actor is not an active pic awaiting acknowledgement for this task")
+
+	// ErrTaskIncomplete dikembalikan PUT /tasks/:id/status (Task Management
+	// Core Phase 3, US-017c/S4-43) saat task masih berstatus BACKLOG dengan
+	// completeness='incomplete' dan tujuan bukan BLOCKED -- task yang belum
+	// lengkap tidak boleh mulai dikerjakan.
+	ErrTaskIncomplete = errors.New("task is marked incomplete and cannot change status")
+
+	// ErrCompletenessInvalid dikembalikan PUT /tasks/:id/completeness saat
+	// body bukan 'complete'/'incomplete'.
+	ErrCompletenessInvalid = errors.New("completeness must be 'complete' or 'incomplete'")
+
+	// ErrDependencySelfReference dikembalikan POST /tasks/:id/dependencies
+	// (US-018/S4-46) saat predecessor_task_id sama dengan task itu sendiri --
+	// dicek di service SEBELUM ke DB (CHECK constraint DB cuma
+	// defense-in-depth) supaya pesannya lebih jelas.
+	ErrDependencySelfReference = errors.New("a task cannot depend on itself")
+
+	// ErrDependencyCrossProject dikembalikan saat predecessor task berada
+	// di project berbeda dari successor -- grafik dependency berlaku per
+	// project, bukan lintas project.
+	ErrDependencyCrossProject = errors.New("dependency must be within the same project")
+
+	// ErrDependencyAlreadyExists dikembalikan saat pasangan (predecessor_id,
+	// successor_id) sudah ada (PK task_dependencies bentrok).
+	ErrDependencyAlreadyExists = errors.New("dependency already exists")
+
+	// ErrDependencyNotFound dikembalikan DELETE
+	// /tasks/:id/dependencies/:predecessorId saat pasangan tidak ditemukan.
+	ErrDependencyNotFound = errors.New("dependency not found")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
@@ -388,4 +418,36 @@ type BulkAllocationError struct {
 
 func (e *BulkAllocationError) Error() string {
 	return fmt.Sprintf("bulk storage allocation validation failed for %d organization(s)", len(e.Errors))
+}
+
+// BlockingTaskInfo -- satu predecessor yang belum DONE (dipakai
+// PredecessorBlockingError).
+type BlockingTaskInfo struct {
+	TaskCode string
+	Title    string
+}
+
+// PredecessorBlockingError dikembalikan PUT /tasks/:id/status (Task
+// Management Core Phase 3, US-018/S4-48 HARD-BLOCK) saat task punya
+// predecessor yang belum DONE dan status tujuan bukan BACKLOG/BLOCKED --
+// API_CONTRACT.md kode "DEPENDENCY_HARD_BLOCK" perlu daftar task yang
+// memblokir, bukan cuma pesan statis.
+type PredecessorBlockingError struct {
+	BlockingTasks []BlockingTaskInfo
+}
+
+func (e *PredecessorBlockingError) Error() string {
+	return fmt.Sprintf("task is blocked by %d incomplete predecessor(s)", len(e.BlockingTasks))
+}
+
+// CircularDependencyError dikembalikan POST /tasks/:id/dependencies (Task
+// Management Core Phase 3, US-018/S4-47) saat dependency baru akan menutup
+// lingkaran -- API_CONTRACT.md kode "CIRCULAR_DEPENDENCY" perlu cycle_path
+// (deteksi via recursive CTE, TaskDependencyRepository.WouldCreateCycle).
+type CircularDependencyError struct {
+	CyclePath []string // task_code, urut membentuk lingkaran
+}
+
+func (e *CircularDependencyError) Error() string {
+	return fmt.Sprintf("adding this dependency would create a circular dependency: %s", strings.Join(e.CyclePath, " -> "))
 }
