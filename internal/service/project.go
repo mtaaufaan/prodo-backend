@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
@@ -22,6 +24,16 @@ type projectRepository interface {
 	SetArchived(ctx context.Context, exec db.Executor, projectID string, archive bool, actorID, actorRole string) error
 	SoftDelete(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	Restore(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
+	SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool) error
+}
+
+// projectWebhookDispatcher -- WebhookService.Dispatch (Track S4G), 3 dari 10
+// event desain "GA Add Webhook.dc.html" yang punya trigger nyata sekarang --
+// lihat implementation_gaps.md IG-44. Kegagalan Dispatch TIDAK PERNAH
+// menggagalkan mutasi project itu sendiri (lihat pemanggil) -- pengiriman
+// webhook best-effort, bukan bagian dari kontrak API project.
+type projectWebhookDispatcher interface {
+	Dispatch(ctx context.Context, exec db.Executor, orgID, eventType string, data map[string]any) error
 }
 
 // ProjectService -- S4-02/03, US-012. Route POST/GET /workspaces/:wsId/projects
@@ -29,13 +41,33 @@ type projectRepository interface {
 // /projects/:id TIDAK (tidak ada :wsId di path) -- otorisasi penuh lewat
 // authorize() di sini, sama pola ProjectMemberService.
 type ProjectService struct {
-	repo projectRepository
-	orgs orgAuthorizer
-	rbac projectRoleChecker
+	repo     projectRepository
+	orgs     orgAuthorizer
+	rbac     projectRoleChecker
+	webhooks projectWebhookDispatcher
+	logger   *zap.Logger
 }
 
-func NewProjectService(repo projectRepository, orgs orgAuthorizer, rbac projectRoleChecker) *ProjectService {
-	return &ProjectService{repo: repo, orgs: orgs, rbac: rbac}
+func NewProjectService(repo projectRepository, orgs orgAuthorizer, rbac projectRoleChecker, webhooks projectWebhookDispatcher, logger *zap.Logger) *ProjectService {
+	return &ProjectService{repo: repo, orgs: orgs, rbac: rbac, webhooks: webhooks, logger: logger}
+}
+
+// dispatchWebhook -- best-effort: kegagalan HANYA di-log, TIDAK PERNAH
+// menggagalkan mutasi project yang sudah berhasil (lihat pemanggil).
+// Pengiriman sungguhan (dengan retry) terjadi di job async, panggilan ini
+// cuma mengantre.
+func (s *ProjectService) dispatchWebhook(ctx context.Context, exec db.Executor, workspaceID, eventType string, data map[string]any) {
+	if s.webhooks == nil {
+		return
+	}
+	orgID, err := s.rbac.GetWorkspaceOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		s.logger.Warn("dispatchWebhook: gagal resolve org dari workspace", zap.String("workspace_id", workspaceID), zap.Error(err))
+		return
+	}
+	if err := s.webhooks.Dispatch(ctx, exec, orgID, eventType, data); err != nil {
+		s.logger.Warn("dispatchWebhook: gagal antre pengiriman", zap.String("event_type", eventType), zap.Error(err))
+	}
 }
 
 // authorize menolak actor yang bukan PA/GA-of-org/AW/PM di workspace
@@ -112,6 +144,7 @@ func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspace
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
+	s.dispatchWebhook(ctx, exec, workspaceID, "project.created", map[string]any{"id": p.ID, "name": p.Name, "code": p.Code})
 	return p, nil
 }
 
@@ -153,6 +186,23 @@ func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID
 	if err := s.repo.Update(ctx, exec, projectID, name, pmUserID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.Update: %w", err)
 	}
+	s.dispatchWebhook(ctx, exec, workspaceID, "project.updated", map[string]any{"id": projectID, "name": name})
+	return nil
+}
+
+// SetAllowEditorStoryPoints -- PUT /projects/:id/settings (Task Management
+// Core Phase 4, US-018a/S4-56). Gate sama seperti Update (PM/AW/org-access) --
+// reuse s.authorize, tidak ada gate baru.
+func (s *ProjectService) SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool, actorID, actorRole string) error {
+	if projectID == "" {
+		return fmt.Errorf("service.SetAllowEditorStoryPoints: %w", domain.ErrInvalidInput)
+	}
+	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+		return err
+	}
+	if err := s.repo.SetAllowEditorStoryPoints(ctx, exec, projectID, allow); err != nil {
+		return fmt.Errorf("service.SetAllowEditorStoryPoints: %w", err)
+	}
 	return nil
 }
 
@@ -176,12 +226,14 @@ func (s *ProjectService) Delete(ctx context.Context, exec db.Executor, projectID
 	if projectID == "" {
 		return fmt.Errorf("service.Delete: %w", domain.ErrInvalidInput)
 	}
-	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return err
 	}
 	if err := s.repo.SoftDelete(ctx, exec, projectID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.Delete: %w", err)
 	}
+	s.dispatchWebhook(ctx, exec, workspaceID, "project.deleted", map[string]any{"id": projectID})
 	return nil
 }
 

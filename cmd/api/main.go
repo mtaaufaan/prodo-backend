@@ -48,6 +48,20 @@ func (e *asynqCSVImportEnqueuer) Enqueue(ctx context.Context, importID string) e
 	return err
 }
 
+// asynqWebhookEnqueuer -- adapter tipis *asynq.Client -> interface
+// webhookDeliveryEnqueuer (internal/service/webhook.go), pola sama
+// asynqCSVImportEnqueuer.
+type asynqWebhookEnqueuer struct{ client *asynq.Client }
+
+func (e *asynqWebhookEnqueuer) Enqueue(ctx context.Context, webhookID, eventType string, payload []byte) error {
+	task, err := worker.NewWebhookDeliveryTask(webhookID, eventType, payload)
+	if err != nil {
+		return err
+	}
+	_, err = e.client.EnqueueContext(ctx, task)
+	return err
+}
+
 // main adalah entry point aplikasi PRODO backend.
 func main() {
 	if err := run(); err != nil {
@@ -179,6 +193,18 @@ func run() error {
 	projectRepo := repository.NewProjectRepository()
 	retentionRepo := repository.NewRetentionRepository()
 	csvImportRepo := repository.NewCSVImportRepository()
+	webhookRepo, err := repository.NewWebhookRepository(cfg.WebhookEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("setup webhook repository: %w", err)
+	}
+	groupAuditRepo := repository.NewGroupAuditRepository()
+	groupPerformanceRepo := repository.NewGroupPerformanceRepository()
+	customStatusRepo := repository.NewCustomStatusRepository()
+	sprintRepo := repository.NewSprintRepository()
+	taskRepo := repository.NewTaskRepository()
+	taskPicRepo := repository.NewTaskPicRepository()
+	taskDependencyRepo := repository.NewTaskDependencyRepository()
+	taskStatusSessionRepo := repository.NewTaskStatusSessionRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -193,7 +219,15 @@ func run() error {
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, invitationSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
-	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc)
+	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
+	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
+	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
+	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
+	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc)
+	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
+	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -235,6 +269,13 @@ func run() error {
 	projectHandler := handler.NewProjectHandler(projectSvc, logger)
 	retentionHandler := handler.NewRetentionHandler(retentionSvc, pool, logger)
 	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
+	webhookHandler := handler.NewWebhookHandler(webhookSvc, logger)
+	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
+	groupPerformanceHandler := handler.NewGroupPerformanceHandler(groupPerformanceSvc, logger)
+	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
+	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
+	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
+	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -349,6 +390,10 @@ func run() error {
 	// list boleh seluruh role workspace (sama pola ListMembers di atas).
 	v1.Post("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager"), projectHandler.Create)
 	v1.Get("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), projectHandler.List)
+	// Task Management Core Phase 1 (forward-pull, desain "PM Board.dc.html"):
+	// kolom papan Kanban -- status sistem di-seed otomatis saat workspace
+	// dibuat (WorkspaceRepository.Create), sama gate ListMembers.
+	v1.Get("/workspaces/:wsId/statuses", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer", "division_viewer"), customStatusHandler.ListForWorkspace)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	v1.Post("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CreateInvitations)
@@ -457,6 +502,48 @@ func run() error {
 			},
 		}),
 		csvImportHandler.Execute)
+	// Webhook (Track S4G, desain "GA Webhook.dc.html" + "GA Add
+	// Webhook.dc.html") -- cuma 3 event nyata (implementation_gaps.md IG-44).
+	v1.Get("/groups/:groupId/webhooks", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.List)
+	v1.Post("/groups/:groupId/webhooks", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Create)
+	v1.Get("/groups/:groupId/webhooks/deliveries", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Deliveries)
+	v1.Put("/groups/:groupId/webhooks/:webhookId", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Update)
+	v1.Patch("/groups/:groupId/webhooks/:webhookId/toggle-active", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.ToggleActive)
+	v1.Post("/groups/:groupId/webhooks/:webhookId/regenerate-secret", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.RegenerateSecret)
+	v1.Delete("/groups/:groupId/webhooks/:webhookId", jwtAuth, dbCtx, requireOrgAdmin, webhookHandler.Delete)
+	// Rate-limit 5x/menit sesuai AC eksplisit desain ("GA Add Webhook.dc.html":
+	// "maks 5 permintaan/menit -- sejalan dengan batas 100 event/menit per organisasi").
+	v1.Post("/groups/:groupId/webhooks/:webhookId/test", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Max:        5,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Batas pengiriman tes webhook terlampaui (maks 5 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		webhookHandler.Test)
+	// Audit Trail (Track S4G, desain "GA Audit Trail.dc.html") -- READ-ONLY
+	// di atas audit_logs yang sudah ada, lihat implementation_gaps.md IG-45.
+	// Rate-limit 3x/menit CUMA untuk ?export=csv (AC eksplisit desain),
+	// list biasa tidak dibatasi -- limiter.Config.Next melewati request
+	// yang bukan permintaan ekspor.
+	v1.Get("/groups/:groupId/audit-logs", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Next: func(c *fiber.Ctx) bool { return c.Query("export") != "csv" },
+			Max:  3, Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Batas ekspor audit trail terlampaui (maks 3 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		groupAuditHandler.List)
+	v1.Get("/groups/:groupId/audit-logs/actors", jwtAuth, dbCtx, requireOrgAdmin, groupAuditHandler.Actors)
+	v1.Get("/groups/:groupId/performance", jwtAuth, dbCtx, requireOrgAdmin, groupPerformanceHandler.Summary)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)
@@ -509,6 +596,43 @@ func run() error {
 	// S3-25/27, US-009c. GA/PA saja (bukan PM seperti S3-20) -- GA sudah
 	// punya visibility penuh lintas org lewat RLS pm_select.
 	v1.Get("/groups/:groupId/cross-org-memberships", jwtAuth, dbCtx, requireOrgAdmin, projectMemberHandler.ListCrossOrgMemberships)
+
+	// Task Management Core Phase 1 (US-013/014, forward-pull). TANPA
+	// middleware role (route tidak punya :wsId) -- otorisasi penuh di
+	// SprintService/TaskService.authorize (viewer/division_viewer ditolak
+	// untuk tulis, RLS project membership jadi lapisan pertama).
+	v1.Post("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.Create)
+	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.List)
+	v1.Put("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Update)
+	v1.Post("/sprints/:id/start", jwtAuth, dbCtx, sprintHandler.Start)
+	v1.Post("/sprints/:id/complete", jwtAuth, dbCtx, sprintHandler.Complete)
+	v1.Delete("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Delete)
+
+	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.Create)
+	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.List)
+	v1.Get("/tasks/:id", jwtAuth, dbCtx, taskHandler.Get)
+	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
+	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
+	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
+
+	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
+	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
+	v1.Get("/tasks/:id/pic-history", jwtAuth, dbCtx, taskHandler.PicHistory)
+	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.List)
+	v1.Post("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.Add)
+	v1.Delete("/projects/:id/pic-groups/:statusId/:userId", jwtAuth, dbCtx, picGroupHandler.Remove)
+	v1.Put("/tasks/:id/completeness", jwtAuth, dbCtx, taskHandler.Completeness)
+	v1.Get("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.Dependencies)
+	v1.Post("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.AddDependency)
+	v1.Delete("/tasks/:id/dependencies/:predecessorId", jwtAuth, dbCtx, taskHandler.RemoveDependency)
+
+	// Task Management Core Phase 4 (US-018a/018b/018c: Story Points gate,
+	// Status Time Tracking, Regression).
+	v1.Put("/projects/:id/settings", jwtAuth, dbCtx, projectHandler.UpdateSettings)
+	v1.Put("/statuses/:id", jwtAuth, dbCtx, customStatusHandler.UpdateRequireStartConfirmation)
+	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
+	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
+	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, taskHandler.StatusSessions)
 
 	serverErr := make(chan error, 1)
 	go func() {

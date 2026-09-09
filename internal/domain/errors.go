@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -290,6 +291,100 @@ var (
 	// (deactivated_at TERISI) -- workspace tidak boleh dipindah ke organisasi
 	// yang aksesnya sendiri sedang diblokir.
 	ErrOrganizationInactive = errors.New("target organization is deactivated")
+
+	// ErrWebhookNotFound dikembalikan saat webhook_configs.id tidak
+	// ditemukan (Webhook, Track S4G).
+	ErrWebhookNotFound = errors.New("webhook not found")
+
+	// ErrWebhookURLNotHTTPS dikembalikan saat target_url bukan HTTPS --
+	// AC eksplisit desain "GA Add Webhook.dc.html", ditegakkan lagi di
+	// service (bukan cuma validasi FE).
+	ErrWebhookURLNotHTTPS = errors.New("webhook endpoint must use https")
+
+	// ErrWebhookEventRequired dikembalikan saat events kosong ATAU berisi
+	// nilai di luar 3 event yang benar-benar punya trigger sekarang
+	// (project.created/updated/deleted) -- lihat implementation_gaps.md
+	// IG-44 untuk 7 event desain yang belum bisa dibangun.
+	ErrWebhookEventRequired = errors.New("at least one supported event is required")
+
+	// ErrCustomStatusNotFound dikembalikan saat custom_statuses.id tidak
+	// ditemukan (Task Management Core Phase 1).
+	ErrCustomStatusNotFound = errors.New("custom status not found")
+
+	// ErrSprintNotFound dikembalikan saat sprints.id tidak ditemukan.
+	ErrSprintNotFound = errors.New("sprint not found")
+
+	// ErrTaskNotFound dikembalikan saat tasks.id tidak ditemukan atau
+	// sudah soft-deleted.
+	ErrTaskNotFound = errors.New("task not found")
+
+	// ErrTaskAssigneeRequired dikembalikan POST /projects/:id/tasks saat
+	// assignees kosong (desain "PM Add Task.dc.html": "minimal satu
+	// assignee, task tanpa penanggung jawab tidak dapat disimpan").
+	ErrTaskAssigneeRequired = errors.New("at least one assignee is required")
+
+	// ErrTaskStatusUndefined dikembalikan saat status tujuan bermode
+	// UNDEFINED (custom_statuses.is_undefined) -- tidak bisa dipilih untuk
+	// task baru maupun perpindahan status.
+	ErrTaskStatusUndefined = errors.New("status is undefined and cannot be selected")
+
+	// ErrPicRequired dikembalikan PUT /tasks/:id/status saat pic_ids kosong
+	// (Task Management Core Phase 2, S4-32 AC: "PUT tanpa pic_ids -> 422
+	// pic_required").
+	ErrPicRequired = errors.New("at least one pic is required for status change")
+
+	// ErrPicNotInGroup dikembalikan saat aktor mode Terbatas (Editor/
+	// Approver) memilih PIC di luar PIC Group status tujuan (§5.34).
+	ErrPicNotInGroup = errors.New("selected pic is not in the pic group for this status")
+
+	// ErrNotActivePic dikembalikan POST /tasks/:id/pic/acknowledge saat
+	// actor bukan PIC aktif task ini, atau sudah acknowledge sebelumnya.
+	ErrNotActivePic = errors.New("actor is not an active pic awaiting acknowledgement for this task")
+
+	// ErrTaskIncomplete dikembalikan PUT /tasks/:id/status (Task Management
+	// Core Phase 3, US-017c/S4-43) saat task masih berstatus BACKLOG dengan
+	// completeness='incomplete' dan tujuan bukan BLOCKED -- task yang belum
+	// lengkap tidak boleh mulai dikerjakan.
+	ErrTaskIncomplete = errors.New("task is marked incomplete and cannot change status")
+
+	// ErrCompletenessInvalid dikembalikan PUT /tasks/:id/completeness saat
+	// body bukan 'complete'/'incomplete'.
+	ErrCompletenessInvalid = errors.New("completeness must be 'complete' or 'incomplete'")
+
+	// ErrDependencySelfReference dikembalikan POST /tasks/:id/dependencies
+	// (US-018/S4-46) saat predecessor_task_id sama dengan task itu sendiri --
+	// dicek di service SEBELUM ke DB (CHECK constraint DB cuma
+	// defense-in-depth) supaya pesannya lebih jelas.
+	ErrDependencySelfReference = errors.New("a task cannot depend on itself")
+
+	// ErrDependencyCrossProject dikembalikan saat predecessor task berada
+	// di project berbeda dari successor -- grafik dependency berlaku per
+	// project, bukan lintas project.
+	ErrDependencyCrossProject = errors.New("dependency must be within the same project")
+
+	// ErrDependencyAlreadyExists dikembalikan saat pasangan (predecessor_id,
+	// successor_id) sudah ada (PK task_dependencies bentrok).
+	ErrDependencyAlreadyExists = errors.New("dependency already exists")
+
+	// ErrDependencyNotFound dikembalikan DELETE
+	// /tasks/:id/dependencies/:predecessorId saat pasangan tidak ditemukan.
+	ErrDependencyNotFound = errors.New("dependency not found")
+
+	// ErrStoryPointsNotAllowed dikembalikan PUT /tasks/:id (Task Management
+	// Core Phase 4, US-018a/S4-56) saat actor mengubah story_points tapi
+	// bukan PM/AW/GA/PA, dan project belum mengizinkan Editor mengisi SP
+	// (`projects.allow_editor_story_points=false`).
+	ErrStoryPointsNotAllowed = errors.New("actor is not allowed to set story points for this task")
+
+	// ErrNoActiveStatusSession dikembalikan POST /tasks/:id/start-work
+	// (Phase 4, US-018b/S4-63) saat task tidak punya sesi status aktif sama
+	// sekali -- seharusnya tidak pernah terjadi lewat alur normal (setiap
+	// task punya sesi aktif sejak dibuat), murni pengaman.
+	ErrNoActiveStatusSession = errors.New("task has no active status session")
+
+	// ErrWorkAlreadyStarted dikembalikan POST /tasks/:id/start-work saat
+	// sesi aktif task ini sudah punya `work_started_at` terisi.
+	ErrWorkAlreadyStarted = errors.New("work already started for the active status session")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
@@ -339,4 +434,36 @@ type BulkAllocationError struct {
 
 func (e *BulkAllocationError) Error() string {
 	return fmt.Sprintf("bulk storage allocation validation failed for %d organization(s)", len(e.Errors))
+}
+
+// BlockingTaskInfo -- satu predecessor yang belum DONE (dipakai
+// PredecessorBlockingError).
+type BlockingTaskInfo struct {
+	TaskCode string
+	Title    string
+}
+
+// PredecessorBlockingError dikembalikan PUT /tasks/:id/status (Task
+// Management Core Phase 3, US-018/S4-48 HARD-BLOCK) saat task punya
+// predecessor yang belum DONE dan status tujuan bukan BACKLOG/BLOCKED --
+// API_CONTRACT.md kode "DEPENDENCY_HARD_BLOCK" perlu daftar task yang
+// memblokir, bukan cuma pesan statis.
+type PredecessorBlockingError struct {
+	BlockingTasks []BlockingTaskInfo
+}
+
+func (e *PredecessorBlockingError) Error() string {
+	return fmt.Sprintf("task is blocked by %d incomplete predecessor(s)", len(e.BlockingTasks))
+}
+
+// CircularDependencyError dikembalikan POST /tasks/:id/dependencies (Task
+// Management Core Phase 3, US-018/S4-47) saat dependency baru akan menutup
+// lingkaran -- API_CONTRACT.md kode "CIRCULAR_DEPENDENCY" perlu cycle_path
+// (deteksi via recursive CTE, TaskDependencyRepository.WouldCreateCycle).
+type CircularDependencyError struct {
+	CyclePath []string // task_code, urut membentuk lingkaran
+}
+
+func (e *CircularDependencyError) Error() string {
+	return fmt.Sprintf("adding this dependency would create a circular dependency: %s", strings.Join(e.CyclePath, " -> "))
 }

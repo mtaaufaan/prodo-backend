@@ -139,6 +139,23 @@ func (r *ProjectMemberRepository) RemoveMember(ctx context.Context, exec db.Exec
 }
 
 // ListMembers mengembalikan seluruh project member (dipakai FE S3-24).
+// GetRole -- role project-scoped user (kalau ada baris project_members).
+// Task Management Core Phase 1: gate viewer read-only di TaskService/
+// SprintService butuh role SPESIFIK project ini, bukan cuma workspace_role
+// (project-scoped cross-org member tidak selalu punya baris workspace_members
+// sama sekali). found=false berarti user bukan project member eksplisit
+// (mungkin cuma workspace member biasa -- pemanggil jatuh ke GetMemberRole).
+func (r *ProjectMemberRepository) GetRole(ctx context.Context, exec db.Executor, projectID, userID string) (role string, found bool, err error) {
+	err = exec.QueryRow(ctx, `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`, projectID, userID).Scan(&role)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("repository.GetRole: %w", err)
+	}
+	return role, true, nil
+}
+
 func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at

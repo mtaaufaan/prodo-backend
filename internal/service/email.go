@@ -155,6 +155,19 @@ func (e *EmailService) SendRetentionWarningEmail(_ context.Context, to, displayN
 	return nil
 }
 
+// SendWebhookFailureEmail -- dikirim setelah 3x retry pengiriman webhook
+// habis (desain "GA Webhook.dc.html": "Group Admin menerima notifikasi
+// in-app dan email").
+func (e *EmailService) SendWebhookFailureEmail(_ context.Context, to, displayName, webhookName, targetURL, eventType string) error {
+	msg := buildWebhookFailureEmailMessage(e.from, to, displayName, webhookName, targetURL, eventType)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendWebhookFailureEmail: %w", err)
+	}
+	return nil
+}
+
 // buildStorageQuotaWarningEmailMessage -- dipisah dari
 // SendStorageQuotaWarningEmail supaya bisa di-unit-test tanpa koneksi SMTP
 // nyata (pola sama dengan buildActivationEmailMessage).
@@ -331,6 +344,24 @@ func buildRetentionExportEmailMessage(from, to, displayName, itemName, downloadL
 
 // buildRetentionWarningEmailMessage -- dipisah dari SendRetentionWarningEmail
 // supaya bisa di-unit-test tanpa koneksi SMTP nyata.
+func buildWebhookFailureEmailMessage(from, to, displayName, webhookName, targetURL, eventType string) []byte {
+	subject := fmt.Sprintf("Webhook %q gagal terkirim - PRODO", webhookName)
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Seluruh 3 percobaan pengiriman event %s ke webhook \"%s\" (%s)\r\n"+
+			"gagal (dicoba ulang setelah 1, 5, dan 15 menit).\r\n\r\n"+
+			"Periksa endpoint tersebut, atau nonaktifkan webhook ini dari menu\r\n"+
+			"Webhook di konsol Group Admin kalau sudah tidak dipakai.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, eventType, webhookName, targetURL,
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
 func buildRetentionWarningEmailMessage(from, to, displayName, orgName string, daysSince, daysUntilPurge int) []byte {
 	subject := fmt.Sprintf("Peringatan Retensi Data - %s - PRODO", orgName)
 	body := fmt.Sprintf(
