@@ -203,6 +203,7 @@ func run() error {
 	taskRepo := repository.NewTaskRepository()
 	taskPicRepo := repository.NewTaskPicRepository()
 	taskDependencyRepo := repository.NewTaskDependencyRepository()
+	taskStatusSessionRepo := repository.NewTaskStatusSessionRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -220,9 +221,9 @@ func run() error {
 	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
 	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
-	customStatusSvc := service.NewCustomStatusService(customStatusRepo)
+	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
-	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
@@ -620,6 +621,14 @@ func run() error {
 	v1.Get("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.Dependencies)
 	v1.Post("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.AddDependency)
 	v1.Delete("/tasks/:id/dependencies/:predecessorId", jwtAuth, dbCtx, taskHandler.RemoveDependency)
+
+	// Task Management Core Phase 4 (US-018a/018b/018c: Story Points gate,
+	// Status Time Tracking, Regression).
+	v1.Put("/projects/:id/settings", jwtAuth, dbCtx, projectHandler.UpdateSettings)
+	v1.Put("/statuses/:id", jwtAuth, dbCtx, customStatusHandler.UpdateRequireStartConfirmation)
+	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
+	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
+	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, taskHandler.StatusSessions)
 
 	serverErr := make(chan error, 1)
 	go func() {

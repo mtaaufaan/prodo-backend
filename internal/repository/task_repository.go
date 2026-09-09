@@ -1,7 +1,6 @@
 // Package repository -- TaskRepository (Task Management Core Phase 1,
-// US-014; completeness+is_blocked Phase 3, US-017c/018). Story-point/
-// time-tracking enforcement penuh masih Phase 4 -- lihat komentar migrasi
-// 20260924090000_task_core_phase1.
+// US-014; completeness+is_blocked Phase 3, US-017c/018; regression_count
+// Phase 4, US-018c). Lihat komentar migrasi 20260924090000_task_core_phase1.
 package repository
 
 import (
@@ -18,28 +17,29 @@ import (
 )
 
 type Task struct {
-	ID             string
-	ProjectID      string
-	SprintID       *string
-	SprintName     *string
-	ParentTaskID   *string
-	StatusID       string
-	StatusName     string
-	StatusColor    *string
-	Title          string
-	Description    json.RawMessage
-	Priority       string
-	Completeness   *string
-	DueDate        *time.Time
-	EstimatedHours *float64
-	StoryPoints    *int
-	TaskCode       *string
-	CreatedBy      string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	CompletedAt    *time.Time
-	IsBlocked      bool
-	Assignees      []TaskAssignee
+	ID              string
+	ProjectID       string
+	SprintID        *string
+	SprintName      *string
+	ParentTaskID    *string
+	StatusID        string
+	StatusName      string
+	StatusColor     *string
+	Title           string
+	Description     json.RawMessage
+	Priority        string
+	Completeness    *string
+	DueDate         *time.Time
+	EstimatedHours  *float64
+	StoryPoints     *int
+	TaskCode        *string
+	CreatedBy       string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	CompletedAt     *time.Time
+	IsBlocked       bool
+	RegressionCount int
+	Assignees       []TaskAssignee
 }
 
 type TaskAssignee struct {
@@ -121,6 +121,16 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 		return nil, fmt.Errorf("repository.Create: pic fase awal: %w", err)
 	}
 
+	// Task Management Core Phase 4 (S4-62): sesi status pertama (BACKLOG)
+	// dibuka langsung saat task dibuat -- INSERT langsung (bukan lewat
+	// TaskStatusSessionRepository, sama package, hindari repo-panggil-repo).
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO task_status_sessions (task_id, status_id, session_no, triggered_by)
+		VALUES ($1, $2, 1, $3)
+	`, id, statusID, createdBy); err != nil {
+		return nil, fmt.Errorf("repository.Create: sesi status awal: %w", err)
+	}
+
 	return r.Get(ctx, exec, id)
 }
 
@@ -136,18 +146,25 @@ const isBlockedSubquery = `
 	)
 `
 
+// regressionCountSubquery -- Phase 4 (US-018c/S4-69): jumlah sesi regresi
+// task ini, ter-index (idx_task_status_sessions_regression), dievaluasi
+// native di DB -- pola sama isBlockedSubquery di atas.
+const regressionCountSubquery = `
+	(SELECT COUNT(*) FROM task_status_sessions tss WHERE tss.task_id = t.id AND tss.is_regression = TRUE)
+`
+
 const taskSelectColumns = `
 	t.id, t.project_id, t.sprint_id, s.name, t.parent_task_id, t.status_id, cs.name, cs.color_token,
 	t.title, t.description, t.priority, t.completeness, t.due_date, t.estimated_hours, t.story_points,
-	t.task_code, t.created_by, t.created_at, t.updated_at, t.completed_at, ` + isBlockedSubquery + `
-
+	t.task_code, t.created_by, t.created_at, t.updated_at, t.completed_at, ` + isBlockedSubquery + `,
+	` + regressionCountSubquery + `
 `
 
 func scanTask(row interface{ Scan(dest ...any) error }) (*Task, error) {
 	var t Task
 	if err := row.Scan(&t.ID, &t.ProjectID, &t.SprintID, &t.SprintName, &t.ParentTaskID, &t.StatusID, &t.StatusName, &t.StatusColor,
 		&t.Title, &t.Description, &t.Priority, &t.Completeness, &t.DueDate, &t.EstimatedHours, &t.StoryPoints,
-		&t.TaskCode, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.IsBlocked); err != nil {
+		&t.TaskCode, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.IsBlocked, &t.RegressionCount); err != nil {
 		return nil, err
 	}
 	return &t, nil

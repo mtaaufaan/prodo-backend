@@ -22,6 +22,7 @@ type sprintRepository interface {
 	SetActive(ctx context.Context, exec db.Executor, sprintID string, active bool) error
 	Delete(ctx context.Context, exec db.Executor, sprintID string) error
 	UnassignIncompleteTasks(ctx context.Context, exec db.Executor, sprintID, doneStatusID string) error
+	Summary(ctx context.Context, exec db.Executor, sprintID string) (totalStoryPoints, unestimatedCount int, err error)
 }
 
 // sprintProjectResolver -- reuse ProjectRepository.GetWorkspaceID.
@@ -186,6 +187,18 @@ func (s *SprintService) CompleteSprint(ctx context.Context, exec db.Executor, sp
 		}
 	}
 	return nil
+}
+
+// Summary -- GET /sprints/:id/summary (Phase 4, US-018a/S4-59).
+func (s *SprintService) Summary(ctx context.Context, exec db.Executor, sprintID string) (totalStoryPoints, unestimatedCount int, err error) {
+	if sprintID == "" {
+		return 0, 0, fmt.Errorf("service.Summary: %w", domain.ErrInvalidInput)
+	}
+	totalStoryPoints, unestimatedCount, err = s.repo.Summary(ctx, exec, sprintID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("service.Summary: %w", err)
+	}
+	return totalStoryPoints, unestimatedCount, nil
 }
 
 func (s *SprintService) Delete(ctx context.Context, exec db.Executor, sprintID, actorID, actorRole string) error {

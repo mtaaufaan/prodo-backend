@@ -207,6 +207,47 @@ func (h *TaskHandler) PicHistory(c *fiber.Ctx) error {
 	return c.JSON(response.Success(picPhasesJSON(list)))
 }
 
+// StartWork menangani POST /tasks/:id/start-work (Phase 4, US-018b/S4-63).
+func (h *TaskHandler) StartWork(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	taskID := c.Params("id")
+	if err := h.tasks.StartWork(c.Context(), exec, taskID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal memulai pengerjaan task")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID}))
+}
+
+// StatusSessions menangani GET /tasks/:id/status-sessions (Phase 4, FE
+// StatusTimeline S4-66).
+func (h *TaskHandler) StatusSessions(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	list, err := h.tasks.ListStatusSessions(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil riwayat sesi status task")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		s := &list[i]
+		data[i] = fiber.Map{
+			"id": s.ID, "task_id": s.TaskID, "status_id": s.StatusID, "status_name": s.StatusName,
+			"session_no": s.SessionNo, "entered_at": s.EnteredAt, "work_started_at": s.WorkStartedAt,
+			"is_auto_start": s.IsAutoStart, "exited_at": s.ExitedAt, "is_regression": s.IsRegression,
+			"triggered_by": s.TriggeredBy,
+		}
+	}
+	return c.JSON(response.Success(data))
+}
+
 type taskCompletenessRequest struct {
 	Completeness string `json:"completeness"`
 }
@@ -335,7 +376,7 @@ func taskJSON(t *repository.Task) fiber.Map {
 		"title": t.Title, "description": t.Description, "priority": t.Priority, "completeness": t.Completeness,
 		"due_date": t.DueDate, "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
 		"task_code": t.TaskCode, "created_by": t.CreatedBy, "created_at": t.CreatedAt, "updated_at": t.UpdatedAt,
-		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "assignees": assignees,
+		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "regression_count": t.RegressionCount, "assignees": assignees,
 	}
 }
 
@@ -393,6 +434,12 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PIC_NOT_IN_GROUP", "PIC Group status ini belum memuat member yang Anda pilih. Minta Project Manager menambah anggota PIC Group.", nil))
 	case errors.Is(err, domain.ErrNotActivePic):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("NOT_ACTIVE_PIC", "Anda bukan PIC aktif task ini, atau sudah mengonfirmasi sebelumnya.", nil))
+	case errors.Is(err, domain.ErrStoryPointsNotAllowed):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("STORY_POINTS_NOT_ALLOWED", "Anda tidak berwenang mengubah story point task ini -- hanya PM/AW atau Editor yang diizinkan project ini.", nil))
+	case errors.Is(err, domain.ErrNoActiveStatusSession):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Task tidak memiliki sesi status aktif.", nil))
+	case errors.Is(err, domain.ErrWorkAlreadyStarted):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("ALREADY_STARTED", "Pengerjaan task ini sudah dimulai sebelumnya.", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas project ini.", nil))
 	default:

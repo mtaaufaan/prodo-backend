@@ -145,3 +145,16 @@ func (r *SprintRepository) UnassignIncompleteTasks(ctx context.Context, exec db.
 	}
 	return nil
 }
+
+// Summary -- GET /sprints/:id/summary (Phase 4, US-018a/S4-59):
+// total_story_points (NULL dihitung 0) + unestimated_count.
+func (r *SprintRepository) Summary(ctx context.Context, exec db.Executor, sprintID string) (totalStoryPoints, unestimatedCount int, err error) {
+	err = exec.QueryRow(ctx, `
+		SELECT COALESCE(SUM(story_points), 0), COUNT(*) FILTER (WHERE story_points IS NULL)
+		FROM tasks WHERE sprint_id = $1 AND deleted_at IS NULL
+	`, sprintID).Scan(&totalStoryPoints, &unestimatedCount)
+	if err != nil {
+		return 0, 0, fmt.Errorf("repository.Summary: %w", err)
+	}
+	return totalStoryPoints, unestimatedCount, nil
+}

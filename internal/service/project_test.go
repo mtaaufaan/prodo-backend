@@ -59,6 +59,10 @@ func (f *fakeProjectRepo) Restore(_ context.Context, _ db.Executor, _, _, _ stri
 	return f.restoreErr
 }
 
+func (f *fakeProjectRepo) SetAllowEditorStoryPoints(_ context.Context, _ db.Executor, _ string, _ bool) error {
+	return nil
+}
+
 func TestProjectService_Create_PlatformAdminBypass(t *testing.T) {
 	repo := &fakeProjectRepo{}
 	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "project_manager"}, nil, nil)
