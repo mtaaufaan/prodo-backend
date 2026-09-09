@@ -15,15 +15,17 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
-// TaskHandler -- Task Management Core Phase 1, US-014. PIC Handoff/
-// dependency hard-block/story-point enforcement penuh adalah Phase 2-4.
+// TaskHandler -- Task Management Core Phase 1/2 (US-014, US-017 PIC
+// Handoff). Dependency hard-block/story-point enforcement penuh adalah
+// Phase 3-4.
 type TaskHandler struct {
 	tasks  *service.TaskService
+	pics   *service.TaskPicService
 	logger *zap.Logger
 }
 
-func NewTaskHandler(tasks *service.TaskService, logger *zap.Logger) *TaskHandler {
-	return &TaskHandler{tasks: tasks, logger: logger}
+func NewTaskHandler(tasks *service.TaskService, pics *service.TaskPicService, logger *zap.Logger) *TaskHandler {
+	return &TaskHandler{tasks: tasks, pics: pics, logger: logger}
 }
 
 type taskRequest struct {
@@ -99,17 +101,24 @@ func (h *TaskHandler) List(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
-// Get menangani GET /tasks/:id.
+// Get menangani GET /tasks/:id. Menyertakan PIC aktif (Phase 2).
 func (h *TaskHandler) Get(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
-	task, err := h.tasks.Get(c.Context(), exec, c.Params("id"))
+	taskID := c.Params("id")
+	task, err := h.tasks.Get(c.Context(), exec, taskID)
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil detail task")
 	}
-	return c.JSON(response.Success(taskJSON(task)))
+	pics, err := h.pics.ListActive(c.Context(), exec, taskID)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil PIC aktif")
+	}
+	data := taskJSON(task)
+	data["active_pics"] = picPhasesJSON(pics)
+	return c.JSON(response.Success(data))
 }
 
 // Update menangani PUT /tasks/:id.
@@ -140,10 +149,12 @@ func (h *TaskHandler) Update(c *fiber.Ctx) error {
 }
 
 type taskStatusRequest struct {
-	StatusID string `json:"status_id"`
+	StatusID string   `json:"status_id"`
+	PicIDs   []string `json:"pic_ids"`
 }
 
-// SetStatus menangani PUT /tasks/:id/status.
+// SetStatus menangani PUT /tasks/:id/status -- Phase 2: pic_ids WAJIB
+// (S4-32 AC), lihat komentar TaskService.SetStatus.
 func (h *TaskHandler) SetStatus(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -159,10 +170,40 @@ func (h *TaskHandler) SetStatus(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	if err := h.tasks.SetStatus(c.Context(), exec, taskID, body.StatusID, actorUserID, actorRole); err != nil {
+	if err := h.tasks.SetStatus(c.Context(), exec, taskID, body.StatusID, body.PicIDs, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah status task")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": taskID, "status_id": body.StatusID}))
+}
+
+// Acknowledge menangani POST /tasks/:id/pic/acknowledge (S4-33).
+func (h *TaskHandler) Acknowledge(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	taskID := c.Params("id")
+	if err := h.pics.Acknowledge(c.Context(), exec, taskID, actorUserID); err != nil {
+		return h.mapError(c, err, "Gagal mengonfirmasi serah terima PIC")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID}))
+}
+
+// PicHistory menangani GET /tasks/:id/pic-history.
+func (h *TaskHandler) PicHistory(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	list, err := h.pics.ListHistory(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil riwayat PIC")
+	}
+	return c.JSON(response.Success(picPhasesJSON(list)))
 }
 
 // Delete menangani DELETE /tasks/:id.
@@ -197,6 +238,20 @@ func taskJSON(t *repository.Task) fiber.Map {
 	}
 }
 
+func picPhasesJSON(list []repository.TaskPicPhase) []fiber.Map {
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		p := &list[i]
+		data[i] = fiber.Map{
+			"id": p.ID, "task_id": p.TaskID, "status_id": p.StatusID, "status_name": p.StatusName,
+			"user_id": p.UserID, "user_name": p.UserName, "user_email": p.UserEmail,
+			"is_active": p.IsActive, "acknowledged_at": p.AcknowledgedAt,
+			"activated_at": p.ActivatedAt, "deactivated_at": p.DeactivatedAt, "assigned_by": p.AssignedBy,
+		}
+	}
+	return data
+}
+
 func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
@@ -209,6 +264,12 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Task tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrCustomStatusNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Status tidak ditemukan", nil))
+	case errors.Is(err, domain.ErrPicRequired):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PIC_REQUIRED", "Pilih minimal satu PIC untuk fase status baru ini.", nil))
+	case errors.Is(err, domain.ErrPicNotInGroup):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PIC_NOT_IN_GROUP", "PIC Group status ini belum memuat member yang Anda pilih. Minta Project Manager menambah anggota PIC Group.", nil))
+	case errors.Is(err, domain.ErrNotActivePic):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("NOT_ACTIVE_PIC", "Anda bukan PIC aktif task ini, atau sudah mengonfirmasi sebelumnya.", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas project ini.", nil))
 	default:

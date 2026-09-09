@@ -326,6 +326,19 @@ var (
 	// UNDEFINED (custom_statuses.is_undefined) -- tidak bisa dipilih untuk
 	// task baru maupun perpindahan status.
 	ErrTaskStatusUndefined = errors.New("status is undefined and cannot be selected")
+
+	// ErrPicRequired dikembalikan PUT /tasks/:id/status saat pic_ids kosong
+	// (Task Management Core Phase 2, S4-32 AC: "PUT tanpa pic_ids -> 422
+	// pic_required").
+	ErrPicRequired = errors.New("at least one pic is required for status change")
+
+	// ErrPicNotInGroup dikembalikan saat aktor mode Terbatas (Editor/
+	// Approver) memilih PIC di luar PIC Group status tujuan (§5.34).
+	ErrPicNotInGroup = errors.New("selected pic is not in the pic group for this status")
+
+	// ErrNotActivePic dikembalikan POST /tasks/:id/pic/acknowledge saat
+	// actor bukan PIC aktif task ini, atau sudah acknowledge sebelumnya.
+	ErrNotActivePic = errors.New("actor is not an active pic awaiting acknowledgement for this task")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
