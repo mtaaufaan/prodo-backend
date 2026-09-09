@@ -198,6 +198,7 @@ func run() error {
 		return fmt.Errorf("setup webhook repository: %w", err)
 	}
 	groupAuditRepo := repository.NewGroupAuditRepository()
+	groupPerformanceRepo := repository.NewGroupPerformanceRepository()
 	customStatusRepo := repository.NewCustomStatusRepository()
 	sprintRepo := repository.NewSprintRepository()
 	taskRepo := repository.NewTaskRepository()
@@ -220,6 +221,7 @@ func run() error {
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
 	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
+	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
@@ -269,6 +271,7 @@ func run() error {
 	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
 	webhookHandler := handler.NewWebhookHandler(webhookSvc, logger)
 	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
+	groupPerformanceHandler := handler.NewGroupPerformanceHandler(groupPerformanceSvc, logger)
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
@@ -540,6 +543,7 @@ func run() error {
 		}),
 		groupAuditHandler.List)
 	v1.Get("/groups/:groupId/audit-logs/actors", jwtAuth, dbCtx, requireOrgAdmin, groupAuditHandler.Actors)
+	v1.Get("/groups/:groupId/performance", jwtAuth, dbCtx, requireOrgAdmin, groupPerformanceHandler.Summary)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)
