@@ -95,6 +95,9 @@ var (
 	// ditemukan (S3-03/04).
 	ErrOrganizationNotFound = errors.New("organization not found")
 
+	// ErrGroupNotFound dikembalikan saat groups.id tidak ditemukan (S4G-27).
+	ErrGroupNotFound = errors.New("group not found")
+
 	// ErrSlugAlreadyExists dikembalikan saat organizations.slug bentrok
 	// UNIQUE constraint (S3-02/03).
 	ErrSlugAlreadyExists = errors.New("organization slug already exists")
