@@ -197,6 +197,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("setup webhook repository: %w", err)
 	}
+	groupAuditRepo := repository.NewGroupAuditRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -212,6 +213,7 @@ func run() error {
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
 	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
+	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
@@ -255,6 +257,7 @@ func run() error {
 	retentionHandler := handler.NewRetentionHandler(retentionSvc, pool, logger)
 	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
 	webhookHandler := handler.NewWebhookHandler(webhookSvc, logger)
+	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -500,6 +503,24 @@ func run() error {
 			},
 		}),
 		webhookHandler.Test)
+	// Audit Trail (Track S4G, desain "GA Audit Trail.dc.html") -- READ-ONLY
+	// di atas audit_logs yang sudah ada, lihat implementation_gaps.md IG-45.
+	// Rate-limit 3x/menit CUMA untuk ?export=csv (AC eksplisit desain),
+	// list biasa tidak dibatasi -- limiter.Config.Next melewati request
+	// yang bukan permintaan ekspor.
+	v1.Get("/groups/:groupId/audit-logs", jwtAuth, dbCtx, requireOrgAdmin,
+		limiter.New(limiter.Config{
+			Next: func(c *fiber.Ctx) bool { return c.Query("export") != "csv" },
+			Max:  3, Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Batas ekspor audit trail terlampaui (maks 3 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		groupAuditHandler.List)
+	v1.Get("/groups/:groupId/audit-logs/actors", jwtAuth, dbCtx, requireOrgAdmin, groupAuditHandler.Actors)
 	// S3-30/34, US-010/US-011.
 	v1.Put("/organizations/:id/settings", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateSettings)
 	v1.Put("/organizations/:id/storage-quota", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.UpdateStorageQuota)
