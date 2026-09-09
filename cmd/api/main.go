@@ -198,6 +198,9 @@ func run() error {
 		return fmt.Errorf("setup webhook repository: %w", err)
 	}
 	groupAuditRepo := repository.NewGroupAuditRepository()
+	customStatusRepo := repository.NewCustomStatusRepository()
+	sprintRepo := repository.NewSprintRepository()
+	taskRepo := repository.NewTaskRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -215,6 +218,9 @@ func run() error {
 	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
 	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
+	customStatusSvc := service.NewCustomStatusService(customStatusRepo)
+	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskSvc := service.NewTaskService(taskRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -258,6 +264,9 @@ func run() error {
 	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
 	webhookHandler := handler.NewWebhookHandler(webhookSvc, logger)
 	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
+	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
+	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
+	taskHandler := handler.NewTaskHandler(taskSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -372,6 +381,10 @@ func run() error {
 	// list boleh seluruh role workspace (sama pola ListMembers di atas).
 	v1.Post("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager"), projectHandler.Create)
 	v1.Get("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), projectHandler.List)
+	// Task Management Core Phase 1 (forward-pull, desain "PM Board.dc.html"):
+	// kolom papan Kanban -- status sistem di-seed otomatis saat workspace
+	// dibuat (WorkspaceRepository.Create), sama gate ListMembers.
+	v1.Get("/workspaces/:wsId/statuses", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer", "division_viewer"), customStatusHandler.ListForWorkspace)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	v1.Post("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CreateInvitations)
@@ -573,6 +586,24 @@ func run() error {
 	// S3-25/27, US-009c. GA/PA saja (bukan PM seperti S3-20) -- GA sudah
 	// punya visibility penuh lintas org lewat RLS pm_select.
 	v1.Get("/groups/:groupId/cross-org-memberships", jwtAuth, dbCtx, requireOrgAdmin, projectMemberHandler.ListCrossOrgMemberships)
+
+	// Task Management Core Phase 1 (US-013/014, forward-pull). TANPA
+	// middleware role (route tidak punya :wsId) -- otorisasi penuh di
+	// SprintService/TaskService.authorize (viewer/division_viewer ditolak
+	// untuk tulis, RLS project membership jadi lapisan pertama).
+	v1.Post("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.Create)
+	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.List)
+	v1.Put("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Update)
+	v1.Post("/sprints/:id/start", jwtAuth, dbCtx, sprintHandler.Start)
+	v1.Post("/sprints/:id/complete", jwtAuth, dbCtx, sprintHandler.Complete)
+	v1.Delete("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Delete)
+
+	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.Create)
+	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.List)
+	v1.Get("/tasks/:id", jwtAuth, dbCtx, taskHandler.Get)
+	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
+	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
+	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
 
 	serverErr := make(chan error, 1)
 	go func() {

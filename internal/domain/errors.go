@@ -305,6 +305,27 @@ var (
 	// (project.created/updated/deleted) -- lihat implementation_gaps.md
 	// IG-44 untuk 7 event desain yang belum bisa dibangun.
 	ErrWebhookEventRequired = errors.New("at least one supported event is required")
+
+	// ErrCustomStatusNotFound dikembalikan saat custom_statuses.id tidak
+	// ditemukan (Task Management Core Phase 1).
+	ErrCustomStatusNotFound = errors.New("custom status not found")
+
+	// ErrSprintNotFound dikembalikan saat sprints.id tidak ditemukan.
+	ErrSprintNotFound = errors.New("sprint not found")
+
+	// ErrTaskNotFound dikembalikan saat tasks.id tidak ditemukan atau
+	// sudah soft-deleted.
+	ErrTaskNotFound = errors.New("task not found")
+
+	// ErrTaskAssigneeRequired dikembalikan POST /projects/:id/tasks saat
+	// assignees kosong (desain "PM Add Task.dc.html": "minimal satu
+	// assignee, task tanpa penanggung jawab tidak dapat disimpan").
+	ErrTaskAssigneeRequired = errors.New("at least one assignee is required")
+
+	// ErrTaskStatusUndefined dikembalikan saat status tujuan bermode
+	// UNDEFINED (custom_statuses.is_undefined) -- tidak bisa dipilih untuk
+	// task baru maupun perpindahan status.
+	ErrTaskStatusUndefined = errors.New("status is undefined and cannot be selected")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
