@@ -369,6 +369,22 @@ var (
 	// ErrDependencyNotFound dikembalikan DELETE
 	// /tasks/:id/dependencies/:predecessorId saat pasangan tidak ditemukan.
 	ErrDependencyNotFound = errors.New("dependency not found")
+
+	// ErrStoryPointsNotAllowed dikembalikan PUT /tasks/:id (Task Management
+	// Core Phase 4, US-018a/S4-56) saat actor mengubah story_points tapi
+	// bukan PM/AW/GA/PA, dan project belum mengizinkan Editor mengisi SP
+	// (`projects.allow_editor_story_points=false`).
+	ErrStoryPointsNotAllowed = errors.New("actor is not allowed to set story points for this task")
+
+	// ErrNoActiveStatusSession dikembalikan POST /tasks/:id/start-work
+	// (Phase 4, US-018b/S4-63) saat task tidak punya sesi status aktif sama
+	// sekali -- seharusnya tidak pernah terjadi lewat alur normal (setiap
+	// task punya sesi aktif sejak dibuat), murni pengaman.
+	ErrNoActiveStatusSession = errors.New("task has no active status session")
+
+	// ErrWorkAlreadyStarted dikembalikan POST /tasks/:id/start-work saat
+	// sesi aktif task ini sudah punya `work_started_at` terisi.
+	ErrWorkAlreadyStarted = errors.New("work already started for the active status session")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id

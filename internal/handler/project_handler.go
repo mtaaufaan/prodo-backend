@@ -129,6 +129,33 @@ func (h *ProjectHandler) Update(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": projectID, "name": req.Name}))
 }
 
+type updateProjectSettingsRequest struct {
+	AllowEditorStoryPoints bool `json:"allow_editor_story_points"`
+}
+
+// UpdateSettings menangani PUT /projects/:id/settings (Task Management
+// Core Phase 4, US-018a/S4-56) -- gate sama seperti Update (PM/AW/org-access).
+func (h *ProjectHandler) UpdateSettings(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	var req updateProjectSettingsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if err := h.projects.SetAllowEditorStoryPoints(c.Context(), exec, projectID, req.AllowEditorStoryPoints, actorUserID, actorRole); err != nil {
+		return h.mapProjectError(c, err, "Gagal mengubah setting project")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": projectID, "allow_editor_story_points": req.AllowEditorStoryPoints}))
+}
+
 // Archive menangani PUT /projects/:id/archive (S4-03).
 func (h *ProjectHandler) Archive(c *fiber.Ctx) error {
 	return h.setArchived(c, true)

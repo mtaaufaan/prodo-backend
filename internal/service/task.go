@@ -1,7 +1,8 @@
 // Package service -- TaskService (Task Management Core Phase 1, US-014;
 // PIC Handoff Phase 2, US-017; completeness+dependency hard-block Phase 3,
-// US-017c/018). Story point/time tracking enforcement penuh masih Phase 4 --
-// lihat komentar migrasi 20260924090000_task_core_phase1.
+// US-017c/018; story point permission gate + status time tracking +
+// regression Phase 4, US-018a/018b/018c). Lihat komentar migrasi
+// 20260924090000_task_core_phase1.
 package service
 
 import (
@@ -48,9 +49,11 @@ type taskDependencyChecker interface {
 	NotifySuccessorPics(ctx context.Context, exec db.Executor, taskID string, unblocked bool) error
 }
 
-// taskProjectResolver -- reuse ProjectRepository.GetWorkspaceID.
+// taskProjectResolver -- reuse ProjectRepository.GetWorkspaceID +
+// GetAllowEditorStoryPoints (Phase 4, S4-56).
 type taskProjectResolver interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	GetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string) (bool, error)
 }
 
 // taskCustomStatuses -- reuse CustomStatusRepository.
@@ -59,18 +62,30 @@ type taskCustomStatuses interface {
 	Get(ctx context.Context, exec db.Executor, statusID string) (*repository.CustomStatus, error)
 }
 
+// taskStatusSessionRepository -- reuse TaskStatusSessionRepository (Phase
+// 4, US-018b/018c). Interface didefinisikan di consumer -- cuma method
+// yang dipakai TaskService.
+type taskStatusSessionRepository interface {
+	OpenSession(ctx context.Context, exec db.Executor, taskID, statusID string, isRegression bool, triggeredBy string) error
+	CloseActiveSession(ctx context.Context, exec db.Executor, taskID string) error
+	StartWork(ctx context.Context, exec db.Executor, taskID string) error
+	ListForTask(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskStatusSession, error)
+	NotifyRegression(ctx context.Context, exec db.Executor, taskID, projectID string) error
+}
+
 type TaskService struct {
 	repo         taskRepository
 	pics         taskPicRepository
 	deps         taskDependencyChecker
+	sessions     taskStatusSessionRepository
 	projects     taskProjectResolver
 	statuses     taskCustomStatuses
 	rbac         sprintWorkspaceRoleChecker
 	projectRoles sprintProjectRoleChecker
 }
 
-func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
-	return &TaskService{repo: repo, pics: pics, deps: deps, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
+func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, sessions taskStatusSessionRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
+	return &TaskService{repo: repo, pics: pics, deps: deps, sessions: sessions, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
 }
 
 // authorize -- identik SprintService.authorize (viewer/division_viewer
@@ -126,6 +141,25 @@ func validateStoryPoints(sp *int) error {
 		return fmt.Errorf("service.validateStoryPoints: %w", domain.ErrInvalidInput)
 	}
 	return nil
+}
+
+// canSetStoryPoints -- Phase 4 (US-018a/S4-56): "PM mengisi; Editor bisa
+// diizinkan via project setting". AW/GA/PA selalu boleh (super-role di atas
+// PM dalam hierarki workspace/org); Editor cuma boleh kalau project
+// mengizinkan (allow_editor_story_points); role lain (Approver/viewer)
+// tidak pernah boleh.
+func canSetStoryPoints(role string, allowEditorSP bool) bool {
+	if role == "" || role == "admin_workspace" || role == "project_manager" {
+		return true
+	}
+	return role == "editor" && allowEditorSP
+}
+
+func equalIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // Create -- desain "PM Add Task.dc.html": judul wajib, minimal satu
@@ -188,6 +222,11 @@ func (s *TaskService) List(ctx context.Context, exec db.Executor, projectID stri
 	return list, nil
 }
 
+// Update -- Phase 4 (S4-55/56): story_points digerbangi TERPISAH dari field
+// lain -- gate cuma aktif kalau NILAI benar-benar berubah dari yang
+// tersimpan (FE selalu mengirim story_points current di form edit, bukan
+// cuma saat sengaja diubah -- gate literal "field dikirim" akan salah
+// menolak edit judul/priority biasa untuk Editor tanpa izin SP).
 func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole string) error {
 	title = strings.TrimSpace(title)
 	if taskID == "" || len(title) < 3 {
@@ -200,12 +239,22 @@ func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, titl
 	if err := validateStoryPoints(storyPoints); err != nil {
 		return err
 	}
-	projectID, err := s.repo.GetProjectID(ctx, exec, taskID)
+	current, err := s.repo.Get(ctx, exec, taskID)
 	if err != nil {
 		return err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	role, err := s.resolveRole(ctx, exec, current.ProjectID, actorID, actorRole)
+	if err != nil {
 		return err
+	}
+	if !equalIntPtr(current.StoryPoints, storyPoints) {
+		allowEditorSP, err := s.projects.GetAllowEditorStoryPoints(ctx, exec, current.ProjectID)
+		if err != nil {
+			return fmt.Errorf("service.Update: %w", err)
+		}
+		if !canSetStoryPoints(role, allowEditorSP) {
+			return fmt.Errorf("service.Update: %w", domain.ErrStoryPointsNotAllowed)
+		}
 	}
 	if err := s.repo.Update(ctx, exec, taskID, title, description, priority, dueDate, estimatedHours, storyPoints, sprintID); err != nil {
 		return fmt.Errorf("service.Update: %w", err)
@@ -300,6 +349,12 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 		}
 	}
 
+	currentStatus, err := s.statuses.Get(ctx, exec, current.StatusID)
+	if err != nil {
+		return err
+	}
+	isRegression := status.Position < currentStatus.Position
+
 	if err := s.repo.SetStatus(ctx, exec, taskID, statusID, status.Name == "DONE"); err != nil {
 		return fmt.Errorf("service.SetStatus: %w", err)
 	}
@@ -312,6 +367,21 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 		}
 	}
 
+	// Phase 4 (S4-62/68): tutup sesi status lama (auto-fill work_started_at
+	// kalau belum diklik, S4-67), buka sesi baru untuk status tujuan, dan
+	// notify PM+AW kalau ini regresi (S4-68).
+	if err := s.sessions.CloseActiveSession(ctx, exec, taskID); err != nil {
+		return fmt.Errorf("service.SetStatus: %w", err)
+	}
+	if err := s.sessions.OpenSession(ctx, exec, taskID, statusID, isRegression, actorID); err != nil {
+		return fmt.Errorf("service.SetStatus: %w", err)
+	}
+	if isRegression {
+		if err := s.sessions.NotifyRegression(ctx, exec, taskID, projectID); err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+	}
+
 	wasDone := current.StatusName == "DONE"
 	isDone := status.Name == "DONE"
 	if isDone != wasDone {
@@ -320,6 +390,38 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 		}
 	}
 	return nil
+}
+
+// StartWork menangani POST /tasks/:id/start-work (Phase 4, US-018b/S4-63).
+func (s *TaskService) StartWork(ctx context.Context, exec db.Executor, taskID, actorID, actorRole string) error {
+	if taskID == "" {
+		return fmt.Errorf("service.StartWork: %w", domain.ErrInvalidInput)
+	}
+	projectID, err := s.repo.GetProjectID(ctx, exec, taskID)
+	if err != nil {
+		return err
+	}
+	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+		return err
+	}
+	if err := s.sessions.StartWork(ctx, exec, taskID); err != nil {
+		return fmt.Errorf("service.StartWork: %w", err)
+	}
+	return nil
+}
+
+// ListStatusSessions menangani GET /tasks/:id/status-sessions (Phase 4,
+// FE StatusTimeline S4-66 -- Queue/Active/Lead Time dihitung di klien dari
+// raw session rows).
+func (s *TaskService) ListStatusSessions(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskStatusSession, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("service.ListStatusSessions: %w", domain.ErrInvalidInput)
+	}
+	list, err := s.sessions.ListForTask(ctx, exec, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListStatusSessions: %w", err)
+	}
+	return list, nil
 }
 
 // SetCompleteness menangani PUT /tasks/:id/completeness (Phase 3, S4-44) --

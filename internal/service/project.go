@@ -24,6 +24,7 @@ type projectRepository interface {
 	SetArchived(ctx context.Context, exec db.Executor, projectID string, archive bool, actorID, actorRole string) error
 	SoftDelete(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	Restore(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
+	SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool) error
 }
 
 // projectWebhookDispatcher -- WebhookService.Dispatch (Track S4G), 3 dari 10
@@ -186,6 +187,22 @@ func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID
 		return fmt.Errorf("service.Update: %w", err)
 	}
 	s.dispatchWebhook(ctx, exec, workspaceID, "project.updated", map[string]any{"id": projectID, "name": name})
+	return nil
+}
+
+// SetAllowEditorStoryPoints -- PUT /projects/:id/settings (Task Management
+// Core Phase 4, US-018a/S4-56). Gate sama seperti Update (PM/AW/org-access) --
+// reuse s.authorize, tidak ada gate baru.
+func (s *ProjectService) SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool, actorID, actorRole string) error {
+	if projectID == "" {
+		return fmt.Errorf("service.SetAllowEditorStoryPoints: %w", domain.ErrInvalidInput)
+	}
+	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+		return err
+	}
+	if err := s.repo.SetAllowEditorStoryPoints(ctx, exec, projectID, allow); err != nil {
+		return fmt.Errorf("service.SetAllowEditorStoryPoints: %w", err)
+	}
 	return nil
 }
 

@@ -165,6 +165,19 @@ func (h *SprintHandler) Delete(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": c.Params("id")}))
 }
 
+// Summary menangani GET /sprints/:id/summary (Phase 4, US-018a/S4-59).
+func (h *SprintHandler) Summary(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	totalSP, unestimated, err := h.sprints.Summary(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil ringkasan sprint")
+	}
+	return c.JSON(response.Success(fiber.Map{"total_story_points": totalSP, "unestimated_count": unestimated}))
+}
+
 func sprintJSON(s *repository.Sprint) fiber.Map {
 	return fiber.Map{
 		"id": s.ID, "project_id": s.ProjectID, "name": s.Name,

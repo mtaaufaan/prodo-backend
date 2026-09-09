@@ -59,6 +59,32 @@ func (r *ProjectRepository) GetWorkspaceID(ctx context.Context, exec db.Executor
 	return workspaceID, nil
 }
 
+// GetAllowEditorStoryPoints -- Phase 4 (US-018a/S4-56): gate izin Editor
+// mengisi story point, dikonfigurasi per project (default FALSE, PM-only).
+func (r *ProjectRepository) GetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string) (bool, error) {
+	var allow bool
+	err := exec.QueryRow(ctx, `SELECT allow_editor_story_points FROM projects WHERE id = $1`, projectID).Scan(&allow)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("repository.GetAllowEditorStoryPoints: %w", domain.ErrProjectNotFound)
+		}
+		return false, fmt.Errorf("repository.GetAllowEditorStoryPoints: %w", err)
+	}
+	return allow, nil
+}
+
+// SetAllowEditorStoryPoints -- PUT /projects/:id/settings (Phase 4).
+func (r *ProjectRepository) SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool) error {
+	tag, err := exec.Exec(ctx, `UPDATE projects SET allow_editor_story_points = $2, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, projectID, allow)
+	if err != nil {
+		return fmt.Errorf("repository.SetAllowEditorStoryPoints: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.SetAllowEditorStoryPoints: %w", domain.ErrProjectNotFound)
+	}
+	return nil
+}
+
 // Create menyimpan project baru + audit trail (S4-02). code dan pm_user_id
 // wajib diisi CALLER (service) -- divalidasi di sana, bukan di sini.
 func (r *ProjectRepository) Create(ctx context.Context, exec db.Executor, workspaceID, name, code, pmUserID, actorID, actorRole string) (*Project, error) {
