@@ -201,6 +201,7 @@ func run() error {
 	customStatusRepo := repository.NewCustomStatusRepository()
 	sprintRepo := repository.NewSprintRepository()
 	taskRepo := repository.NewTaskRepository()
+	taskPicRepo := repository.NewTaskPicRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -220,7 +221,8 @@ func run() error {
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
-	taskSvc := service.NewTaskService(taskRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -266,7 +268,8 @@ func run() error {
 	groupAuditHandler := handler.NewGroupAuditHandler(groupAuditSvc, logger)
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
-	taskHandler := handler.NewTaskHandler(taskSvc, logger)
+	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, logger)
+	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
 	// S4P-37/38/39/40, US-084: Platform Admin kelola akun Platform Admin lain.
@@ -604,6 +607,13 @@ func run() error {
 	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
 	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
 	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
+
+	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
+	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
+	v1.Get("/tasks/:id/pic-history", jwtAuth, dbCtx, taskHandler.PicHistory)
+	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.List)
+	v1.Post("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.Add)
+	v1.Delete("/projects/:id/pic-groups/:statusId/:userId", jwtAuth, dbCtx, picGroupHandler.Remove)
 
 	serverErr := make(chan error, 1)
 	go func() {

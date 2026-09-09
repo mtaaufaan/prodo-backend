@@ -31,6 +31,14 @@ type taskRepository interface {
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
 }
 
+// taskPicRepository -- reuse TaskPicRepository (Phase 2). Interface
+// didefinisikan di consumer -- cuma method yang dipakai TaskService.SetStatus.
+type taskPicRepository interface {
+	DeactivateActiveForTask(ctx context.Context, exec db.Executor, taskID string) error
+	CreatePhase(ctx context.Context, exec db.Executor, taskID, statusID, userID string, assignedBy *string) error
+	ListGroupForStatus(ctx context.Context, exec db.Executor, projectID, statusID string) ([]repository.PicGroupMember, error)
+}
+
 // taskProjectResolver -- reuse ProjectRepository.GetWorkspaceID.
 type taskProjectResolver interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
@@ -44,14 +52,15 @@ type taskCustomStatuses interface {
 
 type TaskService struct {
 	repo         taskRepository
+	pics         taskPicRepository
 	projects     taskProjectResolver
 	statuses     taskCustomStatuses
 	rbac         sprintWorkspaceRoleChecker
 	projectRoles sprintProjectRoleChecker
 }
 
-func NewTaskService(repo taskRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
-	return &TaskService{repo: repo, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
+func NewTaskService(repo taskRepository, pics taskPicRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
+	return &TaskService{repo: repo, pics: pics, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
 }
 
 // authorize -- identik SprintService.authorize (viewer/division_viewer
@@ -59,27 +68,36 @@ func NewTaskService(repo taskRepository, projects taskProjectResolver, statuses 
 // ProjectMemberService yang masing-masing punya authorize sendiri, bukan
 // satu helper lintas-service untuk satu pengecekan sederhana.
 func (s *TaskService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error {
+	_, err := s.resolveRole(ctx, exec, projectID, actorID, actorRole)
+	return err
+}
+
+// resolveRole -- role project_scoped_role/workspace_role aktor di project
+// ini ("" untuk PA/GA -- Full mode selalu, tidak perlu role spesifik).
+// Dipakai authorize() DAN SetStatus (Phase 2: PIC Handoff Bebas vs Terbatas
+// -- glossary "Editor/Approver TIDAK bisa pilih PIC bebas").
+func (s *TaskService) resolveRole(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (string, error) {
 	if actorRole == "platform_admin" || actorRole == "group_admin" {
-		return nil
+		return "", nil
 	}
 	if role, found, err := s.projectRoles.GetRole(ctx, exec, projectID, actorID); err == nil && found {
 		if role == "viewer" {
-			return fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
+			return "", fmt.Errorf("service.resolveRole: %w", domain.ErrForbidden)
 		}
-		return nil
+		return role, nil
 	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
 	if err != nil {
-		return fmt.Errorf("service.authorize: %w", err)
+		return "", fmt.Errorf("service.resolveRole: %w", err)
 	}
 	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
 	if err != nil {
-		return fmt.Errorf("service.authorize: %w", err)
+		return "", fmt.Errorf("service.resolveRole: %w", err)
 	}
 	if role == "viewer" || role == "division_viewer" {
-		return fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
+		return "", fmt.Errorf("service.resolveRole: %w", domain.ErrForbidden)
 	}
-	return nil
+	return role, nil
 }
 
 func validatePriority(priority string) (string, error) {
@@ -185,18 +203,32 @@ func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, titl
 	return nil
 }
 
-// SetStatus -- Phase 1: ganti status dasar TANPA PIC Handoff wajib
-// (Phase 2) atau cek dependency hard-block (Phase 3). Status ber-mode
-// UNDEFINED tidak bisa dipilih (sama aturan desain "PM Add Task.dc.html").
-func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID, actorID, actorRole string) error {
+// isFullPicMode -- glossary "Phase PIC Handoff": AW/PM/GA/PA = Bebas
+// (pilih siapa saja); Editor/Approver = Terbatas KECUALI PIC Group untuk
+// status ini kosong (fallback ke Bebas, §5.34).
+func isFullPicMode(role string) bool {
+	return role == "" || role == "admin_workspace" || role == "project_manager"
+}
+
+// SetStatus -- Phase 2 (S4-31/32): WAJIB pilih PIC baru tiap ganti status
+// (AC Bruno: "PUT tanpa pic_ids -> 422 pic_required"). PIC lama (kalau ada)
+// dinonaktifkan, PIC baru dibuat fase PENDING (belum acknowledge). Editor/
+// Approver dibatasi ke PIC Group status tujuan (fallback Bebas kalau
+// kosong) -- PM/AW/GA/PA selalu Bebas. Status ber-mode UNDEFINED tidak
+// bisa dipilih (sama aturan desain "PM Add Task.dc.html").
+func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string) error {
 	if taskID == "" || statusID == "" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrInvalidInput)
+	}
+	if len(picIDs) == 0 {
+		return fmt.Errorf("service.SetStatus: %w", domain.ErrPicRequired)
 	}
 	projectID, err := s.repo.GetProjectID(ctx, exec, taskID)
 	if err != nil {
 		return err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	role, err := s.resolveRole(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return err
 	}
 	status, err := s.statuses.Get(ctx, exec, statusID)
@@ -206,8 +238,35 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 	if status.IsUndefined {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskStatusUndefined)
 	}
+
+	if !isFullPicMode(role) {
+		group, err := s.pics.ListGroupForStatus(ctx, exec, projectID, statusID)
+		if err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+		if len(group) > 0 {
+			allowed := make(map[string]bool, len(group))
+			for _, m := range group {
+				allowed[m.UserID] = true
+			}
+			for _, picID := range picIDs {
+				if !allowed[picID] {
+					return fmt.Errorf("service.SetStatus: %w", domain.ErrPicNotInGroup)
+				}
+			}
+		}
+	}
+
 	if err := s.repo.SetStatus(ctx, exec, taskID, statusID, status.Name == "DONE"); err != nil {
 		return fmt.Errorf("service.SetStatus: %w", err)
+	}
+	if err := s.pics.DeactivateActiveForTask(ctx, exec, taskID); err != nil {
+		return fmt.Errorf("service.SetStatus: %w", err)
+	}
+	for _, picID := range picIDs {
+		if err := s.pics.CreatePhase(ctx, exec, taskID, statusID, picID, &actorID); err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
 	}
 	return nil
 }

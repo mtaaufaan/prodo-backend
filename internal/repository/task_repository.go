@@ -110,6 +110,16 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 		}
 	}
 
+	// Task Management Core Phase 2 (S4-30): pembuat task otomatis menjadi
+	// PIC fase awal (BACKLOG) -- INSERT langsung (bukan lewat
+	// TaskPicRepository, sama package, hindari repo-panggil-repo).
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO task_pic_phases (task_id, status_id, user_id, assigned_by)
+		VALUES ($1, $2, $3, $3)
+	`, id, statusID, createdBy); err != nil {
+		return nil, fmt.Errorf("repository.Create: pic fase awal: %w", err)
+	}
+
 	return r.Get(ctx, exec, id)
 }
 
