@@ -1,7 +1,7 @@
 // Package repository -- TaskRepository (Task Management Core Phase 1,
-// US-014). PIC Handoff (task_pic_phases), dependencies, dan story-point/
-// time-tracking enforcement adalah Phase 2-4 terpisah -- lihat komentar
-// migrasi 20260924090000_task_core_phase1.
+// US-014; completeness+is_blocked Phase 3, US-017c/018). Story-point/
+// time-tracking enforcement penuh masih Phase 4 -- lihat komentar migrasi
+// 20260924090000_task_core_phase1.
 package repository
 
 import (
@@ -38,6 +38,7 @@ type Task struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	CompletedAt    *time.Time
+	IsBlocked      bool
 	Assignees      []TaskAssignee
 }
 
@@ -123,17 +124,30 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 	return r.Get(ctx, exec, id)
 }
 
+// isBlockedSubquery -- Phase 3 (US-018/S4-53): task terblokir kalau ada
+// predecessor yang BELUM DONE. Subquery ter-index (idx_task_dependencies_successor),
+// dievaluasi native di DB -- bukan N+1 query per task dari Go.
+const isBlockedSubquery = `
+	EXISTS (
+		SELECT 1 FROM task_dependencies td
+		JOIN tasks tp ON tp.id = td.predecessor_id
+		JOIN custom_statuses cs_p ON cs_p.id = tp.status_id
+		WHERE td.successor_id = t.id AND cs_p.name != 'DONE'
+	)
+`
+
 const taskSelectColumns = `
 	t.id, t.project_id, t.sprint_id, s.name, t.parent_task_id, t.status_id, cs.name, cs.color_token,
 	t.title, t.description, t.priority, t.completeness, t.due_date, t.estimated_hours, t.story_points,
-	t.task_code, t.created_by, t.created_at, t.updated_at, t.completed_at
+	t.task_code, t.created_by, t.created_at, t.updated_at, t.completed_at, ` + isBlockedSubquery + `
+
 `
 
 func scanTask(row interface{ Scan(dest ...any) error }) (*Task, error) {
 	var t Task
 	if err := row.Scan(&t.ID, &t.ProjectID, &t.SprintID, &t.SprintName, &t.ParentTaskID, &t.StatusID, &t.StatusName, &t.StatusColor,
 		&t.Title, &t.Description, &t.Priority, &t.Completeness, &t.DueDate, &t.EstimatedHours, &t.StoryPoints,
-		&t.TaskCode, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt); err != nil {
+		&t.TaskCode, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.IsBlocked); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -311,6 +325,23 @@ func (r *TaskRepository) SetStatus(ctx context.Context, exec db.Executor, taskID
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SetStatus: %w", domain.ErrTaskNotFound)
+	}
+	return nil
+}
+
+// SetCompleteness -- Phase 3 (US-017c, S4-44): toggle "Lengkap/Belum
+// Lengkap", dipanggil setelah service memverifikasi actor = pembuat task
+// atau PIC aktif.
+func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE tasks SET completeness = $2, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL
+	`, taskID, completeness)
+	if err != nil {
+		return fmt.Errorf("repository.SetCompleteness: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.SetCompleteness: %w", domain.ErrTaskNotFound)
 	}
 	return nil
 }

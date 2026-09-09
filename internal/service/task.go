@@ -1,8 +1,7 @@
-// Package service -- TaskService (Task Management Core Phase 1, US-014).
-// PIC Handoff, task dependencies (hard-block), dan enforcement story point/
-// time tracking penuh adalah Phase 2-4 terpisah -- lihat komentar migrasi
-// 20260924090000_task_core_phase1. SetStatus di sini CUMA ganti status
-// dasar, TANPA PIC Handoff wajib (Phase 2) atau cek dependency (Phase 3).
+// Package service -- TaskService (Task Management Core Phase 1, US-014;
+// PIC Handoff Phase 2, US-017; completeness+dependency hard-block Phase 3,
+// US-017c/018). Story point/time tracking enforcement penuh masih Phase 4 --
+// lihat komentar migrasi 20260924090000_task_core_phase1.
 package service
 
 import (
@@ -27,16 +26,26 @@ type taskRepository interface {
 	List(ctx context.Context, exec db.Executor, projectID string, f repository.TaskFilter) ([]repository.Task, error)
 	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string) error
 	SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool) error
+	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness string) error
 	SoftDelete(ctx context.Context, exec db.Executor, taskID string) error
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
 }
 
 // taskPicRepository -- reuse TaskPicRepository (Phase 2). Interface
-// didefinisikan di consumer -- cuma method yang dipakai TaskService.SetStatus.
+// didefinisikan di consumer -- cuma method yang dipakai TaskService.
 type taskPicRepository interface {
 	DeactivateActiveForTask(ctx context.Context, exec db.Executor, taskID string) error
 	CreatePhase(ctx context.Context, exec db.Executor, taskID, statusID, userID string, assignedBy *string) error
 	ListGroupForStatus(ctx context.Context, exec db.Executor, projectID, statusID string) ([]repository.PicGroupMember, error)
+	IsActivePic(ctx context.Context, exec db.Executor, taskID, userID string) (bool, error)
+}
+
+// taskDependencyChecker -- reuse TaskDependencyRepository (Phase 3).
+// Interface didefinisikan di consumer -- cuma method yang dipakai
+// TaskService.SetStatus (HARD-BLOCK + notify successor PIC, S4-48/50).
+type taskDependencyChecker interface {
+	ListIncompletePredecessors(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskDependency, error)
+	NotifySuccessorPics(ctx context.Context, exec db.Executor, taskID string, unblocked bool) error
 }
 
 // taskProjectResolver -- reuse ProjectRepository.GetWorkspaceID.
@@ -53,14 +62,15 @@ type taskCustomStatuses interface {
 type TaskService struct {
 	repo         taskRepository
 	pics         taskPicRepository
+	deps         taskDependencyChecker
 	projects     taskProjectResolver
 	statuses     taskCustomStatuses
 	rbac         sprintWorkspaceRoleChecker
 	projectRoles sprintProjectRoleChecker
 }
 
-func NewTaskService(repo taskRepository, pics taskPicRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
-	return &TaskService{repo: repo, pics: pics, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
+func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
+	return &TaskService{repo: repo, pics: pics, deps: deps, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
 }
 
 // authorize -- identik SprintService.authorize (viewer/division_viewer
@@ -216,6 +226,13 @@ func isFullPicMode(role string) bool {
 // Approver dibatasi ke PIC Group status tujuan (fallback Bebas kalau
 // kosong) -- PM/AW/GA/PA selalu Bebas. Status ber-mode UNDEFINED tidak
 // bisa dipilih (sama aturan desain "PM Add Task.dc.html").
+//
+// Phase 3 (S4-43/48/50): DUA guard tambahan sebelum status benar-benar
+// berubah -- (1) completeness: task BACKLOG dengan completeness=incomplete
+// tidak boleh pindah KECUALI ke BLOCKED; (2) dependency HARD-BLOCK: task
+// dengan predecessor yang belum DONE tidak boleh pindah ke status apa pun
+// KECUALI BACKLOG/BLOCKED. Setelah status berubah, successor LANGSUNG
+// task ini diberi tahu kalau task ini baru masuk/keluar DONE (S4-50).
 func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string) error {
 	if taskID == "" || statusID == "" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrInvalidInput)
@@ -237,6 +254,32 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 	}
 	if status.IsUndefined {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskStatusUndefined)
+	}
+
+	current, err := s.repo.Get(ctx, exec, taskID)
+	if err != nil {
+		return err
+	}
+	if current.StatusName == "BACKLOG" && current.Completeness != nil && *current.Completeness == "incomplete" && status.Name != "BLOCKED" {
+		return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskIncomplete)
+	}
+	if status.Name != "BACKLOG" && status.Name != "BLOCKED" {
+		blocking, err := s.deps.ListIncompletePredecessors(ctx, exec, taskID)
+		if err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+		if len(blocking) > 0 {
+			tasks := make([]domain.BlockingTaskInfo, len(blocking))
+			for i := range blocking {
+				b := &blocking[i]
+				if b.PredecessorCode == nil {
+					tasks[i] = domain.BlockingTaskInfo{TaskCode: b.PredecessorTitle, Title: b.PredecessorTitle}
+				} else {
+					tasks[i] = domain.BlockingTaskInfo{TaskCode: *b.PredecessorCode, Title: b.PredecessorTitle}
+				}
+			}
+			return fmt.Errorf("service.SetStatus: %w", &domain.PredecessorBlockingError{BlockingTasks: tasks})
+		}
 	}
 
 	if !isFullPicMode(role) {
@@ -267,6 +310,39 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 		if err := s.pics.CreatePhase(ctx, exec, taskID, statusID, picID, &actorID); err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
 		}
+	}
+
+	wasDone := current.StatusName == "DONE"
+	isDone := status.Name == "DONE"
+	if isDone != wasDone {
+		if err := s.deps.NotifySuccessorPics(ctx, exec, taskID, isDone); err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetCompleteness menangani PUT /tasks/:id/completeness (Phase 3, S4-44) --
+// hanya pembuat task ATAU PIC aktif yang boleh mengubah flag ini.
+func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID string) error {
+	if taskID == "" || (completeness != "complete" && completeness != "incomplete") {
+		return fmt.Errorf("service.SetCompleteness: %w", domain.ErrCompletenessInvalid)
+	}
+	task, err := s.repo.Get(ctx, exec, taskID)
+	if err != nil {
+		return err
+	}
+	if task.CreatedBy != actorID {
+		isPic, err := s.pics.IsActivePic(ctx, exec, taskID, actorID)
+		if err != nil {
+			return fmt.Errorf("service.SetCompleteness: %w", err)
+		}
+		if !isPic {
+			return fmt.Errorf("service.SetCompleteness: %w", domain.ErrForbidden)
+		}
+	}
+	if err := s.repo.SetCompleteness(ctx, exec, taskID, completeness); err != nil {
+		return fmt.Errorf("service.SetCompleteness: %w", err)
 	}
 	return nil
 }
