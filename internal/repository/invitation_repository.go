@@ -81,13 +81,22 @@ func (r *InvitationRepository) CreateExecutiveInvitation(
 		return "", fmt.Errorf("repository.CreateExecutiveInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
 
-	if _, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
-		VALUES ($1, 'invitation.created', 'user_invitation', $2, jsonb_build_object('group_id', $3::uuid, 'is_executive_invite', true))
-	`, invitedByUserID, id, groupID); err != nil {
-		return "", fmt.Errorf("repository.CreateExecutiveInvitation: audit: %w", err)
+	if err := insertExecutiveInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, groupID); err != nil {
+		return "", fmt.Errorf("repository.CreateExecutiveInvitation: %w", err)
 	}
 	return id, nil
+}
+
+// insertExecutiveInvitationAudit -- undangan Eksekutif tidak punya
+// workspace_id (kolom audit_logs yang dipakai insertInvitationAudit),
+// entitas ini milik GRUP -- group_id disimpan di metadata, pola sama
+// insertGroupAudit (repository/group_repository.go).
+func insertExecutiveInvitationAudit(ctx context.Context, exec db.Executor, actorID, action, invitationID, groupID string) error {
+	_, err := exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
+		VALUES ($1, $2, 'user_invitation', $3, jsonb_build_object('group_id', $4::uuid, 'is_executive_invite', true))
+	`, actorID, action, invitationID, groupID)
+	return err
 }
 
 // InvitationTarget -- undangan PENDING yang cocok dengan hash token
@@ -103,6 +112,12 @@ type InvitationTarget struct {
 	Role              string
 	GroupID           string
 	IsExecutiveInvite bool
+	// DisplayName/Title -- pre-filled lewat "Kelola" GA SEBELUM aktivasi
+	// (Eksekutif saja, migrasi 20261010090000), "" kalau belum diisi.
+	// Halaman aktivasi memakainya sebagai default form yang tetap bisa
+	// diedit invitee.
+	DisplayName string
+	Title       string
 }
 
 // FindPendingByTokenHash mencari undangan pending berdasarkan hash token.
@@ -115,13 +130,14 @@ func (r *InvitationRepository) FindPendingByTokenHash(ctx context.Context, exec 
 	t := &InvitationTarget{}
 	err := exec.QueryRow(ctx, `
 		SELECT id, email, COALESCE(workspace_id::text, ''), COALESCE(role::text, ''),
-		       COALESCE(group_id::text, ''), is_executive_invite
+		       COALESCE(group_id::text, ''), is_executive_invite,
+		       COALESCE(display_name, ''), COALESCE(title, '')
 		FROM user_invitations
 		WHERE token_hash = $1
 		  AND accepted_at IS NULL
 		  AND cancelled_at IS NULL
 		  AND expires_at > NOW()
-	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite)
+	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite, &t.DisplayName, &t.Title)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.FindPendingByTokenHash: %w", domain.ErrInvitationNotFound)
@@ -140,13 +156,13 @@ func (r *InvitationRepository) FindPendingByTokenHash(ctx context.Context, exec 
 func (r *InvitationRepository) AcceptInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	invitationID, email, displayName, keycloakUserID, workspaceID, role string,
+	invitationID, email, displayName, title, keycloakUserID, workspaceID, role string,
 ) (userID string, err error) {
 	err = exec.QueryRow(ctx, `
-		INSERT INTO users (email, display_name, platform_role, is_active)
-		VALUES ($1, $2, 'member', TRUE)
+		INSERT INTO users (email, display_name, title, platform_role, is_active)
+		VALUES ($1, $2, NULLIF($3, ''), 'member', TRUE)
 		RETURNING id
-	`, email, displayName).Scan(&userID)
+	`, email, displayName, title).Scan(&userID)
 	if err != nil {
 		return "", fmt.Errorf("repository.AcceptInvitation: insert users: %w", classifyUniqueViolation(err, domain.ErrEmailAlreadyExists))
 	}
@@ -179,19 +195,22 @@ func (r *InvitationRepository) AcceptInvitation(
 
 // AcceptExecutiveInvitation -- varian AcceptInvitation untuk undangan
 // Eksekutif murni: users + user_auth_providers sama persis, tapi baris
-// keanggotaan masuk ke executive_assignments (bukan workspace_members),
-// title kosong (diisi belakangan lewat panel Kelola Member, bukan saat
-// aktivasi).
+// keanggotaan masuk ke executive_assignments (bukan workspace_members).
+// title BOLEH sudah terisi dari sini (GA mengisikannya lewat "Kelola"
+// SEBELUM aktivasi, migrasi 20261010090000) atau baru diisi belakangan
+// lewat panel Kelola Member seperti semula -- keduanya valid, form
+// aktivasi mengirim apa pun yang tersisa di field Jabatan (pre-filled
+// atau diedit invitee).
 func (r *InvitationRepository) AcceptExecutiveInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	invitationID, email, displayName, keycloakUserID, groupID string,
+	invitationID, email, displayName, title, keycloakUserID, groupID string,
 ) (userID string, err error) {
 	err = exec.QueryRow(ctx, `
-		INSERT INTO users (email, display_name, platform_role, is_active)
-		VALUES ($1, $2, 'executive', TRUE)
+		INSERT INTO users (email, display_name, title, platform_role, is_active)
+		VALUES ($1, $2, NULLIF($3, ''), 'executive', TRUE)
 		RETURNING id
-	`, email, displayName).Scan(&userID)
+	`, email, displayName, title).Scan(&userID)
 	if err != nil {
 		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: insert users: %w", classifyUniqueViolation(err, domain.ErrEmailAlreadyExists))
 	}
@@ -216,11 +235,8 @@ func (r *InvitationRepository) AcceptExecutiveInvitation(
 		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: update accepted_at: %w", err)
 	}
 
-	if _, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
-		VALUES ($1, 'invitation.accepted', 'user_invitation', $2, jsonb_build_object('group_id', $3::uuid, 'is_executive_invite', true))
-	`, userID, invitationID, groupID); err != nil {
-		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: audit: %w", err)
+	if err := insertExecutiveInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, groupID); err != nil {
+		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: %w", err)
 	}
 	return userID, nil
 }
@@ -274,6 +290,65 @@ func (r *InvitationRepository) Resend(ctx context.Context, exec db.Executor, wor
 		return nil, fmt.Errorf("repository.Resend: %w", err)
 	}
 	return t, nil
+}
+
+// CancelExecutive -- varian Cancel untuk undangan Eksekutif: scope group_id
+// (bukan workspace_id, undangan ini tidak punya workspace sama sekali).
+func (r *InvitationRepository) CancelExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE user_invitations SET cancelled_at = NOW()
+		WHERE id = $1 AND group_id = $2 AND is_executive_invite = TRUE AND accepted_at IS NULL AND cancelled_at IS NULL
+	`, invitationID, groupID)
+	if err != nil {
+		return fmt.Errorf("repository.CancelExecutive: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.CancelExecutive: %w", domain.ErrInvitationNotFound)
+	}
+	if err := insertExecutiveInvitationAudit(ctx, exec, actorID, "invitation.cancelled", invitationID, groupID); err != nil {
+		return fmt.Errorf("repository.CancelExecutive: %w", err)
+	}
+	return nil
+}
+
+// ResendExecutive -- varian Resend untuk undangan Eksekutif, scope group_id.
+func (r *InvitationRepository) ResendExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, newTokenHash string, newExpiresAt time.Time) (email string, err error) {
+	err = exec.QueryRow(ctx, `
+		UPDATE user_invitations
+		SET token_hash = $1, expires_at = $2
+		WHERE id = $3 AND group_id = $4 AND is_executive_invite = TRUE AND accepted_at IS NULL AND cancelled_at IS NULL
+		RETURNING email
+	`, newTokenHash, newExpiresAt, invitationID, groupID).Scan(&email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.ResendExecutive: %w", domain.ErrInvitationNotFound)
+		}
+		return "", fmt.Errorf("repository.ResendExecutive: %w", err)
+	}
+	return email, nil
+}
+
+// UpdateExecutiveIdentity -- GA mengisikan Nama/Jabatan atas nama Eksekutif
+// SEBELUM aktivasi (migrasi 20261010090000, permintaan user 2026-09-10 --
+// tidak realistis meminta Direksi mengisi sendiri sebelum akun aktif).
+// Kosong disimpan NULL (opsional, sama pola field lain). Nilainya dipakai
+// FE aktivasi sebagai default form yang tetap bisa diedit invitee (lihat
+// InvitationService.PreviewInvitation).
+func (r *InvitationRepository) UpdateExecutiveIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, displayName, title string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE user_invitations SET display_name = NULLIF($1, ''), title = NULLIF($2, '')
+		WHERE id = $3 AND group_id = $4 AND is_executive_invite = TRUE AND accepted_at IS NULL AND cancelled_at IS NULL
+	`, displayName, title, invitationID, groupID)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", domain.ErrInvitationNotFound)
+	}
+	if err := insertExecutiveInvitationAudit(ctx, exec, actorID, "invitation.identity_updated", invitationID, groupID); err != nil {
+		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", err)
+	}
+	return nil
 }
 
 // PendingInvitation -- satu baris hasil ListPending.
@@ -330,6 +405,11 @@ type GroupPendingInvite struct {
 	IsExecutive   bool
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
+	// DisplayName/Title -- pre-filled lewat "Kelola" (Eksekutif saja,
+	// migrasi 20261010090000), "" untuk undangan workspace biasa/yang
+	// belum diisi.
+	DisplayName string
+	Title       string
 }
 
 // ListPendingForGroup mengembalikan seluruh undangan pending lintas semua
@@ -364,7 +444,7 @@ func (r *InvitationRepository) ListPendingForGroup(ctx context.Context, exec db.
 	rows.Close()
 
 	execRows, err := exec.Query(ctx, `
-		SELECT id, email, created_at, expires_at
+		SELECT id, email, created_at, expires_at, COALESCE(display_name, ''), COALESCE(title, '')
 		FROM user_invitations
 		WHERE group_id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL AND is_executive_invite = TRUE
 		ORDER BY created_at DESC
@@ -375,7 +455,7 @@ func (r *InvitationRepository) ListPendingForGroup(ctx context.Context, exec db.
 	defer execRows.Close()
 	for execRows.Next() {
 		var p GroupPendingInvite
-		if err := execRows.Scan(&p.ID, &p.Email, &p.CreatedAt, &p.ExpiresAt); err != nil {
+		if err := execRows.Scan(&p.ID, &p.Email, &p.CreatedAt, &p.ExpiresAt, &p.DisplayName, &p.Title); err != nil {
 			return nil, fmt.Errorf("repository.ListPendingForGroup: scan executive invite: %w", err)
 		}
 		p.IsExecutive = true

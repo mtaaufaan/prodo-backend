@@ -83,11 +83,11 @@ func (r *stubInvitationRepo) FindPendingByTokenHash(_ context.Context, _ db.Exec
 	return r.findPendingResult, r.findPendingErr
 }
 
-func (r *stubInvitationRepo) AcceptInvitation(_ context.Context, _ db.Executor, _, _, _, _, _, _ string) (string, error) {
+func (r *stubInvitationRepo) AcceptInvitation(_ context.Context, _ db.Executor, _, _, _, _, _, _, _ string) (string, error) {
 	return r.acceptedUserID, r.acceptErr
 }
 
-func (r *stubInvitationRepo) AcceptExecutiveInvitation(_ context.Context, _ db.Executor, _, _, _, _, _ string) (string, error) {
+func (r *stubInvitationRepo) AcceptExecutiveInvitation(_ context.Context, _ db.Executor, _, _, _, _, _, _ string) (string, error) {
 	return r.acceptedUserID, r.acceptErr
 }
 
@@ -97,6 +97,24 @@ func (r *stubInvitationRepo) Cancel(_ context.Context, _ db.Executor, _, _, _ st
 
 func (r *stubInvitationRepo) Resend(_ context.Context, _ db.Executor, _, _, _ string, _ time.Time) (*repository.ResendTarget, error) {
 	return r.resendResult, r.resendErr
+}
+
+func (r *stubInvitationRepo) CancelExecutive(_ context.Context, _ db.Executor, _, _, _ string) error {
+	return r.cancelErr
+}
+
+func (r *stubInvitationRepo) ResendExecutive(_ context.Context, _ db.Executor, _, _, _ string, _ time.Time) (string, error) {
+	if r.resendErr != nil {
+		return "", r.resendErr
+	}
+	if r.resendResult != nil {
+		return r.resendResult.Email, nil
+	}
+	return "", nil
+}
+
+func (r *stubInvitationRepo) UpdateExecutiveIdentity(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
+	return nil
 }
 
 func (r *stubInvitationRepo) GetWorkspaceName(_ context.Context, _ db.Executor, _ string) (string, error) {
@@ -330,7 +348,7 @@ func TestInvitationService_AcceptInvitation_Success(t *testing.T) {
 	}
 	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{userID: "kc-sub-1"}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
 
-	result, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "Password123!")
+	result, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -343,7 +361,7 @@ func TestInvitationService_AcceptInvitation_TokenNotFound(t *testing.T) {
 	repo := &stubInvitationRepo{findPendingErr: fmt.Errorf("repository.FindPendingByTokenHash: %w", domain.ErrInvitationNotFound)}
 	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
 
-	_, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "Password123!")
+	_, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
 		t.Errorf("err = %v, want domain.ErrInvitationNotFound", err)
 	}
@@ -353,7 +371,7 @@ func TestInvitationService_AcceptInvitation_DisplayNameTooShort(t *testing.T) {
 	repo := &stubInvitationRepo{findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "a@x.com", WorkspaceID: "ws-1", Role: "editor"}}
 	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
 
-	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "A", "Password123!"); !errors.Is(err, domain.ErrInvalidInput) {
+	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "A", "", "Password123!"); !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
 	}
 }
@@ -362,7 +380,7 @@ func TestInvitationService_AcceptInvitation_KeycloakError_Propagates(t *testing.
 	repo := &stubInvitationRepo{findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "a@x.com", WorkspaceID: "ws-1", Role: "editor"}}
 	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{err: errors.New("keycloak down")}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
 
-	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "Password123!"); err == nil {
+	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!"); err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
 }
