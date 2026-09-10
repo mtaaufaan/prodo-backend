@@ -111,6 +111,7 @@ func (h *InvitationHandler) CreateInvitations(c *fiber.Ctx) error {
 type acceptInvitationRequest struct {
 	Token       string `json:"token"`
 	DisplayName string `json:"display_name"`
+	Title       string `json:"title"`
 	Password    string `json:"password"`
 }
 
@@ -139,7 +140,7 @@ func (h *InvitationHandler) AcceptInvitation(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 
-	result, err := h.invitations.AcceptInvitation(c.Context(), tx, req.Token, req.DisplayName, req.Password)
+	result, err := h.invitations.AcceptInvitation(c.Context(), tx, req.Token, req.DisplayName, req.Title, req.Password)
 	if err != nil {
 		tx.Rollback(c.Context()) //nolint:errcheck // request sudah gagal, rollback best-effort
 		switch {
@@ -166,6 +167,42 @@ func (h *InvitationHandler) AcceptInvitation(c *fiber.Ctx) error {
 		"email":        result.Email,
 		"workspace_id": result.WorkspaceID,
 		"role":         result.Role,
+	}))
+}
+
+// PreviewInvitation menangani GET /invitations/preview?token= (`[PUBLIC]`,
+// permintaan user 2026-09-10) -- dibaca halaman aktivasi SEBELUM submit,
+// supaya tahu apakah ini undangan Eksekutif (copy beda) dan bisa
+// pre-fill Nama/Jabatan kalau GA sudah mengisikannya lewat "Kelola".
+// Read-only, transaksi selalu di-rollback (sama pola AcceptInvitation
+// soal konteks RLS khusus rute publik, tapi tidak pernah commit di sini).
+func (h *InvitationHandler) PreviewInvitation(c *fiber.Ctx) error {
+	token := c.Query("token")
+	if token == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "token wajib diisi", nil))
+	}
+
+	tx, err := db.SetRLSContext(c.Context(), h.pool, "", "platform_admin")
+	if err != nil {
+		h.logger.Error("gagal menyiapkan transaksi preview invitation", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	defer tx.Rollback(c.Context()) //nolint:errcheck // read-only, selalu rollback
+
+	preview, err := h.invitations.PreviewInvitation(c.Context(), tx, token)
+	if err != nil {
+		if errors.Is(err, domain.ErrInvitationNotFound) {
+			return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_OR_EXPIRED_TOKEN",
+				"Link undangan tidak valid, sudah kedaluwarsa, atau sudah dipakai.", nil))
+		}
+		h.logger.Error("gagal memproses preview invitation", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses undangan", nil))
+	}
+
+	return c.JSON(response.Success(fiber.Map{
+		"is_executive": preview.IsExecutiveInvite,
+		"display_name": preview.DisplayName,
+		"title":        preview.Title,
 	}))
 }
 
