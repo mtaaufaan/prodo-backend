@@ -31,10 +31,13 @@ type invitationRepository interface {
 	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*repository.InvitationTarget, error)
-	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, keycloakUserID, workspaceID, role string) (string, error)
-	AcceptExecutiveInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, keycloakUserID, groupID string) (string, error)
+	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, workspaceID, role string) (string, error)
+	AcceptExecutiveInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, groupID string) (string, error)
 	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error
 	Resend(ctx context.Context, exec db.Executor, workspaceID, invitationID, newTokenHash string, newExpiresAt time.Time) (*repository.ResendTarget, error)
+	CancelExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error
+	ResendExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, newTokenHash string, newExpiresAt time.Time) (string, error)
+	UpdateExecutiveIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, displayName, title string) error
 	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 	ListPending(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.PendingInvitation, error)
 }
@@ -297,7 +300,7 @@ type AcceptedInvitation struct {
 // Alur SSO ("auto-activate") BELUM diimplementasikan -- organizations.
 // sso_enabled ada di skema tapi belum ada satupun organisasi yang benar-benar
 // mengaktifkannya (SSO config UI/backend belum dibangun, US-074/S12).
-func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Executor, rawToken, displayName, password string) (*AcceptedInvitation, error) {
+func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Executor, rawToken, displayName, title, password string) (*AcceptedInvitation, error) {
 	if len(displayName) < 2 {
 		return nil, fmt.Errorf("service.AcceptInvitation: %w", domain.ErrInvalidInput)
 	}
@@ -322,7 +325,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 	}
 
 	if target.IsExecutiveInvite {
-		userID, err := s.repo.AcceptExecutiveInvitation(ctx, exec, target.ID, target.Email, displayName, kcUserID, target.GroupID)
+		userID, err := s.repo.AcceptExecutiveInvitation(ctx, exec, target.ID, target.Email, displayName, title, kcUserID, target.GroupID)
 		if err != nil {
 			s.logger.Error("user Keycloak berhasil dibuat tapi gagal simpan PRODO (undangan eksekutif) -- kemungkinan orphan, perlu cleanup manual",
 				zap.String("email", target.Email),
@@ -334,7 +337,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 		return &AcceptedInvitation{UserID: userID, Email: target.Email}, nil
 	}
 
-	userID, err := s.repo.AcceptInvitation(ctx, exec, target.ID, target.Email, displayName, kcUserID, target.WorkspaceID, target.Role)
+	userID, err := s.repo.AcceptInvitation(ctx, exec, target.ID, target.Email, displayName, title, kcUserID, target.WorkspaceID, target.Role)
 	if err != nil {
 		s.logger.Error("user Keycloak berhasil dibuat tapi gagal simpan PRODO -- kemungkinan orphan, perlu cleanup manual",
 			zap.String("email", target.Email),
@@ -375,6 +378,68 @@ func (s *InvitationService) ResendInvitation(ctx context.Context, exec db.Execut
 	acceptLink := fmt.Sprintf("%s/invitations/accept?token=%s", s.appBaseURL, rawToken)
 	if err := s.emailer.SendWorkspaceInvitationEmail(ctx, target.Email, workspaceName, inviterName, target.Role, acceptLink, expiresAt); err != nil {
 		return fmt.Errorf("service.ResendInvitation: %w", err)
+	}
+	return nil
+}
+
+// InvitationPreview -- pratinjau undangan `[PUBLIC]` sebelum aktivasi
+// (GET /invitations/preview?token=, permintaan user 2026-09-10). Dipakai
+// halaman aktivasi untuk tahu apakah ini undangan Eksekutif (copy beda)
+// dan pre-fill Nama/Jabatan kalau GA sudah mengisikannya lewat "Kelola" --
+// field tetap bisa diedit invitee, ini cuma DEFAULT form.
+type InvitationPreview struct {
+	IsExecutiveInvite bool
+	DisplayName       string
+	Title             string
+}
+
+// PreviewInvitation membaca undangan lewat token TANPA membuat/mengubah
+// apa pun -- sama syarat validitas dengan AcceptInvitation
+// (FindPendingByTokenHash: belum accepted/cancelled/expired).
+func (s *InvitationService) PreviewInvitation(ctx context.Context, exec db.Executor, rawToken string) (*InvitationPreview, error) {
+	target, err := s.repo.FindPendingByTokenHash(ctx, exec, hashActivationToken(rawToken))
+	if err != nil {
+		return nil, fmt.Errorf("service.PreviewInvitation: %w", err)
+	}
+	return &InvitationPreview{IsExecutiveInvite: target.IsExecutiveInvite, DisplayName: target.DisplayName, Title: target.Title}, nil
+}
+
+// CancelExecutiveInvitation membatalkan undangan Eksekutif pending --
+// varian CancelInvitation scope group_id (bukan workspace_id).
+func (s *InvitationService) CancelExecutiveInvitation(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error {
+	if err := s.repo.CancelExecutive(ctx, exec, groupID, invitationID, actorID); err != nil {
+		return fmt.Errorf("service.CancelExecutiveInvitation: %w", err)
+	}
+	return nil
+}
+
+// ResendExecutiveInvitation menerbitkan token baru + kirim ulang email
+// undangan Eksekutif -- varian ResendInvitation scope group_id.
+func (s *InvitationService) ResendExecutiveInvitation(ctx context.Context, exec db.Executor, groupID, invitationID, groupName, inviterName string) error {
+	rawToken, tokenHash, err := generateActivationToken()
+	if err != nil {
+		return fmt.Errorf("service.ResendExecutiveInvitation: %w", err)
+	}
+	expiresAt := time.Now().Add(invitationTTL)
+
+	email, err := s.repo.ResendExecutive(ctx, exec, groupID, invitationID, tokenHash, expiresAt)
+	if err != nil {
+		return fmt.Errorf("service.ResendExecutiveInvitation: %w", err)
+	}
+
+	acceptLink := fmt.Sprintf("%s/invitations/accept?token=%s", s.appBaseURL, rawToken)
+	if err := s.emailer.SendExecutiveInvitationEmail(ctx, email, groupName, inviterName, acceptLink, expiresAt); err != nil {
+		return fmt.Errorf("service.ResendExecutiveInvitation: %w", err)
+	}
+	return nil
+}
+
+// UpdateExecutiveInvitationIdentity mengisikan Nama/Jabatan undangan
+// Eksekutif SEBELUM aktivasi (permintaan user 2026-09-10) -- panggilan
+// tepercaya dari GA (authorizeGroup di GroupMemberService), bukan invitee.
+func (s *InvitationService) UpdateExecutiveInvitationIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, displayName, title string) error {
+	if err := s.repo.UpdateExecutiveIdentity(ctx, exec, groupID, invitationID, actorID, displayName, title); err != nil {
+		return fmt.Errorf("service.UpdateExecutiveInvitationIdentity: %w", err)
 	}
 	return nil
 }

@@ -44,6 +44,8 @@ func (h *GroupMemberHandler) mapError(c *fiber.Ctx, err error, fallback string) 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid", nil))
 	case errors.Is(err, domain.ErrInvitationAlreadyPending):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("INVITATION_ALREADY_PENDING", "Sudah ada undangan Eksekutif pending untuk email ini", nil))
+	case errors.Is(err, domain.ErrInvitationNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("INVITATION_NOT_FOUND", "Undangan tidak ditemukan atau sudah diterima/dibatalkan.", nil))
 	default:
 		h.logger.Error(fallback, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallback, nil))
@@ -104,6 +106,8 @@ func (h *GroupMemberHandler) List(c *fiber.Ctx) error {
 			"is_executive":   p.IsExecutive,
 			"created_at":     p.CreatedAt,
 			"expires_at":     p.ExpiresAt,
+			"display_name":   p.DisplayName,
+			"title":          p.Title,
 		})
 	}
 
@@ -253,4 +257,94 @@ func (h *GroupMemberHandler) InviteExecutive(c *fiber.Ctx) error {
 		return h.mapError(c, err, "Gagal membuat undangan Eksekutif")
 	}
 	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": inv.ID, "email": inv.Email, "expires_at": inv.ExpiresAt}))
+}
+
+// CancelExecutiveInvitation menangani DELETE
+// /groups/:groupId/executive-invitations/:id -- paritas dengan
+// InvitationHandler.CancelInvitation (undangan workspace biasa), scope
+// group_id (undangan Eksekutif tidak punya workspace).
+func (h *GroupMemberHandler) CancelExecutiveInvitation(c *fiber.Ctx) error {
+	actorID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("GroupMemberHandler.CancelExecutiveInvitation dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("GroupMemberHandler.CancelExecutiveInvitation dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	groupID, invitationID := c.Params("groupId"), c.Params("id")
+
+	if err := h.members.CancelExecutiveInvitation(c.Context(), exec, groupID, invitationID, actorID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal membatalkan undangan Eksekutif")
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// ResendExecutiveInvitation menangani POST
+// /groups/:groupId/executive-invitations/:id/resend.
+func (h *GroupMemberHandler) ResendExecutiveInvitation(c *fiber.Ctx) error {
+	actorID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("GroupMemberHandler.ResendExecutiveInvitation dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("GroupMemberHandler.ResendExecutiveInvitation dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	groupID, invitationID := c.Params("groupId"), c.Params("id")
+
+	inviterName, err := h.accounts.GetDisplayName(c.Context(), actorID)
+	if err != nil {
+		h.logger.Error("GroupMemberHandler.ResendExecutiveInvitation gagal resolve nama pengundang", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	groupName, err := h.groups.GetName(c.Context(), exec, groupID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Grup tidak ditemukan", nil))
+	}
+
+	if err := h.members.ResendExecutiveInvitation(c.Context(), exec, groupID, invitationID, actorID, actorRole, groupName, inviterName); err != nil {
+		return h.mapError(c, err, "Gagal mengirim ulang undangan Eksekutif")
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+type updateExecutiveInvitationIdentityRequest struct {
+	DisplayName string `json:"display_name"`
+	Title       string `json:"title"`
+}
+
+// UpdateExecutiveInvitationIdentity menangani PUT
+// /groups/:groupId/executive-invitations/:id/identity -- GA mengisikan
+// Nama/Jabatan atas nama Eksekutif SEBELUM aktivasi (permintaan user
+// 2026-09-10). DisplayName/Title keduanya opsional (beda dari
+// UpdateIdentity member aktif yang mewajibkan displayName >= 2 karakter).
+func (h *GroupMemberHandler) UpdateExecutiveInvitationIdentity(c *fiber.Ctx) error {
+	actorID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("GroupMemberHandler.UpdateExecutiveInvitationIdentity dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("GroupMemberHandler.UpdateExecutiveInvitationIdentity dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+
+	var req updateExecutiveInvitationIdentityRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.Title = strings.TrimSpace(req.Title)
+
+	groupID, invitationID := c.Params("groupId"), c.Params("id")
+	if err := h.members.UpdateExecutiveInvitationIdentity(c.Context(), exec, groupID, invitationID, actorID, actorRole, req.DisplayName, req.Title); err != nil {
+		return h.mapError(c, err, "Gagal mengubah identitas undangan Eksekutif")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": invitationID, "display_name": req.DisplayName, "title": req.Title}))
 }

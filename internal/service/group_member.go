@@ -33,9 +33,14 @@ type groupPendingLister interface {
 // ulang di sini -- diimplementasikan *OrganizationService).
 
 // executiveInviter -- interface didefinisikan di consumer, diimplementasikan
-// *InvitationService.
+// *InvitationService. Cancel/Resend/UpdateIdentity ditambahkan 2026-09-10
+// (permintaan user: paritas dengan undangan workspace biasa + pre-fill
+// Nama/Jabatan Eksekutif SEBELUM aktivasi).
 type executiveInviter interface {
 	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, groupName, inviterName string) (*Invitation, error)
+	CancelExecutiveInvitation(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error
+	ResendExecutiveInvitation(ctx context.Context, exec db.Executor, groupID, invitationID, groupName, inviterName string) error
+	UpdateExecutiveInvitationIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, displayName, title string) error
 }
 
 // GroupMemberService -- Members & Roles (forward-pull US-086, Track S4G):
@@ -69,6 +74,44 @@ func (s *GroupMemberService) InviteExecutive(ctx context.Context, exec db.Execut
 		return nil, fmt.Errorf("service.GroupMemberService.InviteExecutive: %w", err)
 	}
 	return inv, nil
+}
+
+// CancelExecutiveInvitation membatalkan undangan Eksekutif pending grup ini.
+func (s *GroupMemberService) CancelExecutiveInvitation(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, actorRole string) error {
+	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.GroupMemberService.CancelExecutiveInvitation: %w", err)
+	}
+	if err := s.invites.CancelExecutiveInvitation(ctx, exec, groupID, invitationID, actorID); err != nil {
+		return fmt.Errorf("service.GroupMemberService.CancelExecutiveInvitation: %w", err)
+	}
+	return nil
+}
+
+// ResendExecutiveInvitation mengirim ulang undangan Eksekutif pending grup
+// ini dengan token baru.
+func (s *GroupMemberService) ResendExecutiveInvitation(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, actorRole, groupName, inviterName string) error {
+	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.GroupMemberService.ResendExecutiveInvitation: %w", err)
+	}
+	if err := s.invites.ResendExecutiveInvitation(ctx, exec, groupID, invitationID, groupName, inviterName); err != nil {
+		return fmt.Errorf("service.GroupMemberService.ResendExecutiveInvitation: %w", err)
+	}
+	return nil
+}
+
+// UpdateExecutiveInvitationIdentity mengisikan Nama/Jabatan undangan
+// Eksekutif SEBELUM aktivasi (S086 lanjutan, permintaan user 2026-09-10).
+// Beda dari UpdateIdentity (member sudah aktif): displayName di sini
+// OPSIONAL (bisa kosong -- GA mungkin cuma mau isi Jabatan dulu), tidak
+// ada guard `len(displayName) < 2`.
+func (s *GroupMemberService) UpdateExecutiveInvitationIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, actorRole, displayName, title string) error {
+	if err := s.authorizeGroup(ctx, exec, groupID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.GroupMemberService.UpdateExecutiveInvitationIdentity: %w", err)
+	}
+	if err := s.invites.UpdateExecutiveInvitationIdentity(ctx, exec, groupID, invitationID, actorID, displayName, title); err != nil {
+		return fmt.Errorf("service.GroupMemberService.UpdateExecutiveInvitationIdentity: %w", err)
+	}
+	return nil
 }
 
 func (s *GroupMemberService) authorizeGroup(ctx context.Context, exec db.Executor, groupID, actorID, actorRole string) error {

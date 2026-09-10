@@ -412,6 +412,7 @@ func run() error {
 	// terpisah -- lihat implementation_gaps.md IG-09.
 	v1.Get("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.ListPendingInvitations)
 	v1.Post("/auth/invitations/accept", invitationHandler.AcceptInvitation)
+	v1.Get("/invitations/preview", invitationHandler.PreviewInvitation)
 	// Data Retention: tautan unduhan ekspor dari email, TANPA jwtAuth/dbCtx
 	// sama pola AcceptInvitation -- otorisasi lewat kepemilikan token.
 	v1.Get("/retention-exports/:token", retentionHandler.DownloadExport)
@@ -449,6 +450,9 @@ func run() error {
 	v1.Put("/groups/:groupId/members/:userId/reactivate", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.ReactivateAccess)
 	v1.Put("/groups/:groupId/members/:userId/deactivate", jwtAuth, dbCtx, requireOrgAdmin, requireStepUp, groupMemberHandler.DeactivateAccess)
 	v1.Post("/groups/:groupId/executive-invitations", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.InviteExecutive)
+	v1.Put("/groups/:groupId/executive-invitations/:id/identity", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.UpdateExecutiveInvitationIdentity)
+	v1.Delete("/groups/:groupId/executive-invitations/:id", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.CancelExecutiveInvitation)
+	v1.Post("/groups/:groupId/executive-invitations/:id/resend", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.ResendExecutiveInvitation)
 	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
