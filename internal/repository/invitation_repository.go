@@ -5,6 +5,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -55,7 +56,7 @@ func (r *InvitationRepository) CreateInvitation(
 		return "", fmt.Errorf("repository.CreateInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
 
-	if err := insertInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, workspaceID); err != nil {
+	if err := insertInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, workspaceID, email); err != nil {
 		return "", fmt.Errorf("repository.CreateInvitation: %w", err)
 	}
 	return id, nil
@@ -81,7 +82,7 @@ func (r *InvitationRepository) CreateExecutiveInvitation(
 		return "", fmt.Errorf("repository.CreateExecutiveInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
 
-	if err := insertExecutiveInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, groupID); err != nil {
+	if err := insertExecutiveInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, groupID, email, nil, nil); err != nil {
 		return "", fmt.Errorf("repository.CreateExecutiveInvitation: %w", err)
 	}
 	return id, nil
@@ -90,12 +91,33 @@ func (r *InvitationRepository) CreateExecutiveInvitation(
 // insertExecutiveInvitationAudit -- undangan Eksekutif tidak punya
 // workspace_id (kolom audit_logs yang dipakai insertInvitationAudit),
 // entitas ini milik GRUP -- group_id disimpan di metadata, pola sama
-// insertGroupAudit (repository/group_repository.go).
-func insertExecutiveInvitationAudit(ctx context.Context, exec db.Executor, actorID, action, invitationID, groupID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
-		VALUES ($1, $2, 'user_invitation', $3, jsonb_build_object('group_id', $4::uuid, 'is_executive_invite', true))
-	`, actorID, action, invitationID, groupID)
+// insertGroupAudit (repository/group_repository.go). email disimpan di
+// metadata (sama alasan insertInvitationAudit -- entity_id tidak resolve
+// ke nama apa pun). stateBefore/stateAfter opsional (nil untuk
+// created/cancelled/accepted yang bukan "perubahan nilai", diisi untuk
+// identity_updated -- lihat UpdateExecutiveIdentity).
+func insertExecutiveInvitationAudit(ctx context.Context, exec db.Executor, actorID, action, invitationID, groupID, email string, stateBefore, stateAfter map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{"group_id": groupID, "is_executive_invite": true, "email": email}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("insertExecutiveInvitationAudit: encode metadata: %w", err)
+	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("insertExecutiveInvitationAudit: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("insertExecutiveInvitationAudit: encode state_after: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, 'user_invitation', $3, $4::inet, $5, $6, $7)
+	`, actorID, action, invitationID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }
 
@@ -187,7 +209,7 @@ func (r *InvitationRepository) AcceptInvitation(
 		return "", fmt.Errorf("repository.AcceptInvitation: update accepted_at: %w", err)
 	}
 
-	if err = insertInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, workspaceID); err != nil {
+	if err = insertInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, workspaceID, email); err != nil {
 		return "", fmt.Errorf("repository.AcceptInvitation: %w", err)
 	}
 	return userID, nil
@@ -235,7 +257,7 @@ func (r *InvitationRepository) AcceptExecutiveInvitation(
 		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: update accepted_at: %w", err)
 	}
 
-	if err := insertExecutiveInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, groupID); err != nil {
+	if err := insertExecutiveInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, groupID, email, nil, nil); err != nil {
 		return "", fmt.Errorf("repository.AcceptExecutiveInvitation: %w", err)
 	}
 	return userID, nil
@@ -248,17 +270,19 @@ func (r *InvitationRepository) AcceptExecutiveInvitation(
 // ditemukan/sudah accepted/sudah cancelled) -> domain.ErrInvitationNotFound,
 // konsisten dengan Resend/FindPendingByTokenHash.
 func (r *InvitationRepository) Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error {
-	tag, err := exec.Exec(ctx, `
+	var email string
+	err := exec.QueryRow(ctx, `
 		UPDATE user_invitations SET cancelled_at = NOW()
 		WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND cancelled_at IS NULL
-	`, invitationID, workspaceID)
+		RETURNING email
+	`, invitationID, workspaceID).Scan(&email)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.Cancel: %w", domain.ErrInvitationNotFound)
+		}
 		return fmt.Errorf("repository.Cancel: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.Cancel: %w", domain.ErrInvitationNotFound)
-	}
-	if err := insertInvitationAudit(ctx, exec, actorID, "invitation.cancelled", invitationID, workspaceID); err != nil {
+	if err := insertInvitationAudit(ctx, exec, actorID, "invitation.cancelled", invitationID, workspaceID, email); err != nil {
 		return fmt.Errorf("repository.Cancel: %w", err)
 	}
 	return nil
@@ -295,17 +319,19 @@ func (r *InvitationRepository) Resend(ctx context.Context, exec db.Executor, wor
 // CancelExecutive -- varian Cancel untuk undangan Eksekutif: scope group_id
 // (bukan workspace_id, undangan ini tidak punya workspace sama sekali).
 func (r *InvitationRepository) CancelExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error {
-	tag, err := exec.Exec(ctx, `
+	var email string
+	err := exec.QueryRow(ctx, `
 		UPDATE user_invitations SET cancelled_at = NOW()
 		WHERE id = $1 AND group_id = $2 AND is_executive_invite = TRUE AND accepted_at IS NULL AND cancelled_at IS NULL
-	`, invitationID, groupID)
+		RETURNING email
+	`, invitationID, groupID).Scan(&email)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.CancelExecutive: %w", domain.ErrInvitationNotFound)
+		}
 		return fmt.Errorf("repository.CancelExecutive: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.CancelExecutive: %w", domain.ErrInvitationNotFound)
-	}
-	if err := insertExecutiveInvitationAudit(ctx, exec, actorID, "invitation.cancelled", invitationID, groupID); err != nil {
+	if err := insertExecutiveInvitationAudit(ctx, exec, actorID, "invitation.cancelled", invitationID, groupID, email, nil, nil); err != nil {
 		return fmt.Errorf("repository.CancelExecutive: %w", err)
 	}
 	return nil
@@ -335,17 +361,28 @@ func (r *InvitationRepository) ResendExecutive(ctx context.Context, exec db.Exec
 // FE aktivasi sebagai default form yang tetap bisa diedit invitee (lihat
 // InvitationService.PreviewInvitation).
 func (r *InvitationRepository) UpdateExecutiveIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, displayName, title string) error {
-	tag, err := exec.Exec(ctx, `
-		UPDATE user_invitations SET display_name = NULLIF($1, ''), title = NULLIF($2, '')
-		WHERE id = $3 AND group_id = $4 AND is_executive_invite = TRUE AND accepted_at IS NULL AND cancelled_at IS NULL
-	`, displayName, title, invitationID, groupID)
+	var email, oldDisplayName, oldTitle string
+	err := exec.QueryRow(ctx, `
+		SELECT email, COALESCE(display_name, ''), COALESCE(title, '')
+		FROM user_invitations
+		WHERE id = $1 AND group_id = $2 AND is_executive_invite = TRUE AND accepted_at IS NULL AND cancelled_at IS NULL
+	`, invitationID, groupID).Scan(&email, &oldDisplayName, &oldTitle)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", domain.ErrInvitationNotFound)
+		}
 		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", domain.ErrInvitationNotFound)
+
+	if _, err := exec.Exec(ctx, `
+		UPDATE user_invitations SET display_name = NULLIF($1, ''), title = NULLIF($2, '') WHERE id = $3
+	`, displayName, title, invitationID); err != nil {
+		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", err)
 	}
-	if err := insertExecutiveInvitationAudit(ctx, exec, actorID, "invitation.identity_updated", invitationID, groupID); err != nil {
+
+	stateBefore := map[string]any{"display_name": oldDisplayName, "title": oldTitle}
+	stateAfter := map[string]any{"display_name": displayName, "title": title}
+	if err := insertExecutiveInvitationAudit(ctx, exec, actorID, "invitation.identity_updated", invitationID, groupID, email, stateBefore, stateAfter); err != nil {
 		return fmt.Errorf("repository.UpdateExecutiveIdentity: %w", err)
 	}
 	return nil
@@ -483,10 +520,30 @@ func (r *InvitationRepository) GetWorkspaceName(ctx context.Context, exec db.Exe
 // account_repository.go, karena entity_type di sini 'user_invitation' dan
 // perlu kolom workspace_id, beda dari logAudit yang hardcode entity_type
 // 'user' tanpa workspace_id).
-func insertInvitationAudit(ctx context.Context, exec db.Executor, actorID, action, invitationID, workspaceID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, workspace_id)
-		VALUES ($1, $2, 'user_invitation', $3, $4)
-	`, actorID, action, invitationID, workspaceID)
+//
+// BUG LAMA diperbaiki di sini (ditemukan user 2026-09-11): sejak S2-21,
+// fungsi ini TIDAK PERNAH mengisi org_id -- baris audit undangan workspace
+// (created/cancelled/accepted) tersimpan tapi SELALU tidak terlihat di GA
+// Audit Trail (GroupAuditRepository.List DAN RLS audit_logs itu sendiri
+// keduanya syarat org_id ATAU metadata->>'group_id', bukan workspace_id
+// yang memang tidak pernah dibaca query manapun). org_id di sini
+// diresolve dari workspace_id lewat subquery. email disimpan di metadata
+// -- satu-satunya cara mengidentifikasi UNDANGAN MANA, entity_id
+// (invitation id) tidak resolve ke nama apa pun lewat JOIN manapun (beda
+// dari workspace/webhook yang punya tabel target bernama).
+func insertInvitationAudit(ctx context.Context, exec db.Executor, actorID, action, invitationID, workspaceID, email string) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{"email": email}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("insertInvitationAudit: encode metadata: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, org_id, workspace_id, actor_ip, metadata)
+		VALUES ($1, $2, 'user_invitation', $3, (SELECT org_id FROM workspaces WHERE id = $4), $4, $5::inet, $6)
+	`, actorID, action, invitationID, workspaceID, ip, metaJSON)
 	return err
 }
