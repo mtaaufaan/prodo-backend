@@ -1316,6 +1316,133 @@ func insertUserAuditForGroup(ctx context.Context, tx pgx.Tx, userID, platformRol
 	return err
 }
 
+// logSelfAccountAudit menulis audit_logs untuk aksi self-service di GA
+// Pengaturan Akun (Track S4G, desain "GA Pengaturan Akun.dc.html") -- pola
+// scoping PERSIS RecordLogin (IG-57): platform_admin 1 baris lewat logAudit,
+// role lain 1 baris PER grup hasil resolveAuditGroupIDs. Diekstrak sebagai
+// helper (bukan disalin ulang) karena dipakai >1 aksi (profil, password,
+// reset MFA, kode cadangan, preferensi notifikasi) -- RecordLogin sendiri
+// TIDAK diubah untuk memakai ini, biar tidak menyentuh alur login yang
+// sudah teruji.
+func logSelfAccountAudit(ctx context.Context, tx pgx.Tx, userID, platformRole, action string) error {
+	if platformRole == "platform_admin" {
+		return logAudit(ctx, tx, userID, platformRole, action, userID)
+	}
+	groupIDs, err := resolveAuditGroupIDs(ctx, tx, userID, platformRole)
+	if err != nil {
+		return fmt.Errorf("logSelfAccountAudit: %w", err)
+	}
+	for _, groupID := range groupIDs {
+		if err := insertUserAuditForGroup(ctx, tx, userID, platformRole, action, groupID); err != nil {
+			return fmt.Errorf("logSelfAccountAudit: %w", err)
+		}
+	}
+	return nil
+}
+
+// ProfileRecord adalah data GET /users/me (GA Pengaturan Akun, tab Profil).
+type ProfileRecord struct {
+	ID           string
+	Email        string
+	DisplayName  string
+	Title        *string
+	Phone        *string
+	AvatarURL    *string
+	PlatformRole string
+	Locale       string
+	MFAEnabled   bool
+	LastLoginAt  *time.Time
+	CreatedAt    time.Time
+}
+
+// GetProfile mengambil profil user yang sedang login untuk GET /users/me.
+// LEFT JOIN user_mfa_configs -- baris MFA belum tentu ada (user yang belum
+// pernah setup MFA sama sekali), COALESCE ke FALSE.
+func (r *AccountRepository) GetProfile(ctx context.Context, userID string) (*ProfileRecord, error) {
+	p := &ProfileRecord{}
+	err := r.db.QueryRow(ctx, `
+		SELECT u.id, u.email, u.display_name, u.title, u.phone, u.avatar_url,
+		       u.platform_role, u.locale, COALESCE(m.is_enabled, FALSE), u.last_login_at, u.created_at
+		FROM users u
+		LEFT JOIN user_mfa_configs m ON m.user_id = u.id
+		WHERE u.id = $1 AND u.deleted_at IS NULL
+	`, userID).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Title, &p.Phone, &p.AvatarURL,
+		&p.PlatformRole, &p.Locale, &p.MFAEnabled, &p.LastLoginAt, &p.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.GetProfile: %w", domain.ErrUserNotFound)
+		}
+		return nil, fmt.Errorf("repository.GetProfile: %w", err)
+	}
+	return p, nil
+}
+
+// UpdateProfile memperbarui data pribadi sendiri (nama, jabatan, telepon,
+// bahasa) -- PATCH /users/me. Menulis audit_logs 'account.profile_updated'
+// (lihat logSelfAccountAudit) di transaksi yang sama, lalu mengembalikan
+// profil terbaru.
+func (r *AccountRepository) UpdateProfile(ctx context.Context, userID, platformRole, displayName, title, phone, locale string) (*ProfileRecord, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("repository.UpdateProfile: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE users SET display_name = $2, title = NULLIF($3, ''), phone = NULLIF($4, ''), locale = $5, updated_at = NOW()
+		WHERE id = $1
+	`, userID, displayName, title, phone, locale); err != nil {
+		return nil, fmt.Errorf("repository.UpdateProfile: update: %w", err)
+	}
+
+	if err := logSelfAccountAudit(ctx, tx, userID, platformRole, "account.profile_updated"); err != nil {
+		return nil, fmt.Errorf("repository.UpdateProfile: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("repository.UpdateProfile: commit tx: %w", err)
+	}
+	return r.GetProfile(ctx, userID)
+}
+
+// LogAccountSecurityAction menulis audit_logs untuk aksi Keamanan/Notifikasi
+// di Pengaturan Akun yang TIDAK mengubah tabel users itu sendiri (password
+// diganti di Keycloak, MFA di user_mfa_configs, preferensi di
+// notification_preferences) -- dipanggil ProfileService setelah masing-
+// masing aksi berhasil, satu transaksi kecil khusus audit (pola sama
+// logSelfAccountAudit, transaksi terpisah karena mutasi utamanya sendiri
+// sudah di luar Postgres/di repo lain).
+func (r *AccountRepository) LogAccountSecurityAction(ctx context.Context, userID, platformRole, action string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("repository.LogAccountSecurityAction: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op setelah Commit berhasil
+
+	if err := logSelfAccountAudit(ctx, tx, userID, platformRole, action); err != nil {
+		return fmt.Errorf("repository.LogAccountSecurityAction: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// FindProviderSubByUserID mengembalikan Keycloak subject (provider_sub)
+// milik userID -- kebalikan dari FindUserIDByProviderSub, dibutuhkan
+// ChangePassword (Keamanan Pengaturan Akun) untuk memanggil
+// keycloak.SetPassword yang perlu Keycloak user ID, bukan PRODO user ID.
+func (r *AccountRepository) FindProviderSubByUserID(ctx context.Context, userID string) (string, error) {
+	var sub string
+	err := r.db.QueryRow(ctx, `
+		SELECT provider_sub FROM user_auth_providers WHERE user_id = $1 ORDER BY created_at LIMIT 1
+	`, userID).Scan(&sub)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.FindProviderSubByUserID: %w", domain.ErrUserNotFound)
+		}
+		return "", fmt.Errorf("repository.FindProviderSubByUserID: %w", err)
+	}
+	return sub, nil
+}
+
 // FindUserByID mencari user berdasarkan users.id -- dipakai LoginSSO (S1-15)
 // setelah provider_sub ditemukan di user_auth_providers.
 func (r *AccountRepository) FindUserByID(ctx context.Context, userID string) (*LoginUserRecord, error) {

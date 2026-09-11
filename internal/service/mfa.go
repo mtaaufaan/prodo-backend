@@ -119,6 +119,26 @@ func (s *MFAService) VerifyAndEnable(ctx context.Context, userID, otpCode string
 	return true, codes, nil
 }
 
+// RegenerateBackupCodes menerbitkan 10 kode cadangan BARU tanpa mengubah
+// secret TOTP -- GA Pengaturan Akun tab Keamanan, tombol "BUAT ULANG KODE
+// PEMULIHAN" (beda dari "PINDAHKAN KE PERANGKAT BARU" yang memakai
+// SetupTOTP+VerifyAndEnable, mengganti secret TOTP juga). SaveBackupCodes
+// mengganti SELURUH isi kolom -- kode lama otomatis tidak berlaku lagi.
+func (s *MFAService) RegenerateBackupCodes(ctx context.Context, userID string) ([]string, error) {
+	codes, err := GenerateBackupCodes()
+	if err != nil {
+		return nil, fmt.Errorf("service.RegenerateBackupCodes: %w", err)
+	}
+	hashed := make([]string, len(codes))
+	for i, c := range codes {
+		hashed[i] = hashBackupCode(c)
+	}
+	if err := s.repo.SaveBackupCodes(ctx, userID, hashed); err != nil {
+		return nil, fmt.Errorf("service.RegenerateBackupCodes: %w", err)
+	}
+	return codes, nil
+}
+
 // VerifyLoginOTP memverifikasi kode MFA saat login (S1-17) -- BEDA dari
 // VerifyAndEnable (S1-07): tidak pernah mengubah is_enabled, dan tidak
 // menganggap "belum pernah setup MFA" sebagai error. mfaEnabled=false
