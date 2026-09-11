@@ -78,7 +78,7 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 		"group_id":            org.GroupID,
 		"name":                org.Name,
 		"slug":                org.Slug,
-		"domain":              org.Domain,
+		"domains":             org.Domains,
 		"default_language":    org.DefaultLanguage,
 		"storage_quota_bytes": org.StorageQuotaBytes,
 		"retention_days":      org.RetentionDays,
@@ -86,14 +86,12 @@ func (h *OrganizationHandler) Create(c *fiber.Ctx) error {
 }
 
 type updateOrganizationRequest struct {
-	Name   string `json:"name"`
-	Slug   string `json:"slug"`
-	Domain string `json:"domain"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
-// Update menangani PUT /organizations/:id (S3-03, domain ditambahkan
-// S4G-02/Track S4G sesuai desain "GA Organizations.dc.html" -- lihat
-// migrasi 20260910090000).
+// Update menangani PUT /organizations/:id (S3-03). Domain email resmi
+// (S4G-02) DIPISAH dari sini sejak 2026-09-11 -- lihat AddDomain/RemoveDomain.
 func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -113,7 +111,6 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Slug = strings.TrimSpace(req.Slug)
-	req.Domain = strings.TrimSpace(req.Domain)
 	if req.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "name wajib diisi", nil))
 	}
@@ -122,11 +119,95 @@ func (h *OrganizationHandler) Update(c *fiber.Ctx) error {
 			[]response.FieldError{{Field: "slug", Message: "lowercase, alphanumeric, hyphen (mis. \"acme-corp\")"}}))
 	}
 
-	if err := h.orgs.UpdateOrganization(c.Context(), exec, orgID, req.Name, req.Slug, req.Domain, actorUserID, actorRole); err != nil {
+	if err := h.orgs.UpdateOrganization(c.Context(), exec, orgID, req.Name, req.Slug, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah organisasi")
 	}
 
-	return c.JSON(response.Success(fiber.Map{"id": orgID, "name": req.Name, "slug": req.Slug, "domain": req.Domain}))
+	return c.JSON(response.Success(fiber.Map{"id": orgID, "name": req.Name, "slug": req.Slug}))
+}
+
+// ListDomains menangani GET /organizations/:id/domains -- dipakai
+// ManageOrganizationModal (FE) untuk chip domain yang bisa dihapus (beda
+// dari GET /organizations yang cuma mengembalikan array string tanpa id).
+func (h *OrganizationHandler) ListDomains(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.ListDomains dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.ListDomains dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	domains, err := h.orgs.ListOrganizationDomains(c.Context(), exec, orgID, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil daftar domain")
+	}
+
+	data := make([]fiber.Map, len(domains))
+	for i := range domains {
+		data[i] = fiber.Map{"id": domains[i].ID, "domain": domains[i].Domain, "created_at": domains[i].CreatedAt}
+	}
+	return c.JSON(response.Success(fiber.Map{"domains": data}))
+}
+
+type addOrganizationDomainRequest struct {
+	Domain string `json:"domain"`
+}
+
+// AddDomain menangani POST /organizations/:id/domains (2026-09-11,
+// dikonfirmasi user: satu organisasi bisa punya lebih dari satu domain
+// email resmi -- sebelumnya field tunggal di Update).
+func (h *OrganizationHandler) AddDomain(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.AddDomain dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.AddDomain dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	var req addOrganizationDomainRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	req.Domain = strings.TrimSpace(req.Domain)
+
+	d, err := h.orgs.AddOrganizationDomain(c.Context(), exec, orgID, req.Domain, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal menambah domain")
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": d.ID, "domain": d.Domain}))
+}
+
+// RemoveDomain menangani DELETE /organizations/:id/domains/:domainId.
+func (h *OrganizationHandler) RemoveDomain(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.RemoveDomain dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.RemoveDomain dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+	domainID := c.Params("domainId")
+
+	if err := h.orgs.RemoveOrganizationDomain(c.Context(), exec, orgID, domainID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menghapus domain")
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 type updateSettingsRequest struct {
@@ -266,7 +347,7 @@ func (h *OrganizationHandler) List(c *fiber.Ctx) error {
 			"group_id":            o.GroupID,
 			"name":                o.Name,
 			"slug":                o.Slug,
-			"domain":              o.Domain,
+			"domains":             o.Domains,
 			"default_language":    o.DefaultLanguage,
 			"storage_quota_bytes": o.StorageQuotaBytes,
 			"storage_max_bytes":   o.StorageMaxBytes,
@@ -429,6 +510,10 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("GROUP_STORAGE_QUOTA_EXCEEDS_CEILING", "Total kuota seluruh organisasi dalam grup akan melebihi plafon storage grup", nil))
 	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
+	case errors.Is(err, domain.ErrOrganizationDomainExists):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("DOMAIN_ALREADY_EXISTS", "Domain sudah terdaftar untuk organisasi ini", nil))
+	case errors.Is(err, domain.ErrOrganizationDomainNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Domain tidak ditemukan", nil))
 	case errors.As(err, &retentionErr):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("RETENTION_OUT_OF_RANGE",
 			fmt.Sprintf("Retensi harus antara %d dan %d hari (batas tier %s)", retentionErr.MinDays, retentionErr.MaxDays, retentionErr.TierName),
