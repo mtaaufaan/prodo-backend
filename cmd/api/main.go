@@ -185,6 +185,7 @@ func run() error {
 		return fmt.Errorf("setup MFA repository: %w", err)
 	}
 	sessionRepo := repository.NewSessionRepository(pool)
+	notificationPreferenceRepo := repository.NewNotificationPreferenceRepository(pool)
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	invitationRepo := repository.NewInvitationRepository()
 	organizationRepo := repository.NewOrganizationRepository()
@@ -246,6 +247,10 @@ func run() error {
 	groupMemberSvc := service.NewGroupMemberService(groupMemberRepo, groupMemberRepo, invitationRepo, organizationSvc, invitationSvc)
 	retentionSvc := service.NewRetentionService(retentionRepo, organizationRepo, retentionRepo, emailSvc, cfg.AppBaseURL)
 	csvImportSvc := service.NewCSVImportService(csvImportRepo, organizationRepo, workspaceRepo, accountRepo, storageSvc, &asynqCSVImportEnqueuer{client: asynqClient})
+	// GA Pengaturan Akun (Track S4G, desain "GA Pengaturan Akun.dc.html"):
+	// self-service profil/password/MFA/notifikasi, beda dari accountSvc
+	// (admin mengelola akun ORANG LAIN) -- lihat komentar ProfileService.
+	profileSvc := service.NewProfileService(accountRepo, notificationPreferenceRepo, oidcClient, kcAdmin, mfaSvc, sessionSvc)
 
 	// JWTAuth butuh sessionSvc (S1-28: cek revoked/idle-timeout di setiap
 	// request terautentikasi) -- makanya dipasang setelah sessionSvc, bukan
@@ -268,6 +273,7 @@ func run() error {
 	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
+	accountSettingsHandler := handler.NewAccountSettingsHandler(accountSvc, profileSvc, logger)
 	workspaceHandler := handler.NewWorkspaceHandler(rbacSvc, workspaceSvc, accountSvc, logger)
 	invitationHandler := handler.NewInvitationHandler(invitationSvc, accountSvc, pool, logger)
 	organizationHandler := handler.NewOrganizationHandler(organizationSvc, logger)
@@ -354,6 +360,19 @@ func run() error {
 	v1.Get("/auth/sessions", jwtAuth, sessionHandler.List)
 	v1.Delete("/auth/sessions/:jti", jwtAuth, sessionHandler.Revoke)
 	v1.Delete("/auth/sessions", jwtAuth, sessionHandler.RevokeAll)
+	// GA Pengaturan Akun (Track S4G, desain "GA Pengaturan Akun.dc.html") --
+	// self-service, seluruhnya beroperasi atas akun pemanggil sendiri (JWT),
+	// bukan dari parameter route. /auth/mfa/setup+verify di sini HANYA mode
+	// self-service (JWT wajib) -- varian mfa_setup_token pra-login (member
+	// self-signup) masih belum dibangun, lihat komentar AccountSettingsHandler.
+	v1.Get("/users/me", jwtAuth, accountSettingsHandler.GetProfile)
+	v1.Patch("/users/me", jwtAuth, accountSettingsHandler.UpdateProfile)
+	v1.Post("/auth/password/change", jwtAuth, accountSettingsHandler.ChangePassword)
+	v1.Post("/auth/mfa/setup", jwtAuth, accountSettingsHandler.SetupSelfMFA)
+	v1.Post("/auth/mfa/verify", jwtAuth, accountSettingsHandler.VerifySelfMFA)
+	v1.Post("/auth/mfa/backup-codes/regenerate", jwtAuth, accountSettingsHandler.RegenerateBackupCodes)
+	v1.Get("/users/me/notification-preferences", jwtAuth, accountSettingsHandler.ListNotificationPreferences)
+	v1.Patch("/users/me/notification-preferences", jwtAuth, accountSettingsHandler.UpdateNotificationPreference)
 	// S3-40 (implementation_gaps.md IG-01): gerbang kasar PA/GA di sini
 	// (RequirePlatformRole cuma cek klaim, tanpa query DB); scoping halus
 	// GA ke org target ada di handler (middleware.RequireGroupAdminInOrg).
