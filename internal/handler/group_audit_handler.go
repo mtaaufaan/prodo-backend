@@ -129,7 +129,7 @@ func (h *GroupAuditHandler) writeCSV(c *fiber.Ctx, entries []repository.GroupAud
 			stringOrEmpty(e.ActorDisplayName),
 			stringOrEmpty(e.ActorID),
 			e.Type,
-			e.Action,
+			groupAuditNarrativeText(e),
 			e.EntityType,
 			stringOrEmpty(e.EntityID),
 			stringOrEmpty(e.TargetName),
