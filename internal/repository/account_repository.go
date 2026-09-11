@@ -1195,6 +1195,17 @@ func (r *AccountRepository) ListOrgIDsForGroupAdmin(ctx context.Context, userID 
 // 'user.backup_code_used' -- sinyal keamanan terpisah dari 'user.login'
 // biasa karena berarti device authenticator kemungkinan hilang/tidak bisa
 // diakses, layak dipantau tersendiri di audit trail.
+//
+// Scope grup (2026-09-11, implementation_gaps.md IG-57): platform_admin
+// tetap 1 baris ke platform_audit_logs lewat logAudit (tidak berubah, PA
+// cuma py satu audit trail platform-wide). Role lain (group_admin/
+// executive/member) SEBELUMNYA ditulis lewat logAudit yang SAMA -- masuk
+// audit_logs tapi TANPA org_id/metadata.group_id, jadi tidak pernah
+// terlihat GA Audit Trail manapun (root cause SAMA dengan IG-55). Sekarang
+// resolveAuditGroupIDs dulu (grup mana saja aktor ini berwenang/anggota),
+// lalu SATU baris audit_logs PER grup (snapshot keanggotaan SAAT login,
+// bukan JOIN live -- kalau aktor dipindah grup besok, riwayat login lama
+// tidak ikut berubah, konsisten prinsip audit trail immutable).
 func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRole string, usedBackupCode bool) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -1205,12 +1216,30 @@ func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRol
 	if _, err := tx.Exec(ctx, `UPDATE users SET last_login_at = NOW() WHERE id = $1`, userID); err != nil {
 		return fmt.Errorf("repository.RecordLogin: update last_login_at: %w", err)
 	}
-	if err := logAudit(ctx, tx, userID, platformRole, "user.login", userID); err != nil {
-		return fmt.Errorf("repository.RecordLogin: %w", err)
-	}
-	if usedBackupCode {
-		if err := logAudit(ctx, tx, userID, platformRole, "user.backup_code_used", userID); err != nil {
+
+	if platformRole == "platform_admin" {
+		if err := logAudit(ctx, tx, userID, platformRole, "user.login", userID); err != nil {
 			return fmt.Errorf("repository.RecordLogin: %w", err)
+		}
+		if usedBackupCode {
+			if err := logAudit(ctx, tx, userID, platformRole, "user.backup_code_used", userID); err != nil {
+				return fmt.Errorf("repository.RecordLogin: %w", err)
+			}
+		}
+	} else {
+		groupIDs, err := resolveAuditGroupIDs(ctx, tx, userID, platformRole)
+		if err != nil {
+			return fmt.Errorf("repository.RecordLogin: %w", err)
+		}
+		for _, groupID := range groupIDs {
+			if err := insertUserAuditForGroup(ctx, tx, userID, platformRole, "user.login", groupID); err != nil {
+				return fmt.Errorf("repository.RecordLogin: %w", err)
+			}
+			if usedBackupCode {
+				if err := insertUserAuditForGroup(ctx, tx, userID, platformRole, "user.backup_code_used", groupID); err != nil {
+					return fmt.Errorf("repository.RecordLogin: %w", err)
+				}
+			}
 		}
 	}
 
@@ -1218,6 +1247,73 @@ func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRol
 		return fmt.Errorf("repository.RecordLogin: commit tx: %w", err)
 	}
 	return nil
+}
+
+// resolveAuditGroupIDs mengembalikan grup mana saja yang harus menganggap
+// login aktor ini relevan bagi audit trail-nya (dipakai RecordLogin).
+// group_admin/executive lewat tabel assignment (group_admin_assignments/
+// executive_assignments, KEDUANYA TIDAK di-RLS -- aman diquery langsung
+// dari tx tanpa session RLS apapun). member lewat fungsi SECURITY DEFINER
+// prodo_member_group_ids (migrasi 20261014090000) -- workspace_members/
+// workspaces/organizations SEMUA force RLS, RecordLogin berjalan SEBELUM
+// ada session RLS (pola sama IG-14/prodo_group_admin_org_ids), JOIN
+// langsung dari sini akan diam-diam kembali 0 baris. Role lain
+// (platform_admin ditangani terpisah di RecordLogin, atau role tak
+// dikenal) -- slice kosong, bukan error.
+func resolveAuditGroupIDs(ctx context.Context, tx pgx.Tx, userID, platformRole string) ([]string, error) {
+	var query string
+	switch platformRole {
+	case "group_admin":
+		query = `SELECT group_id FROM group_admin_assignments WHERE user_id = $1`
+	case "executive":
+		query = `SELECT group_id FROM executive_assignments WHERE user_id = $1`
+	case "member":
+		query = `SELECT * FROM prodo_member_group_ids($1)`
+	default:
+		return nil, nil
+	}
+
+	rows, err := tx.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolveAuditGroupIDs: %w", err)
+	}
+	defer rows.Close()
+
+	groupIDs := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("resolveAuditGroupIDs: scan: %w", err)
+		}
+		groupIDs = append(groupIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolveAuditGroupIDs: %w", err)
+	}
+	return groupIDs, nil
+}
+
+// insertUserAuditForGroup -- satu baris audit_logs untuk action user.* yang
+// cakupannya SATU grup (dipakai RecordLogin per grup hasil
+// resolveAuditGroupIDs). org_id NULL + metadata.group_id, pola PERSIS
+// webhook cakupan-seluruh-grup/group.locale_updated (entitas ini milik
+// GRUP, bukan satu organisasi tunggal). actor_ip ditangkap dari context
+// (requestMetaFromContext), pola sama insertOrgDomainAudit.
+func insertUserAuditForGroup(ctx context.Context, tx pgx.Tx, userID, platformRole, action, groupID string) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{"group_id": groupID}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("insertUserAuditForGroup: encode metadata: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, actor_ip, metadata)
+		VALUES ($1, $2, $3, 'user', $1, $4::inet, $5)
+	`, userID, platformRole, action, ip, metaJSON)
+	return err
 }
 
 // FindUserByID mencari user berdasarkan users.id -- dipakai LoginSSO (S1-15)
