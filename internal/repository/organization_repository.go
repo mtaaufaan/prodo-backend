@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -32,7 +33,7 @@ type Organization struct {
 	GroupID           string
 	Name              string
 	Slug              string
-	Domain            string
+	Domains           []string
 	DefaultLanguage   string
 	StorageQuotaBytes int64
 	StorageMaxBytes   int64
@@ -42,6 +43,17 @@ type Organization struct {
 	MemberCount       int
 	DeactivatedAt     *time.Time
 	CreatedAt         time.Time
+}
+
+// OrganizationDomain -- satu baris domain email resmi organisasi (S4G-02
+// semula kolom tunggal `organizations.domain`, dipecah jadi tabel
+// one-to-many 2026-09-11 -- satu organisasi bisa punya lebih dari satu
+// domain, dikonfirmasi user). Unik PER-ORGANISASI saja (bukan global).
+type OrganizationDomain struct {
+	ID             string
+	OrganizationID string
+	Domain         string
+	CreatedAt      time.Time
 }
 
 // IsGroupAdminOfGroup mengecek apakah userID adalah salah satu GA yang
@@ -85,18 +97,29 @@ func (r *OrganizationRepository) GetGroupID(ctx context.Context, exec db.Executo
 // plafon storage grup gabungan) -- kalau validasi gagal, INSERT ini ikut
 // roll back bersama transaksi request-scoped.
 func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*Organization, error) {
-	org := &Organization{GroupID: groupID, Name: name, Slug: slug, Domain: orgDomain, DefaultLanguage: defaultLanguage}
+	org := &Organization{GroupID: groupID, Name: name, Slug: slug, DefaultLanguage: defaultLanguage}
 	err := exec.QueryRow(ctx, `
-		INSERT INTO organizations (group_id, name, slug, domain, default_language)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5::org_language)
+		INSERT INTO organizations (group_id, name, slug, default_language)
+		VALUES ($1, $2, $3, $4::org_language)
 		RETURNING id, created_at
-	`, groupID, name, slug, orgDomain, defaultLanguage).Scan(&org.ID, &org.CreatedAt)
+	`, groupID, name, slug, defaultLanguage).Scan(&org.ID, &org.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
 	}
 
 	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.created", org.ID); err != nil {
 		return nil, fmt.Errorf("repository.Create: audit: %w", err)
+	}
+
+	// domain (S4G-02) diisi opsional saat Create -- kalau ada, jadi baris
+	// pertama organization_domains (2026-09-11: kolom tunggal dipecah jadi
+	// tabel one-to-many, lihat OrganizationDomain). GA bisa tambah domain
+	// lain lagi kapan saja lewat AddDomain.
+	if orgDomain != "" {
+		if _, err := r.insertDomain(ctx, exec, org.ID, orgDomain, actorID, actorRole); err != nil {
+			return nil, fmt.Errorf("repository.Create: %w", err)
+		}
+		org.Domains = []string{orgDomain}
 	}
 
 	if err := r.UpdateStorageQuota(ctx, exec, org.ID, quotaBytes, retentionDays, actorID, actorRole); err != nil {
@@ -108,17 +131,15 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 	return org, nil
 }
 
-// Update mengubah name/slug/domain organisasi. `domain` (email resmi) --
-// S4G-02, Track S4G -- ditambahkan menyusul kolom `domain` (lihat migrasi
-// 20260910090000), wording asli S3-03 ("nama/logo/domain") sengaja cuma
-// mengerjakan nama/slug waktu itu karena kolomnya belum ada. `logo` TETAP
-// di luar scope (belum ada storage file organisasi). domain kosong ("")
-// disimpan sebagai NULL (opsional, sama pola description project).
-func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error {
+// Update mengubah name/slug organisasi (S3-03). Domain email resmi
+// (S4G-02) DIPISAH dari sini sejak 2026-09-11 -- lihat AddDomain/
+// RemoveDomain, organisasi sekarang bisa punya lebih dari satu domain,
+// tidak lagi cocok sebagai satu field dalam form nama/slug.
+func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
-		UPDATE organizations SET name = $2, slug = $3, domain = NULLIF($4, ''), updated_at = NOW()
+		UPDATE organizations SET name = $2, slug = $3, updated_at = NOW()
 		WHERE id = $1
-	`, orgID, name, slug, orgDomain)
+	`, orgID, name, slug)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
 	}
@@ -130,6 +151,107 @@ func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, o
 		return fmt.Errorf("repository.Update: audit: %w", err)
 	}
 	return nil
+}
+
+// insertDomain menyimpan satu baris organization_domains + audit trail --
+// dipakai Create (domain awal opsional) dan AddDomain (GA menambah domain
+// lain kapan saja lewat ManageOrganizationModal).
+func (r *OrganizationRepository) insertDomain(ctx context.Context, exec db.Executor, orgID, domainValue, actorID, actorRole string) (string, error) {
+	var id string
+	err := exec.QueryRow(ctx, `
+		INSERT INTO organization_domains (organization_id, domain) VALUES ($1, $2) RETURNING id
+	`, orgID, domainValue).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("insertDomain: %w", classifyUniqueViolation(err, domain.ErrOrganizationDomainExists))
+	}
+	if err := insertOrgDomainAudit(ctx, exec, actorID, actorRole, "organization.domain_added", id, orgID, domainValue); err != nil {
+		return "", fmt.Errorf("insertDomain: audit: %w", err)
+	}
+	return id, nil
+}
+
+// ListDomains mengembalikan seluruh domain email resmi organisasi (id +
+// domain), diurutkan created_at -- dipakai FE ManageOrganizationModal untuk
+// menampilkan chip domain YANG BISA DIHAPUS (baris List() organizations
+// biasa cuma mengembalikan array string domain, tanpa id, cukup untuk
+// tampilan ringkas tapi tidak cukup untuk tombol hapus per-domain).
+func (r *OrganizationRepository) ListDomains(ctx context.Context, exec db.Executor, orgID string) ([]OrganizationDomain, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, organization_id, domain, created_at FROM organization_domains
+		WHERE organization_id = $1 ORDER BY created_at
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListDomains: %w", err)
+	}
+	defer rows.Close()
+
+	domains := make([]OrganizationDomain, 0)
+	for rows.Next() {
+		var d OrganizationDomain
+		if err := rows.Scan(&d.ID, &d.OrganizationID, &d.Domain, &d.CreatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListDomains: scan: %w", err)
+		}
+		domains = append(domains, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListDomains: %w", err)
+	}
+	return domains, nil
+}
+
+// AddDomain menambah satu domain email resmi ke organisasi yang sudah ada
+// (2026-09-11, dikonfirmasi user: satu organisasi bisa punya >1 domain).
+func (r *OrganizationRepository) AddDomain(ctx context.Context, exec db.Executor, orgID, domainValue, actorID, actorRole string) (*OrganizationDomain, error) {
+	id, err := r.insertDomain(ctx, exec, orgID, domainValue, actorID, actorRole)
+	if err != nil {
+		return nil, fmt.Errorf("repository.AddDomain: %w", err)
+	}
+	return &OrganizationDomain{ID: id, OrganizationID: orgID, Domain: domainValue}, nil
+}
+
+// RemoveDomain menghapus satu domain email resmi organisasi. `RETURNING
+// domain` (bukan cek RowsAffected biasa) supaya nilai domain yang dihapus
+// bisa dicatat di metadata audit (entity_id -- organization_domains.id --
+// tidak resolve ke nama apa pun lewat JOIN, sama pola user_invitations).
+func (r *OrganizationRepository) RemoveDomain(ctx context.Context, exec db.Executor, orgID, domainID, actorID, actorRole string) error {
+	var domainValue string
+	err := exec.QueryRow(ctx, `
+		DELETE FROM organization_domains WHERE id = $1 AND organization_id = $2 RETURNING domain
+	`, domainID, orgID).Scan(&domainValue)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.RemoveDomain: %w", domain.ErrOrganizationDomainNotFound)
+		}
+		return fmt.Errorf("repository.RemoveDomain: %w", err)
+	}
+
+	if err := insertOrgDomainAudit(ctx, exec, actorID, actorRole, "organization.domain_removed", domainID, orgID, domainValue); err != nil {
+		return fmt.Errorf("repository.RemoveDomain: audit: %w", err)
+	}
+	return nil
+}
+
+// insertOrgDomainAudit -- chokepoint audit untuk domain_added/domain_removed.
+// entity_type 'organization_domain' (BUKAN 'organization') karena entity_id
+// menunjuk baris organization_domains, bukan organizations -- domain
+// disimpan di metadata (satu-satunya cara mengidentifikasi baris ini,
+// sama pola email di insertInvitationAudit). actor_ip ditangkap dari
+// context, konsisten dengan konvensi audit trail yang sudah berlaku.
+func insertOrgDomainAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, domainID, orgID, domainValue string) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{"domain": domainValue}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("insertOrgDomainAudit: encode metadata: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id, actor_ip, metadata)
+		VALUES ($1, $2, $3, 'organization_domain', $4, $5, $6::inet, $7)
+	`, actorID, actorRole, action, domainID, orgID, ip, metaJSON)
+	return err
 }
 
 // UpdateSettings mengubah default_language organisasi (S3-30, US-010).
@@ -365,7 +487,9 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor, gro
 	// multi-row -- reuse yang sama supaya tidak N+1 request GetSummary per
 	// organisasi dari FE.
 	query := `
-		SELECT o.id, o.group_id, o.name, o.slug, COALESCE(o.domain, ''), o.default_language,
+		SELECT o.id, o.group_id, o.name, o.slug,
+		       COALESCE((SELECT array_agg(od.domain ORDER BY od.created_at) FROM organization_domains od WHERE od.organization_id = o.id), ARRAY[]::text[]),
+		       o.default_language,
 		       o.storage_quota_bytes, o.storage_max_bytes, o.storage_used_mb * 1024 * 1024, o.retention_days,
 		       COALESCE((SELECT COUNT(*) FROM workspaces w WHERE w.org_id = o.id AND w.archived_at IS NULL), 0),
 		       COALESCE((SELECT COUNT(DISTINCT wm.user_id) FROM workspace_members wm
@@ -389,7 +513,7 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor, gro
 	orgs := make([]Organization, 0)
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.Domain, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.StorageUsedBytes, &o.RetentionDays, &o.WorkspaceCount, &o.MemberCount, &o.DeactivatedAt, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.GroupID, &o.Name, &o.Slug, &o.Domains, &o.DefaultLanguage, &o.StorageQuotaBytes, &o.StorageMaxBytes, &o.StorageUsedBytes, &o.RetentionDays, &o.WorkspaceCount, &o.MemberCount, &o.DeactivatedAt, &o.CreatedAt); err != nil {
 			return nil, 0, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		orgs = append(orgs, o)

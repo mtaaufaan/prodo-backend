@@ -50,6 +50,18 @@ var validWorkspaceRoles = map[string]bool{
 	"approver": true, "viewer": true, "division_viewer": true,
 }
 
+// matchesAnyDomain -- organisasi bisa punya lebih dari satu domain email
+// resmi sejak 2026-09-11 (organization_domains, dikonfirmasi user) -- baris
+// CSV valid kalau emailnya cocok SALAH SATU domain terdaftar.
+func matchesAnyDomain(email string, domains []string) bool {
+	for _, d := range domains {
+		if strings.HasSuffix(email, "@"+d) {
+			return true
+		}
+	}
+	return false
+}
+
 // MemberImportTemplateCSV -- template kolom persis desain ("KOLOM: email,
 // nama, role, workspace").
 func MemberImportTemplateCSV() []byte {
@@ -238,8 +250,8 @@ func (s *CSVImportService) Validate(ctx context.Context, exec db.Executor, group
 			row.Status, row.Reason = "skipped", "Format email tidak valid."
 		case seen[row.Email]:
 			row.Status, row.Reason = "skipped", "Duplikat email dalam berkas ini."
-		case org.Domain != "" && !strings.HasSuffix(row.Email, "@"+org.Domain):
-			row.Status, row.Reason = "skipped", fmt.Sprintf("Domain di luar domain email resmi organisasi (%s).", org.Domain)
+		case len(org.Domains) > 0 && !matchesAnyDomain(row.Email, org.Domains):
+			row.Status, row.Reason = "skipped", fmt.Sprintf("Domain di luar domain email resmi organisasi (%s).", strings.Join(org.Domains, ", "))
 		case !validWorkspaceRoles[row.Role]:
 			row.Status, row.Reason = "skipped", "Role tidak dikenal. Gunakan nilai dari template."
 		default:

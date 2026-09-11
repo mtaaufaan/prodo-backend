@@ -20,7 +20,10 @@ type organizationRepository interface {
 	IsGroupAdminOfGroup(ctx context.Context, exec db.Executor, userID, groupID string) (bool, error)
 	GetGroupID(ctx context.Context, exec db.Executor, orgID string) (string, error)
 	Create(ctx context.Context, exec db.Executor, groupID, name, slug, orgDomain, defaultLanguage string, quotaBytes int64, retentionDays int, actorID, actorRole string) (*repository.Organization, error)
-	Update(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error
+	Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error
+	ListDomains(ctx context.Context, exec db.Executor, orgID string) ([]repository.OrganizationDomain, error)
+	AddDomain(ctx context.Context, exec db.Executor, orgID, domainValue, actorID, actorRole string) (*repository.OrganizationDomain, error)
+	RemoveDomain(ctx context.Context, exec db.Executor, orgID, domainID, actorID, actorRole string) error
 	UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error
 	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
@@ -120,22 +123,71 @@ func (s *OrganizationService) CreateOrganization(ctx context.Context, exec db.Ex
 // "GA Organizations.dc.html"), sama regex dengan CHECK constraint DB.
 var orgDomainPattern = regexp.MustCompile(`(?i)^[a-z0-9.-]+\.[a-z]{2,}$`)
 
-// UpdateOrganization mengubah name/slug/domain organisasi existing (S3-03,
-// domain ditambahkan S4G-02). orgDomain kosong ("") berarti dikosongkan
-// (opsional) -- kalau diisi, WAJIB format domain valid.
-func (s *OrganizationService) UpdateOrganization(ctx context.Context, exec db.Executor, orgID, name, slug, orgDomain, actorID, actorRole string) error {
+// UpdateOrganization mengubah name/slug organisasi existing (S3-03). Domain
+// email resmi (S4G-02) DIPISAH dari sini sejak 2026-09-11 -- lihat
+// AddOrganizationDomain/RemoveOrganizationDomain.
+func (s *OrganizationService) UpdateOrganization(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error {
 	if orgID == "" || name == "" || slug == "" {
-		return fmt.Errorf("service.UpdateOrganization: %w", domain.ErrInvalidInput)
-	}
-	if orgDomain != "" && !orgDomainPattern.MatchString(orgDomain) {
 		return fmt.Errorf("service.UpdateOrganization: %w", domain.ErrInvalidInput)
 	}
 	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
 		return err
 	}
 
-	if err := s.repo.Update(ctx, exec, orgID, name, slug, orgDomain, actorID, actorRole); err != nil {
+	if err := s.repo.Update(ctx, exec, orgID, name, slug, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.UpdateOrganization: %w", err)
+	}
+	return nil
+}
+
+// ListOrganizationDomains mengembalikan seluruh domain email resmi
+// organisasi (dipakai FE ManageOrganizationModal untuk chip yang bisa
+// dihapus -- lihat OrganizationRepository.ListDomains).
+func (s *OrganizationService) ListOrganizationDomains(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) ([]repository.OrganizationDomain, error) {
+	if orgID == "" {
+		return nil, fmt.Errorf("service.ListOrganizationDomains: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return nil, err
+	}
+
+	domains, err := s.repo.ListDomains(ctx, exec, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListOrganizationDomains: %w", err)
+	}
+	return domains, nil
+}
+
+// AddOrganizationDomain menambah satu domain email resmi ke organisasi yang
+// sudah ada (2026-09-11, dikonfirmasi user: satu organisasi bisa punya
+// lebih dari satu domain -- lihat implementation_gaps.md untuk keputusan
+// "unik per-organisasi saja, bukan global").
+func (s *OrganizationService) AddOrganizationDomain(ctx context.Context, exec db.Executor, orgID, domainValue, actorID, actorRole string) (*repository.OrganizationDomain, error) {
+	if orgID == "" || domainValue == "" || !orgDomainPattern.MatchString(domainValue) {
+		return nil, fmt.Errorf("service.AddOrganizationDomain: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return nil, err
+	}
+
+	d, err := s.repo.AddDomain(ctx, exec, orgID, domainValue, actorID, actorRole)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddOrganizationDomain: %w", err)
+	}
+	return d, nil
+}
+
+// RemoveOrganizationDomain menghapus satu domain email resmi organisasi.
+func (s *OrganizationService) RemoveOrganizationDomain(ctx context.Context, exec db.Executor, orgID, domainID, actorID, actorRole string) error {
+	if orgID == "" || domainID == "" {
+		return fmt.Errorf("service.RemoveOrganizationDomain: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.RemoveDomain(ctx, exec, orgID, domainID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.RemoveOrganizationDomain: %w", err)
 	}
 	return nil
 }
