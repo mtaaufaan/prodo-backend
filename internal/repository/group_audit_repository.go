@@ -59,10 +59,15 @@ type GroupAuditLogFilter struct {
 // groupScopeClause + actionTypeCase -- dipakai berulang, satu sumber
 // kebenaran supaya count dan list tidak pernah diam-diam beda.
 const groupScopeClause = `(o.group_id = $%d OR (al.metadata ? 'group_id' AND (al.metadata->>'group_id')::uuid = $%d))`
+// 'user.login'/'user.backup_code_used' (2026-09-11, IG-57) ditambahkan
+// literal ke cabang ACCESS -- action-nya TIDAK di-rename jadi 'auth.*'
+// supaya tidak menyentuh Platform Admin (logAudit yang sama menulis nama
+// action ini ke platform_audit_logs juga, dan narrative Platform Admin
+// sendiri sudah hardcode 'user.login').
 const actionTypeCase = `CASE
 	WHEN al.action LIKE '%%.created' THEN 'CREATE'
 	WHEN al.action LIKE '%%.deleted' THEN 'DELETE'
-	WHEN al.action LIKE 'session.%%' OR al.action LIKE 'auth.%%' THEN 'ACCESS'
+	WHEN al.action LIKE 'session.%%' OR al.action LIKE 'auth.%%' OR al.action IN ('user.login', 'user.backup_code_used') THEN 'ACCESS'
 	ELSE 'UPDATE'
 END`
 
