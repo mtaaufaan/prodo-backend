@@ -95,6 +95,16 @@ func groupAuditNarrativeText(e *repository.GroupAuditLogEntry) string {
 		return fmt.Sprintf("Login %s berhasil", groupAuditRoleLabel(e))
 	case "user.backup_code_used":
 		return fmt.Sprintf("Login %s menggunakan kode cadangan MFA", groupAuditRoleLabel(e))
+	case "account.profile_updated":
+		return fmt.Sprintf("%s memperbarui profil akun sendiri", groupAuditRoleLabel(e))
+	case "account.password_changed":
+		return fmt.Sprintf("%s mengganti password akun sendiri", groupAuditRoleLabel(e))
+	case "account.mfa_device_reset":
+		return fmt.Sprintf("%s memindahkan MFA ke perangkat baru", groupAuditRoleLabel(e))
+	case "account.mfa_backup_codes_regenerated":
+		return fmt.Sprintf("%s membuat ulang kode pemulihan MFA", groupAuditRoleLabel(e))
+	case "account.notification_preferences_updated":
+		return fmt.Sprintf("%s memperbarui preferensi notifikasi akun sendiri", groupAuditRoleLabel(e))
 	default:
 		return fmt.Sprintf("%s pada %s", e.Action, e.EntityType)
 	}
