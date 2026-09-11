@@ -46,6 +46,8 @@ func groupAuditNarrativeText(e *repository.GroupAuditLogEntry) string {
 		return fmt.Sprintf(`Organisasi %q diaktifkan kembali`, target)
 	case "organization.deleted":
 		return fmt.Sprintf(`Organisasi %q dihapus`, target)
+	case "organization.restored":
+		return fmt.Sprintf(`Organisasi %q dipulihkan dari jadwal penghapusan`, target)
 	case "workspace.created":
 		return fmt.Sprintf(`Workspace %q dibuat`, target)
 	case "workspace.updated":
