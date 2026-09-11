@@ -39,6 +39,12 @@ type fakeOrganizationRepo struct {
 	retentionMin, retentionMax int
 	retentionTier              string
 	retentionRangeErr          error
+
+	listDomainsResult []repository.OrganizationDomain
+	listDomainsErr    error
+	addDomainErr      error
+	addDomainResult   *repository.OrganizationDomain
+	removeDomainErr   error
 }
 
 type quotaUpdate struct {
@@ -62,12 +68,32 @@ func (f *fakeOrganizationRepo) Create(_ context.Context, _ db.Executor, groupID,
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	f.createdOrg = &repository.Organization{ID: "org-new", GroupID: groupID, Name: name, Slug: slug, Domain: orgDomain, DefaultLanguage: defaultLanguage, StorageQuotaBytes: quotaBytes, RetentionDays: retentionDays}
+	var domains []string
+	if orgDomain != "" {
+		domains = []string{orgDomain}
+	}
+	f.createdOrg = &repository.Organization{ID: "org-new", GroupID: groupID, Name: name, Slug: slug, Domains: domains, DefaultLanguage: defaultLanguage, StorageQuotaBytes: quotaBytes, RetentionDays: retentionDays}
 	return f.createdOrg, nil
 }
 
-func (f *fakeOrganizationRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _, _ string) error {
+func (f *fakeOrganizationRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
 	return f.updateErr
+}
+
+func (f *fakeOrganizationRepo) ListDomains(_ context.Context, _ db.Executor, _ string) ([]repository.OrganizationDomain, error) {
+	return f.listDomainsResult, f.listDomainsErr
+}
+
+func (f *fakeOrganizationRepo) AddDomain(_ context.Context, _ db.Executor, orgID, domainValue, _, _ string) (*repository.OrganizationDomain, error) {
+	if f.addDomainErr != nil {
+		return nil, f.addDomainErr
+	}
+	f.addDomainResult = &repository.OrganizationDomain{ID: "domain-new", OrganizationID: orgID, Domain: domainValue}
+	return f.addDomainResult, nil
+}
+
+func (f *fakeOrganizationRepo) RemoveDomain(_ context.Context, _ db.Executor, _, _, _, _ string) error {
+	return f.removeDomainErr
 }
 
 func (f *fakeOrganizationRepo) UpdateSettings(_ context.Context, _ db.Executor, _, _, _, _ string) error {
@@ -242,7 +268,7 @@ func TestOrganizationService_UpdateOrganization_GroupAdminOfOrgsGroup(t *testing
 	}
 	svc := NewOrganizationService(repo)
 
-	if err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "", "ga-1", "group_admin"); err != nil {
+	if err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "ga-1", "group_admin"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -254,7 +280,7 @@ func TestOrganizationService_UpdateOrganization_GroupAdminOfOtherGroup_Forbidden
 	}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "", "ga-2", "group_admin")
+	err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme Baru", "acme-baru", "ga-2", "group_admin")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
 	}
@@ -265,7 +291,7 @@ func TestOrganizationService_UpdateOrganization_GroupAdminOfOtherGroup_Forbidden
 func TestOrganizationService_UpdateOrganization_OrgNotFound_GroupAdmin(t *testing.T) {
 	svc := NewOrganizationService(&fakeOrganizationRepo{})
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "", "ga-1", "group_admin")
+	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "ga-1", "group_admin")
 	if !errors.Is(err, domain.ErrOrganizationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrOrganizationNotFound", err)
 	}
@@ -278,28 +304,87 @@ func TestOrganizationService_UpdateOrganization_OrgNotFound_PlatformAdmin(t *tes
 	repo := &fakeOrganizationRepo{updateErr: domain.ErrOrganizationNotFound}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "", "pa-1", "platform_admin")
+	err := svc.UpdateOrganization(context.Background(), nil, "org-missing", "Acme", "acme", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrOrganizationNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrOrganizationNotFound", err)
 	}
 }
 
-func TestOrganizationService_UpdateOrganization_InvalidDomain(t *testing.T) {
+func TestOrganizationService_ListOrganizationDomains_Success(t *testing.T) {
+	repo := &fakeOrganizationRepo{
+		orgGroup:          map[string]string{"org-1": "group-1"},
+		listDomainsResult: []repository.OrganizationDomain{{ID: "domain-1", OrganizationID: "org-1", Domain: "acme.co.id"}},
+	}
+	svc := NewOrganizationService(repo)
+
+	domains, err := svc.ListOrganizationDomains(context.Background(), nil, "org-1", "pa-1", "platform_admin")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(domains) != 1 || domains[0].Domain != "acme.co.id" {
+		t.Errorf("domains = %+v, unexpected", domains)
+	}
+}
+
+func TestOrganizationService_ListOrganizationDomains_GroupAdminNotOfOrg_Forbidden(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, gaGroups: map[string]bool{}}
+	svc := NewOrganizationService(repo)
+
+	_, err := svc.ListOrganizationDomains(context.Background(), nil, "org-1", "ga-2", "group_admin")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
+	}
+}
+
+func TestOrganizationService_AddOrganizationDomain_InvalidFormat(t *testing.T) {
 	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
 	svc := NewOrganizationService(repo)
 
-	err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme", "acme", "not-a-domain", "pa-1", "platform_admin")
+	_, err := svc.AddOrganizationDomain(context.Background(), nil, "org-1", "not-a-domain", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
 	}
 }
 
-func TestOrganizationService_UpdateOrganization_ValidDomain(t *testing.T) {
+func TestOrganizationService_AddOrganizationDomain_Valid(t *testing.T) {
 	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
 	svc := NewOrganizationService(repo)
 
-	if err := svc.UpdateOrganization(context.Background(), nil, "org-1", "Acme", "acme", "acme.co.id", "pa-1", "platform_admin"); err != nil {
+	d, err := svc.AddOrganizationDomain(context.Background(), nil, "org-1", "acme.co.id", "pa-1", "platform_admin")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Domain != "acme.co.id" {
+		t.Errorf("domain = %+v, unexpected", d)
+	}
+}
+
+func TestOrganizationService_AddOrganizationDomain_GroupAdminNotOfOrg_Forbidden(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, gaGroups: map[string]bool{}}
+	svc := NewOrganizationService(repo)
+
+	_, err := svc.AddOrganizationDomain(context.Background(), nil, "org-1", "acme.co.id", "ga-2", "group_admin")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
+	}
+}
+
+func TestOrganizationService_RemoveOrganizationDomain_PlatformAdminBypass(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
+	svc := NewOrganizationService(repo)
+
+	if err := svc.RemoveOrganizationDomain(context.Background(), nil, "org-1", "domain-1", "pa-1", "platform_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOrganizationService_RemoveOrganizationDomain_NotFound(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}, removeDomainErr: domain.ErrOrganizationDomainNotFound}
+	svc := NewOrganizationService(repo)
+
+	err := svc.RemoveOrganizationDomain(context.Background(), nil, "org-1", "domain-missing", "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrOrganizationDomainNotFound) {
+		t.Errorf("err = %v, want wrapped domain.ErrOrganizationDomainNotFound", err)
 	}
 }
 

@@ -439,6 +439,11 @@ func run() error {
 	v1.Get("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.List)
 	v1.Post("/organizations", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Create)
 	v1.Put("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Update)
+	// Domain email resmi (2026-09-11): dipisah jadi sub-resource tersendiri
+	// -- organisasi bisa punya lebih dari satu domain (organization_domains).
+	v1.Get("/organizations/:id/domains", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.ListDomains)
+	v1.Post("/organizations/:id/domains", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.AddDomain)
+	v1.Delete("/organizations/:id/domains/:domainId", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.RemoveDomain)
 	v1.Put("/organizations/:id/deactivate", jwtAuth, dbCtx, requireOrgAdmin, requireStepUp, organizationHandler.Deactivate) // S16-04, Track S4G
 	// Members & Roles (forward-pull US-086, Track S4G): otorisasi group-spesifik
 	// (GA pengelola grup INI, bukan sembarang GA) di service layer, lihat

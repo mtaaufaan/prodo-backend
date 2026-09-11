@@ -125,6 +125,18 @@ var (
 	// sudah dihapus/dipindahkan".
 	ErrOrganizationHasWorkspaces = errors.New("organization still has active workspaces")
 
+	// ErrOrganizationDomainExists dikembalikan POST
+	// /organizations/:id/domains saat domain yang sama sudah terdaftar
+	// untuk organisasi ini (uq_organization_domains_org_domain) -- UNIK
+	// PER-ORGANISASI saja, organisasi lain boleh pakai domain yang sama
+	// (dikonfirmasi user 2026-09-11, lihat implementation_gaps.md).
+	ErrOrganizationDomainExists = errors.New("organization domain already registered for this organization")
+
+	// ErrOrganizationDomainNotFound dikembalikan DELETE
+	// /organizations/:id/domains/:domainId saat baris organization_domains
+	// tidak ditemukan (sudah dihapus, atau domainId milik organisasi lain).
+	ErrOrganizationDomainNotFound = errors.New("organization domain not found")
+
 	// ErrWorkspaceNotFound dikembalikan saat workspaces.id tidak ditemukan
 	// (S3-10/11/12).
 	ErrWorkspaceNotFound = errors.New("workspace not found")
