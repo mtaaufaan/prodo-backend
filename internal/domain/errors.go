@@ -137,6 +137,14 @@ var (
 	// tidak ditemukan (sudah dihapus, atau domainId milik organisasi lain).
 	ErrOrganizationDomainNotFound = errors.New("organization domain not found")
 
+	// ErrOrganizationNotDeleted dikembalikan POST /organizations/:id/restore
+	// (2026-09-12, mirror ErrWorkspaceNotDeleted) saat organisasi target
+	// tidak sedang soft-deleted -- DELETE /organizations/:id diubah dari
+	// hard delete jadi soft delete (deleted_at + purge_scheduled_at) supaya
+	// konsisten dengan workspace/project, dikonfirmasi user setelah
+	// menemukan ketidaksesuaian ini lewat pengujian live role Group Admin.
+	ErrOrganizationNotDeleted = errors.New("organization is not soft-deleted")
+
 	// ErrWorkspaceNotFound dikembalikan saat workspaces.id tidak ditemukan
 	// (S3-10/11/12).
 	ErrWorkspaceNotFound = errors.New("workspace not found")

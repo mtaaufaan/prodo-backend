@@ -462,6 +462,28 @@ func (h *OrganizationHandler) Delete(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
+// Restore menangani POST /organizations/:id/restore (2026-09-12) --
+// membatalkan soft-delete dari Delete, pola sama WorkspaceHandler.Restore.
+func (h *OrganizationHandler) Restore(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Restore dipanggil tanpa RequirePlatformRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("OrganizationHandler.Restore dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	orgID := c.Params("id")
+
+	if err := h.orgs.RestoreOrganization(c.Context(), exec, orgID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal memulihkan organisasi")
+	}
+
+	return c.JSON(response.Success(fiber.Map{"id": orgID}))
+}
+
 // Summary menangani GET /organizations/:id/summary (S3-06).
 func (h *OrganizationHandler) Summary(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -510,6 +532,8 @@ func (h *OrganizationHandler) mapError(c *fiber.Ctx, err error, fallbackMessage 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("GROUP_STORAGE_QUOTA_EXCEEDS_CEILING", "Total kuota seluruh organisasi dalam grup akan melebihi plafon storage grup", nil))
 	case errors.Is(err, domain.ErrOrganizationHasWorkspaces):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_HAS_WORKSPACES", "Organisasi masih punya workspace aktif", nil))
+	case errors.Is(err, domain.ErrOrganizationNotDeleted):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("ORGANIZATION_NOT_DELETED", "Organisasi tidak sedang dalam jadwal penghapusan", nil))
 	case errors.Is(err, domain.ErrOrganizationDomainExists):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("DOMAIN_ALREADY_EXISTS", "Domain sudah terdaftar untuk organisasi ini", nil))
 	case errors.Is(err, domain.ErrOrganizationDomainNotFound):

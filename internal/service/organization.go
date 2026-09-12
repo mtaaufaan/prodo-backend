@@ -28,7 +28,8 @@ type organizationRepository interface {
 	UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
-	Delete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
+	SoftDelete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
+	Restore(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error
 	GetSummary(ctx context.Context, exec db.Executor, orgID string) (*repository.Summary, error)
 	List(ctx context.Context, exec db.Executor, groupID string) ([]repository.Organization, int64, error)
 	IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error)
@@ -441,8 +442,10 @@ func (s *OrganizationService) IsActive(ctx context.Context, exec db.Executor, or
 	return active, nil
 }
 
-// DeleteOrganization menghapus organisasi permanen (S3-05) -- ditolak kalau
-// masih ada workspace aktif di dalamnya (domain.ErrOrganizationHasWorkspaces).
+// DeleteOrganization memindahkan organisasi ke jadwal penghapusan (S3-05,
+// soft-delete sejak 2026-09-12 -- lihat OrganizationRepository.SoftDelete)
+// -- ditolak kalau masih ada workspace aktif di dalamnya
+// (domain.ErrOrganizationHasWorkspaces).
 func (s *OrganizationService) DeleteOrganization(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
 	if orgID == "" {
 		return fmt.Errorf("service.DeleteOrganization: %w", domain.ErrInvalidInput)
@@ -451,8 +454,25 @@ func (s *OrganizationService) DeleteOrganization(ctx context.Context, exec db.Ex
 		return err
 	}
 
-	if err := s.repo.Delete(ctx, exec, orgID, actorID, actorRole); err != nil {
+	if err := s.repo.SoftDelete(ctx, exec, orgID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.DeleteOrganization: %w", err)
+	}
+	return nil
+}
+
+// RestoreOrganization membatalkan soft-delete (kebalikan DeleteOrganization)
+// -- otorisasi sama persis (Platform Admin/Group Admin pengelola grup
+// pemilik org), pola sama WorkspaceService.RestoreWorkspace.
+func (s *OrganizationService) RestoreOrganization(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
+	if orgID == "" {
+		return fmt.Errorf("service.RestoreOrganization: %w", domain.ErrInvalidInput)
+	}
+	if err := s.AuthorizeOrgAccess(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return err
+	}
+
+	if err := s.repo.Restore(ctx, exec, orgID, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.RestoreOrganization: %w", err)
 	}
 	return nil
 }

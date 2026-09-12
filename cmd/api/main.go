@@ -478,7 +478,12 @@ func run() error {
 	v1.Delete("/groups/:groupId/executive-invitations/:id", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.CancelExecutiveInvitation)
 	v1.Post("/groups/:groupId/executive-invitations/:id/resend", jwtAuth, dbCtx, requireOrgAdmin, groupMemberHandler.ResendExecutiveInvitation)
 	v1.Put("/organizations/:id/reactivate", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Reactivate)
+	// Data Retention (2026-09-12): Delete di atas sekarang soft-delete
+	// (sebelumnya hard DELETE -- ditemukan user via pengujian live role
+	// Group Admin, dibuat konsisten dengan workspaces.Restore di atas) --
+	// Restore membatalkannya, dipakai dari tab Jadwal Penghapusan.
 	v1.Delete("/organizations/:id", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Delete)
+	v1.Post("/organizations/:id/restore", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Restore)
 	v1.Get("/organizations/:id/summary", jwtAuth, dbCtx, requireOrgAdmin, organizationHandler.Summary)
 	// SSO Config (US-074, Track S4G S4G-23) -- cakupan lebih kecil dari
 	// draft S12-27..33, lihat komentar migrasi 20261002090000_sso_configs.

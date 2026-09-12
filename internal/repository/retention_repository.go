@@ -1,11 +1,22 @@
 // Package repository -- RetentionRepository (Data Retention, Track S4G,
 // desain "GA Data Retention.dc.html"). Tab "Jadwal Penghapusan" gabungan
-// TIGA sumber lintas seluruh grup: organisasi dinonaktifkan (retensi
+// EMPAT sumber lintas seluruh grup: organisasi dinonaktifkan (retensi
 // TETAP 90 hari, kebijakan platform, TIDAK bisa diubah GA -- lihat desain
-// "DATA OPERASIONAL 90 hari"), workspace/project soft-deleted (retensi
-// EDITABLE lewat organizations.retention_days, per organisasi pemiliknya).
-// Restore ketiganya reuse endpoint yang SUDAH ADA (organization.Reactivate,
-// workspace.Restore, project.Restore) -- repository ini CUMA baca.
+// "DATA OPERASIONAL 90 hari"), organisasi/workspace/project soft-deleted
+// (retensi EDITABLE lewat organizations.retention_days, per organisasi
+// pemiliknya). Restore keempatnya reuse endpoint yang SUDAH ADA
+// (organization.Reactivate, organization.Restore, workspace.Restore,
+// project.Restore) -- repository ini CUMA baca.
+//
+// organization.Restore (kind 'org_deleted') ditambahkan 2026-09-12 --
+// sebelumnya DELETE /organizations/:id hard-delete, tidak pernah muncul di
+// jadwal ini sama sekali (ditemukan user via pengujian live: "hard delete
+// diganti dengan soft delete, persis seperti pada penghapusan workspace").
+// Kind 'org' (deactivated) dan 'org_deleted' (soft-deleted) SENGAJA
+// dipisah, bukan digabung jadi satu kind 'org' -- keduanya orthogonal
+// (satu organisasi bisa dinonaktifkan SEKALIGUS dihapus) dan punya retensi
+// beda (90 hari tetap vs retention_days editable), FE butuh membedakan
+// aksi restore (Reactivate vs Restore) per baris.
 package repository
 
 import (
@@ -27,7 +38,7 @@ import (
 const orgDeactivationRetentionDays = 90
 
 type RetentionScheduleItem struct {
-	Kind      string // "org" | "workspace" | "project"
+	Kind      string // "org" | "org_deleted" | "workspace" | "project"
 	ItemID    string
 	ItemName  string
 	OrgName   string
@@ -53,6 +64,14 @@ func (r *RetentionRepository) ListSchedule(ctx context.Context, exec db.Executor
 			       o.deactivated_at + ($2::text || ' days')::interval AS purge_at
 			FROM organizations o
 			WHERE o.group_id = $1 AND o.deactivated_at IS NOT NULL
+
+			UNION ALL
+
+			SELECT 'org_deleted' AS kind, o.id AS item_id, o.name AS item_name, o.name AS org_name,
+			       o.deleted_at AS event_at, o.retention_days AS total_days,
+			       o.purge_scheduled_at AS purge_at
+			FROM organizations o
+			WHERE o.group_id = $1 AND o.deleted_at IS NOT NULL
 
 			UNION ALL
 
