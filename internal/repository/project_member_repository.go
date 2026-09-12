@@ -76,7 +76,7 @@ func (r *ProjectMemberRepository) AddMember(ctx context.Context, exec db.Executo
 		return fmt.Errorf("repository.AddMember: %w", classifyUniqueViolation(err, domain.ErrProjectMemberAlreadyExists))
 	}
 
-	if err := insertProjectMemberAudit(ctx, exec, addedBy, actorRole, "project_member.added", projectID, userID); err != nil {
+	if err := insertProjectMemberAudit(ctx, exec, addedBy, actorRole, "project_member.added", projectID, userID, nil, nil); err != nil {
 		return fmt.Errorf("repository.AddMember: audit: %w", err)
 	}
 
@@ -102,6 +102,14 @@ func (r *ProjectMemberRepository) AddMember(ctx context.Context, exec db.Executo
 
 // UpdateRole mengubah role project member existing (S3-22).
 func (r *ProjectMemberRepository) UpdateRole(ctx context.Context, exec db.Executor, projectID, userID, role, actorID, actorRole string) error {
+	oldRole, found, err := r.GetRole(ctx, exec, projectID, userID)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateRole: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("repository.UpdateRole: %w", domain.ErrProjectMemberNotFound)
+	}
+
 	tag, err := exec.Exec(ctx, `
 		UPDATE project_members SET role = $3::project_scoped_role
 		WHERE project_id = $1 AND user_id = $2
@@ -113,7 +121,9 @@ func (r *ProjectMemberRepository) UpdateRole(ctx context.Context, exec db.Execut
 		return fmt.Errorf("repository.UpdateRole: %w", domain.ErrProjectMemberNotFound)
 	}
 
-	if err := insertProjectMemberAudit(ctx, exec, actorID, actorRole, "project_member.role_changed", projectID, userID); err != nil {
+	before := map[string]any{"role": oldRole}
+	after := map[string]any{"role": role}
+	if err := insertProjectMemberAudit(ctx, exec, actorID, actorRole, "project_member.role_changed", projectID, userID, before, after); err != nil {
 		return fmt.Errorf("repository.UpdateRole: audit: %w", err)
 	}
 	return nil
@@ -132,7 +142,7 @@ func (r *ProjectMemberRepository) RemoveMember(ctx context.Context, exec db.Exec
 		return fmt.Errorf("repository.RemoveMember: %w", domain.ErrProjectMemberNotFound)
 	}
 
-	if err := insertProjectMemberAudit(ctx, exec, actorID, actorRole, "project_member.removed", projectID, userID); err != nil {
+	if err := insertProjectMemberAudit(ctx, exec, actorID, actorRole, "project_member.removed", projectID, userID, nil, nil); err != nil {
 		return fmt.Errorf("repository.RemoveMember: audit: %w", err)
 	}
 	return nil
@@ -244,10 +254,31 @@ func (r *ProjectMemberRepository) RevokeAllScopedForUser(ctx context.Context, ex
 // dimutasi), sama pola insertWorkspaceAudit's AssignRole. project_id
 // disimpan di metadata JSONB, bukan kolom entity_id/workspace_id/org_id
 // dedicated -- audit_logs tidak punya kolom project_id (§5.27).
-func insertProjectMemberAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, projectID, targetUserID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
-		VALUES ($1, $2, $3, 'project_member', $4, jsonb_build_object('project_id', $5::uuid))
-	`, actorID, actorRole, action, targetUserID, projectID)
+// stateBefore/stateAfter + actor_ip/metadata.request_path
+// (implementation_gaps.md IG-64) -- sebelumnya tidak pernah diisi sama
+// sekali, mengikuti pola persis insertOrgAudit/insertWorkspaceAudit yang
+// diperbaiki lebih dulu.
+func insertProjectMemberAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, projectID, targetUserID string, stateBefore, stateAfter map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{"project_id": projectID}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	metaJSON, err := marshalIfNotEmpty(metadata)
+	if err != nil {
+		return fmt.Errorf("insertProjectMemberAudit: encode metadata: %w", err)
+	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("insertProjectMemberAudit: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("insertProjectMemberAudit: encode state_after: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, 'project_member', $4, $5::inet, $6, $7, $8)
+	`, actorID, actorRole, action, targetUserID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }
