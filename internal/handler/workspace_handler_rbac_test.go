@@ -60,8 +60,14 @@ func (stubExecutor) Query(context.Context, string, ...any) (pgx.Rows, error) { r
 func (stubExecutor) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
 
 // stubMemberRepo -- persis satu member (testMemberID) dengan role
-// tertentu di testWorkspaceID; user lain dianggap bukan member.
-type stubMemberRepo struct{ role string }
+// tertentu di testWorkspaceID; user lain dianggap bukan member. lastAdmin
+// true mensimulasikan "tidak ada admin_workspace lain tersisa" (S4W-01,
+// CountAdminsExcluding = 0) -- default false supaya test lama yang tidak
+// peduli soal ini (mis. RBAC boundary biasa) tidak ikut ke-guard.
+type stubMemberRepo struct {
+	role      string
+	lastAdmin bool
+}
 
 func (r stubMemberRepo) GetRole(_ context.Context, _ db.Executor, _, userID string) (string, error) {
 	if userID == testMemberID && r.role != "" {
@@ -91,6 +97,17 @@ func (stubMemberRepo) GetWorkspaceOrgID(context.Context, db.Executor, string) (s
 
 func (stubMemberRepo) RemoveMember(context.Context, db.Executor, string, string, string, string) error {
 	return nil
+}
+
+func (r stubMemberRepo) CountAdminsExcluding(context.Context, db.Executor, string, string) (int, error) {
+	if r.lastAdmin {
+		return 0, nil
+	}
+	return 1, nil
+}
+
+func (stubMemberRepo) ListWorkspaceMemberCandidates(context.Context, db.Executor, string, string) ([]repository.Member, error) {
+	return nil, nil
 }
 
 type noopCache struct{}
@@ -163,6 +180,47 @@ func TestRBAC_UpdateMemberRole_BoundaryPerRole(t *testing.T) {
 				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
 		})
+	}
+}
+
+// S4W-01: admin_workspace tidak boleh memberi role admin_workspace ke
+// siapa pun (termasuk diri sendiri) lewat endpoint ini -- hanya PA/GA yang
+// berwenang (bypass RequireRole, actorRole != "admin_workspace").
+func TestRBAC_UpdateMemberRole_AWCannotAssignAdminWorkspace(t *testing.T) {
+	app := newTestApp(testMemberID, "member", stubMemberRepo{role: "admin_workspace"})
+	body := bytes.NewBufferString(`{"role":"admin_workspace"}`)
+	req := httptest.NewRequest(http.MethodPut, "/workspaces/"+testWorkspaceID+"/members/"+testMemberID+"/role", body)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // close error on a read-only test response is not actionable
+
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Errorf("status = %d, want %d (FORBIDDEN_ROLE_ASSIGNMENT)", resp.StatusCode, fiber.StatusForbidden)
+	}
+}
+
+// S4W-01: menurunkan admin_workspace TERAKHIR ke role lain harus ditolak
+// 422, bukan diproses -- guard sama invariant dengan RemoveMember (diuji
+// terisolasi di internal/service/rbac_test.go), di sini dicek jalurnya
+// benar sampai ke response HTTP lewat mapWorkspaceError.
+func TestRBAC_UpdateMemberRole_LastAdminDowngrade_Rejected(t *testing.T) {
+	app := newTestApp(testMemberID, "member", stubMemberRepo{role: "admin_workspace", lastAdmin: true})
+	body := bytes.NewBufferString(`{"role":"editor"}`)
+	req := httptest.NewRequest(http.MethodPut, "/workspaces/"+testWorkspaceID+"/members/"+testMemberID+"/role", body)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // close error on a read-only test response is not actionable
+
+	if resp.StatusCode != fiber.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d (CANNOT_REMOVE_LAST_ADMIN)", resp.StatusCode, fiber.StatusUnprocessableEntity)
 	}
 }
 
