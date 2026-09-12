@@ -250,10 +250,25 @@ func (r *GroupMemberRepository) SetAccess(ctx context.Context, exec db.Executor,
 	return nil
 }
 
+// insertGroupMemberAudit -- actor_ip/metadata.request_path
+// (implementation_gaps.md IG-64) ditambahkan 2026-09-12, sebelumnya tidak
+// pernah diisi. Aksi di sini (assigned/revoked/reactivated/suspended)
+// semuanya boolean flip yang namanya sudah menjelaskan diri sendiri --
+// TIDAK diberi state_before/state_after (beda dari insertOrgAudit/
+// insertWorkspaceAudit yang punya aksi rename bernilai skalar).
 func insertGroupMemberAudit(ctx context.Context, exec db.Executor, actorID, action, targetUserID, groupID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
-		VALUES ($1, $2, 'user', $3, jsonb_build_object('group_id', $4::uuid))
-	`, actorID, action, targetUserID, groupID)
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{"group_id": groupID}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	metaJSON, err := marshalIfNotEmpty(metadata)
+	if err != nil {
+		return fmt.Errorf("insertGroupMemberAudit: encode metadata: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, actor_ip, metadata)
+		VALUES ($1, $2, 'user', $3, $4::inet, $5)
+	`, actorID, action, targetUserID, ip, metaJSON)
 	return err
 }
