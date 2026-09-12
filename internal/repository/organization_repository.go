@@ -138,7 +138,7 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE organizations SET name = $2, slug = $3, updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 	`, orgID, name, slug)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
@@ -258,7 +258,7 @@ func insertOrgDomainAudit(ctx context.Context, exec db.Executor, actorID, actorR
 func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE organizations SET default_language = $2::org_language, updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 	`, orgID, defaultLanguage)
 	if err != nil {
 		return fmt.Errorf("repository.UpdateSettings: %w", err)
@@ -289,7 +289,7 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error {
 	var maxBytes, usedMB int64
 	var groupID string
-	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id, storage_used_mb FROM organizations WHERE id = $1`, orgID).Scan(&maxBytes, &groupID, &usedMB); err != nil {
+	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id, storage_used_mb FROM organizations WHERE id = $1 AND deleted_at IS NULL`, orgID).Scan(&maxBytes, &groupID, &usedMB); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrOrganizationNotFound)
 		}
@@ -402,7 +402,7 @@ func (r *OrganizationRepository) groupRetentionRange(ctx context.Context, exec d
 // pindah workspace.
 func (r *OrganizationRepository) IsActive(ctx context.Context, exec db.Executor, orgID string) (bool, error) {
 	var deactivatedAt *time.Time
-	err := exec.QueryRow(ctx, `SELECT deactivated_at FROM organizations WHERE id = $1`, orgID).Scan(&deactivatedAt)
+	err := exec.QueryRow(ctx, `SELECT deactivated_at FROM organizations WHERE id = $1 AND deleted_at IS NULL`, orgID).Scan(&deactivatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, fmt.Errorf("repository.IsActive: %w", domain.ErrOrganizationNotFound)
@@ -419,7 +419,7 @@ func (r *OrganizationRepository) IsActive(ctx context.Context, exec db.Executor,
 func (r *OrganizationRepository) Deactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE organizations SET deactivated_at = NOW(), updated_at = NOW()
-		WHERE id = $1 AND deactivated_at IS NULL
+		WHERE id = $1 AND deleted_at IS NULL AND deactivated_at IS NULL
 	`, orgID)
 	if err != nil {
 		return fmt.Errorf("repository.Deactivate: %w", err)
@@ -443,7 +443,7 @@ func (r *OrganizationRepository) Deactivate(ctx context.Context, exec db.Executo
 func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE organizations SET deactivated_at = NULL, updated_at = NOW()
-		WHERE id = $1 AND deactivated_at IS NOT NULL
+		WHERE id = $1 AND deleted_at IS NULL AND deactivated_at IS NOT NULL
 	`, orgID)
 	if err != nil {
 		return fmt.Errorf("repository.Reactivate: %w", err)
@@ -499,8 +499,10 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor, gro
 	`
 	args := []any{}
 	if groupID != "" {
-		query += ` WHERE o.group_id = $1`
+		query += ` WHERE o.group_id = $1 AND o.deleted_at IS NULL`
 		args = append(args, groupID)
+	} else {
+		query += ` WHERE o.deleted_at IS NULL`
 	}
 	query += ` ORDER BY o.name`
 
@@ -556,33 +558,69 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor, gro
 	return orgs, ceilingBytes, nil
 }
 
-// Delete menghapus organisasi permanen (S3-05, US-007 AC) -- HANYA kalau
-// tidak ada workspace AKTIF (archived_at IS NULL) di dalamnya. Workspace
-// yang sudah diarsipkan tidak menghalangi -- AC "semua workspace sudah
-// dihapus/dipindahkan" diartikan sebagai "tidak ada lagi yang aktif",
-// konsisten dengan `workspaces` yang soft-delete (archived_at), bukan
-// hard-delete (§5.9).
-func (r *OrganizationRepository) Delete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
+// SoftDelete memindahkan organisasi ke jadwal penghapusan (2026-09-12,
+// sebelumnya hard DELETE -- ditemukan user via pengujian live role Group
+// Admin: "hard delete diganti dengan soft delete, persis seperti pada
+// penghapusan workspace"). HANYA kalau tidak ada workspace AKTIF
+// (archived_at IS NULL) di dalamnya -- guard lama dipertahankan apa
+// adanya. Workspace yang sudah diarsipkan tidak menghalangi -- AC "semua
+// workspace sudah dihapus/dipindahkan" diartikan sebagai "tidak ada lagi
+// yang aktif", konsisten dengan `workspaces` yang soft-delete
+// (archived_at), bukan hard-delete (§5.9).
+//
+// purge_scheduled_at dihitung dari retention_days MILIK organisasi itu
+// sendiri (EDITABLE lewat UpdateStorageQuota) -- BEDA dari
+// orgDeactivationRetentionDays (retensi TETAP 90 hari, kebijakan platform
+// untuk Deactivate, lihat RetentionRepository) -- deleted_at dan
+// deactivated_at ORTHOGONAL, sama pola workspaces.
+func (r *OrganizationRepository) SoftDelete(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
 	var hasActiveWorkspaces bool
 	if err := exec.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM workspaces WHERE org_id = $1 AND archived_at IS NULL)
 	`, orgID).Scan(&hasActiveWorkspaces); err != nil {
-		return fmt.Errorf("repository.Delete: cek workspace aktif: %w", err)
+		return fmt.Errorf("repository.SoftDelete: cek workspace aktif: %w", err)
 	}
 	if hasActiveWorkspaces {
-		return fmt.Errorf("repository.Delete: %w", domain.ErrOrganizationHasWorkspaces)
+		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrOrganizationHasWorkspaces)
+	}
+
+	tag, err := exec.Exec(ctx, `
+		UPDATE organizations
+		SET deleted_at = NOW(),
+		    purge_scheduled_at = NOW() + (retention_days || ' days')::interval,
+		    updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL
+	`, orgID)
+	if err != nil {
+		return fmt.Errorf("repository.SoftDelete: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrOrganizationNotFound)
 	}
 
 	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.deleted", orgID); err != nil {
-		return fmt.Errorf("repository.Delete: audit: %w", err)
+		return fmt.Errorf("repository.SoftDelete: audit: %w", err)
 	}
+	return nil
+}
 
-	tag, err := exec.Exec(ctx, `DELETE FROM organizations WHERE id = $1`, orgID)
+// Restore membatalkan soft-delete (kebalikan SoftDelete) -- otorisasi sama
+// persis (Platform Admin/Group Admin pengelola grup pemilik org), lihat
+// OrganizationService.RestoreOrganization.
+func (r *OrganizationRepository) Restore(ctx context.Context, exec db.Executor, orgID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		UPDATE organizations SET deleted_at = NULL, purge_scheduled_at = NULL, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NOT NULL
+	`, orgID)
 	if err != nil {
-		return fmt.Errorf("repository.Delete: %w", err)
+		return fmt.Errorf("repository.Restore: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("repository.Delete: %w", domain.ErrOrganizationNotFound)
+		return fmt.Errorf("repository.Restore: %w", domain.ErrOrganizationNotDeleted)
+	}
+
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.restored", orgID); err != nil {
+		return fmt.Errorf("repository.Restore: audit: %w", err)
 	}
 	return nil
 }

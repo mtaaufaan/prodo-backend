@@ -22,6 +22,7 @@ type fakeOrganizationRepo struct {
 	deactivateErr error
 	reactivateErr error
 	deleteErr     error
+	restoreErr    error
 
 	summaryResult *repository.Summary
 	summaryErr    error
@@ -132,8 +133,12 @@ func (f *fakeOrganizationRepo) Reactivate(_ context.Context, _ db.Executor, _, _
 	return f.reactivateErr
 }
 
-func (f *fakeOrganizationRepo) Delete(_ context.Context, _ db.Executor, _, _, _ string) error {
+func (f *fakeOrganizationRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _ string) error {
 	return f.deleteErr
+}
+
+func (f *fakeOrganizationRepo) Restore(_ context.Context, _ db.Executor, _, _, _ string) error {
+	return f.restoreErr
 }
 
 func (f *fakeOrganizationRepo) List(_ context.Context, _ db.Executor, groupID string) ([]repository.Organization, int64, error) {
@@ -407,6 +412,31 @@ func TestOrganizationService_DeleteOrganization_HasWorkspaces(t *testing.T) {
 	err := svc.DeleteOrganization(context.Background(), nil, "org-1", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrOrganizationHasWorkspaces) {
 		t.Errorf("err = %v, want wrapped domain.ErrOrganizationHasWorkspaces", err)
+	}
+}
+
+// TestOrganizationService_RestoreOrganization_Success -- 2026-09-12,
+// DELETE /organizations/:id diubah dari hard delete jadi soft delete
+// (mirror workspace); Restore membatalkannya, sama otorisasi.
+func TestOrganizationService_RestoreOrganization_Success(t *testing.T) {
+	repo := &fakeOrganizationRepo{orgGroup: map[string]string{"org-1": "group-1"}}
+	svc := NewOrganizationService(repo)
+
+	if err := svc.RestoreOrganization(context.Background(), nil, "org-1", "pa-1", "platform_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOrganizationService_RestoreOrganization_NotDeleted(t *testing.T) {
+	repo := &fakeOrganizationRepo{
+		orgGroup:   map[string]string{"org-1": "group-1"},
+		restoreErr: domain.ErrOrganizationNotDeleted,
+	}
+	svc := NewOrganizationService(repo)
+
+	err := svc.RestoreOrganization(context.Background(), nil, "org-1", "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrOrganizationNotDeleted) {
+		t.Errorf("err = %v, want wrapped domain.ErrOrganizationNotDeleted", err)
 	}
 }
 

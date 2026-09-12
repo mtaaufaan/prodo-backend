@@ -1,0 +1,13 @@
+-- DELETE /organizations/:id diubah dari hard delete jadi soft delete
+-- (2026-09-12, ditemukan user via pengujian live role Group Admin --
+-- "penghapusan organisasi, hard delete diganti dengan soft delete, persis
+-- seperti pada penghapusan workspace"). organizations.purge_scheduled_at
+-- SUDAH ADA sejak §5.7 semula (murni dokumentasi, belum pernah dipakai
+-- kode manapun) -- tinggal deleted_at yang kurang, pola PERSIS
+-- workspaces.deleted_at/purge_scheduled_at.
+--
+-- BEDA dari organizations.deactivated_at (status bisnis reversibel, retensi
+-- TETAP 90 hari kebijakan platform, sudah ada) -- deleted_at ini ORTHOGONAL,
+-- retensinya EDITABLE lewat organizations.retention_days milik organisasi
+-- itu sendiri, sama seperti workspaces/projects.
+ALTER TABLE organizations ADD COLUMN deleted_at TIMESTAMPTZ;
