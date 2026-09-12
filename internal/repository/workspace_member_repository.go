@@ -234,6 +234,58 @@ func (r *WorkspaceMemberRepository) ListOrgCandidates(ctx context.Context, exec 
 	return list, nil
 }
 
+// CountAdminsExcluding menghitung member admin_workspace di workspace ini,
+// TIDAK termasuk excludeUserID -- dipakai guard "minimal satu admin_workspace
+// harus tersisa" (S4W-01) sebelum RemoveMember menghapus atau AssignRole
+// menurunkan role admin_workspace terakhir.
+func (r *WorkspaceMemberRepository) CountAdminsExcluding(ctx context.Context, exec db.Executor, workspaceID, excludeUserID string) (int, error) {
+	var count int
+	if err := exec.QueryRow(ctx, `
+		SELECT count(*) FROM workspace_members
+		WHERE workspace_id = $1 AND role = 'admin_workspace' AND user_id != $2
+	`, workspaceID, excludeUserID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("repository.CountAdminsExcluding: %w", err)
+	}
+	return count, nil
+}
+
+// ListWorkspaceMemberCandidates mengembalikan member organisasi pemilik
+// workspaceID yang BELUM jadi member workspace ini -- "pool kandidat" di
+// modal Undang Member Admin Workspace (S4W-02, desain "AW Invite
+// Member.dc.html"), beda dari ListOrgCandidates (S4G-05, dipakai GA/PA,
+// tidak mengecualikan member workspace target manapun).
+func (r *WorkspaceMemberRepository) ListWorkspaceMemberCandidates(ctx context.Context, exec db.Executor, orgID, workspaceID string) ([]Member, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT DISTINCT u.id, u.email, u.display_name
+		FROM workspace_members wm
+		JOIN workspaces w ON w.id = wm.workspace_id
+		JOIN users u ON u.id = wm.user_id
+		WHERE w.org_id = $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM workspace_members wm2
+		    WHERE wm2.workspace_id = $2 AND wm2.user_id = u.id
+		  )
+		ORDER BY u.display_name
+	`, orgID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListWorkspaceMemberCandidates: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Member, 0)
+	for rows.Next() {
+		var m Member
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName); err != nil {
+			return nil, fmt.Errorf("repository.ListWorkspaceMemberCandidates: scan: %w", err)
+		}
+		list = append(list, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListWorkspaceMemberCandidates: %w", err)
+	}
+	return list, nil
+}
+
 // RemoveMember menghapus satu baris workspace_members (S3-15) + audit
 // trail. Akun (`users`) itu sendiri TIDAK disentuh -- cuma mencabut
 // keanggotaan workspace ini (US-009 AC: "akun masih ada di accounts").

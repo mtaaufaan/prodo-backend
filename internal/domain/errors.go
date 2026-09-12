@@ -183,6 +183,13 @@ var (
 	// (S3-15) -- tidak ada baris workspace_members yang cocok.
 	ErrMemberNotFound = errors.New("workspace member not found")
 
+	// ErrCannotRemoveLastWorkspaceAdmin dikembalikan RemoveMember (S3-15) dan
+	// AssignRole/UpdateMemberRole (S2-04) saat aksi akan menyisakan 0 member
+	// admin_workspace di workspace ini -- baik lewat hapus member maupun
+	// turunkan role admin_workspace terakhir ke role lain (S4W-01, sama pola
+	// ErrMinimumActiveAdminRequired untuk Platform Admin).
+	ErrCannotRemoveLastWorkspaceAdmin = errors.New("at least one admin_workspace must remain in the workspace")
+
 	// ErrProjectNotFound dikembalikan saat projects.id tidak ditemukan
 	// (S3-21/22/23).
 	ErrProjectNotFound = errors.New("project not found")

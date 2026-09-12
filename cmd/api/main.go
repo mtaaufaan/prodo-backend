@@ -425,7 +425,25 @@ func run() error {
 	v1.Get("/workspaces/:wsId/statuses", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer", "division_viewer"), customStatusHandler.ListForWorkspace)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
-	v1.Post("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CreateInvitations)
+	// S4W-01: rate-limit 3x/menit PER-ROUTE, sama pola storage-allocation/
+	// retention-policy di atas (desain "AW Invite Member.dc.html" AC 429
+	// eksplisit) -- limiter dipasang SETELAH RequireRole supaya request yang
+	// ditolak otorisasi tidak ikut menghabiskan kuota rate-limit.
+	v1.Post("/workspaces/:wsId/invitations", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"),
+		limiter.New(limiter.Config{
+			Max:        3,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Terlalu banyak permintaan penambahan member workspace dalam waktu singkat (maks 3 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		invitationHandler.CreateInvitations)
+	// S4W-02: "pool kandidat" modal Undang Member -- gate sama seperti
+	// CreateInvitations di atas (admin_workspace, PA/GA bypass).
+	v1.Get("/workspaces/:wsId/member-candidates", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.ListMemberCandidates)
 	// GET .../invitations: prasyarat minimal S2-28 (daftar undangan
 	// pending di FE), belum pernah dijadwalkan sebagai task backend
 	// terpisah -- lihat implementation_gaps.md IG-09.
