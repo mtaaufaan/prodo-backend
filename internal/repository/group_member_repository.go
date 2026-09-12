@@ -10,8 +10,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -163,7 +166,7 @@ func (r *GroupMemberRepository) AssignExecutive(ctx context.Context, exec db.Exe
 		return fmt.Errorf("repository.AssignExecutive: insert: %w", err)
 	}
 
-	if err := insertGroupMemberAudit(ctx, exec, actorID, "member.executive_assigned", userID, groupID); err != nil {
+	if err := insertGroupMemberAudit(ctx, exec, actorID, "member.executive_assigned", userID, groupID, nil, nil); err != nil {
 		return fmt.Errorf("repository.AssignExecutive: %w", err)
 	}
 	return nil
@@ -196,7 +199,7 @@ func (r *GroupMemberRepository) RevokeExecutive(ctx context.Context, exec db.Exe
 		}
 	}
 
-	if err := insertGroupMemberAudit(ctx, exec, actorID, "member.executive_revoked", userID, groupID); err != nil {
+	if err := insertGroupMemberAudit(ctx, exec, actorID, "member.executive_revoked", userID, groupID, nil, nil); err != nil {
 		return fmt.Errorf("repository.RevokeExecutive: %w", err)
 	}
 	return nil
@@ -206,7 +209,23 @@ func (r *GroupMemberRepository) RevokeExecutive(ctx context.Context, exec db.Exe
 // target yang sedang jadi Eksekutif grup ini (WHERE executive_assignments
 // match), sesuai desain "GA Members Roles.dc.html" (panel identitas cuma
 // muncul untuk baris Eksekutif).
-func (r *GroupMemberRepository) UpdateIdentity(ctx context.Context, exec db.Executor, userID, groupID, displayName, title string) error {
+func (r *GroupMemberRepository) UpdateIdentity(ctx context.Context, exec db.Executor, userID, groupID, actorID, displayName, title string) error {
+	// Nilai lama diambil dulu (2026-09-12, implementation_gaps.md IG-64
+	// catatan sampingan: UpdateIdentity TIDAK PERNAH menulis audit sama
+	// sekali, ditemukan user saat menelusuri gap ASAL/nilai sebelum-sesudah
+	// yang sama di helper lain) -- guard isMemberOfGroupSQL yang sama
+	// dipakai di sini supaya SELECT dan UPDATE konsisten menegakkan GA cuma
+	// boleh menargetkan member dalam grupnya.
+	var oldDisplayName string
+	var oldTitle *string
+	if err := exec.QueryRow(ctx, `
+		SELECT display_name, title FROM users WHERE id = $1 AND `+isMemberOfGroupSQL, userID, groupID).Scan(&oldDisplayName, &oldTitle); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpdateIdentity: %w", domain.ErrUserNotFound)
+		}
+		return fmt.Errorf("repository.UpdateIdentity: %w", err)
+	}
+
 	// Title sekarang kolom umum di users (migrasi 20260916090000) -- berlaku
 	// untuk SEMUA member, bukan cuma Eksekutif (konsolidasi dari
 	// executive_assignments.title yang sudah dihapus). Guard keanggotaan
@@ -219,6 +238,16 @@ func (r *GroupMemberRepository) UpdateIdentity(ctx context.Context, exec db.Exec
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.UpdateIdentity: %w", domain.ErrUserNotFound)
+	}
+
+	oldTitleStr := ""
+	if oldTitle != nil {
+		oldTitleStr = *oldTitle
+	}
+	before := map[string]any{"display_name": oldDisplayName, "title": oldTitleStr}
+	after := map[string]any{"display_name": displayName, "title": title}
+	if err := insertGroupMemberAudit(ctx, exec, actorID, "member.identity_updated", userID, groupID, before, after); err != nil {
+		return fmt.Errorf("repository.UpdateIdentity: audit: %w", err)
 	}
 	return nil
 }
@@ -244,7 +273,7 @@ func (r *GroupMemberRepository) SetAccess(ctx context.Context, exec db.Executor,
 		return fmt.Errorf("repository.SetAccess: %w", domain.ErrUserNotFound)
 	}
 
-	if err := insertGroupMemberAudit(ctx, exec, actorID, action, userID, groupID); err != nil {
+	if err := insertGroupMemberAudit(ctx, exec, actorID, action, userID, groupID, nil, nil); err != nil {
 		return fmt.Errorf("repository.SetAccess: %w", err)
 	}
 	return nil
@@ -252,11 +281,12 @@ func (r *GroupMemberRepository) SetAccess(ctx context.Context, exec db.Executor,
 
 // insertGroupMemberAudit -- actor_ip/metadata.request_path
 // (implementation_gaps.md IG-64) ditambahkan 2026-09-12, sebelumnya tidak
-// pernah diisi. Aksi di sini (assigned/revoked/reactivated/suspended)
-// semuanya boolean flip yang namanya sudah menjelaskan diri sendiri --
-// TIDAK diberi state_before/state_after (beda dari insertOrgAudit/
-// insertWorkspaceAudit yang punya aksi rename bernilai skalar).
-func insertGroupMemberAudit(ctx context.Context, exec db.Executor, actorID, action, targetUserID, groupID string) error {
+// pernah diisi. stateBefore/stateAfter (nil untuk aksi boolean flip yang
+// namanya sudah menjelaskan diri sendiri -- assigned/revoked/reactivated/
+// suspended) ditambahkan sekalian untuk UpdateIdentity (ganti nama/jabatan
+// Eksekutif) yang SEBELUMNYA TIDAK MENULIS AUDIT SAMA SEKALI (catatan
+// sampingan IG-64, dikonfirmasi user untuk diperbaiki).
+func insertGroupMemberAudit(ctx context.Context, exec db.Executor, actorID, action, targetUserID, groupID string, stateBefore, stateAfter map[string]any) error {
 	ip, path := requestMetaFromContext(ctx)
 	metadata := map[string]any{"group_id": groupID}
 	if path != "" {
@@ -266,9 +296,17 @@ func insertGroupMemberAudit(ctx context.Context, exec db.Executor, actorID, acti
 	if err != nil {
 		return fmt.Errorf("insertGroupMemberAudit: encode metadata: %w", err)
 	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("insertGroupMemberAudit: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("insertGroupMemberAudit: encode state_after: %w", err)
+	}
 	_, err = exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, actor_ip, metadata)
-		VALUES ($1, $2, 'user', $3, $4::inet, $5)
-	`, actorID, action, targetUserID, ip, metaJSON)
+		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, 'user', $3, $4::inet, $5, $6, $7)
+	`, actorID, action, targetUserID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }

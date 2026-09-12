@@ -19,7 +19,7 @@ type groupMemberReader interface {
 type groupMemberWriter interface {
 	AssignExecutive(ctx context.Context, exec db.Executor, userID, groupID, actorID string) error
 	RevokeExecutive(ctx context.Context, exec db.Executor, userID, groupID, actorID string) error
-	UpdateIdentity(ctx context.Context, exec db.Executor, userID, groupID, displayName, title string) error
+	UpdateIdentity(ctx context.Context, exec db.Executor, userID, groupID, actorID, displayName, title string) error
 	SetAccess(ctx context.Context, exec db.Executor, userID, groupID, actorID string, active bool) error
 }
 
@@ -221,7 +221,7 @@ func (s *GroupMemberService) UpdateIdentity(ctx context.Context, exec db.Executo
 	if len(displayName) < 2 {
 		return fmt.Errorf("service.GroupMemberService.UpdateIdentity: %w", domain.ErrInvalidInput)
 	}
-	if err := s.writer.UpdateIdentity(ctx, exec, userID, groupID, displayName, title); err != nil {
+	if err := s.writer.UpdateIdentity(ctx, exec, userID, groupID, actorID, displayName, title); err != nil {
 		return fmt.Errorf("service.GroupMemberService.UpdateIdentity: %w", err)
 	}
 	return nil
