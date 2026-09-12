@@ -137,11 +137,20 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "role tidak valid",
 			[]response.FieldError{{Field: "role", Message: "harus salah satu dari admin_workspace, project_manager, editor, approver, viewer"}}))
 	}
+	// S4W-01: Admin Workspace tidak berwenang memberi role admin_workspace
+	// (ke siapa pun, termasuk diri sendiri) -- itu wewenang Group Admin/
+	// Platform Admin di level organisasi. actorRole di sini adalah role
+	// LITERAL actor ("admin_workspace"/"project_manager"/dst) kecuali actor
+	// PA/GA yang bypass RequireRole (actorRole = "platform_admin"/
+	// "group_admin"), jadi perbandingan string ini aman membedakan keduanya.
+	if req.Role == "admin_workspace" && actorRole == "admin_workspace" {
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN_ROLE_ASSIGNMENT",
+			"Admin Workspace tidak dapat memberi role Admin Workspace -- hanya Group Admin atau Platform Admin yang berwenang", nil))
+	}
 
 	result, err := h.rbac.AssignRole(c.Context(), exec, workspaceID, targetUserID, req.Role, nil, actorUserID, actorRole)
 	if err != nil {
-		h.logger.Error("gagal assign role", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengubah role", nil))
+		return h.mapWorkspaceError(c, err, "Gagal mengubah role")
 	}
 
 	return c.JSON(response.Success(fiber.Map{
@@ -556,6 +565,8 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Workspace tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrMemberNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Member tidak ditemukan di workspace ini", nil))
+	case errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("CANNOT_REMOVE_LAST_ADMIN", "Minimal satu Admin Workspace harus tersisa di workspace ini", nil))
 	case errors.Is(err, domain.ErrWorkspaceHasProjects):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("WORKSPACE_HAS_PROJECTS", "Workspace masih punya project aktif", nil))
 	case errors.Is(err, domain.ErrWorkspaceNotDeleted):
@@ -602,4 +613,38 @@ func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(response.Success(fiber.Map{"workspace_members": data}))
+}
+
+// ListMemberCandidates menangani GET /workspaces/:wsId/member-candidates
+// (S4W-02, desain "AW Invite Member.dc.html" -- "pool kandidat" member
+// organisasi yang belum jadi member workspace ini). Beda dari
+// ListCandidateAdmins (GA/PA-only, S4G-05): endpoint ini dipakai Admin
+// Workspace sendiri, digerbangi RequireRole admin_workspace di routing
+// (PA/GA tetap bypass lewat mekanisme RequireRole yang sama).
+func (h *WorkspaceHandler) ListMemberCandidates(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ListMemberCandidates dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	orgID, err := h.rbac.GetWorkspaceOrgID(c.Context(), exec, workspaceID)
+	if err != nil {
+		h.logger.Error("gagal ambil org_id workspace", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil kandidat member", nil))
+	}
+
+	candidates, err := h.rbac.ListWorkspaceMemberCandidates(c.Context(), exec, orgID, workspaceID)
+	if err != nil {
+		h.logger.Error("gagal ambil kandidat member workspace", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil kandidat member", nil))
+	}
+
+	data := make([]fiber.Map, len(candidates))
+	for i := range candidates {
+		m := &candidates[i]
+		data[i] = fiber.Map{"user_id": m.UserID, "email": m.Email, "display_name": m.DisplayName}
+	}
+	return c.JSON(response.Success(data))
 }

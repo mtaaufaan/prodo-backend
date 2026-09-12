@@ -10,6 +10,7 @@ import (
 
 	"github.com/mtaaufaan/prodo-backend/internal/cache"
 	"github.com/mtaaufaan/prodo-backend/internal/db"
+	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
 )
 
@@ -21,8 +22,10 @@ type workspaceMemberRepository interface {
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
 	ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]repository.Member, error)
+	ListWorkspaceMemberCandidates(ctx context.Context, exec db.Executor, orgID, workspaceID string) ([]repository.Member, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 	RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error
+	CountAdminsExcluding(ctx context.Context, exec db.Executor, workspaceID, excludeUserID string) (int, error)
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -73,6 +76,20 @@ func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspac
 	previousRole, err := s.repo.GetRole(ctx, exec, workspaceID, userID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("service.AssignRole: cek role lama: %w", err)
+	}
+
+	// S4W-01: menurunkan admin_workspace TERAKHIR ke role lain akan
+	// menyisakan workspace tanpa admin sama sekali -- guard sama dengan
+	// RemoveMember di bawah, sama root cause (invariant "minimal 1
+	// admin_workspace"), bukan cuma dijaga di jalur hapus member.
+	if previousRole == "admin_workspace" && role != "admin_workspace" {
+		remaining, err := s.repo.CountAdminsExcluding(ctx, exec, workspaceID, userID)
+		if err != nil {
+			return nil, fmt.Errorf("service.AssignRole: cek admin tersisa: %w", err)
+		}
+		if remaining == 0 {
+			return nil, domain.ErrCannotRemoveLastWorkspaceAdmin
+		}
 	}
 
 	var before map[string]string
@@ -161,6 +178,26 @@ func (s *RBACService) ListOrgCandidates(ctx context.Context, exec db.Executor, o
 // lolos RequireRole (S2-09) selama sisa TTL walau baris workspace_members-
 // nya sudah tidak ada.
 func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error {
+	// S4W-01: workspace tidak boleh ditinggalkan tanpa admin_workspace --
+	// cek role target LEBIH DULU (dalam transaksi request-scoped yang sama,
+	// jadi tidak ada celah race dengan DELETE yang menyusul).
+	targetRole, err := s.repo.GetRole(ctx, exec, workspaceID, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("service.RemoveMember: %w", domain.ErrMemberNotFound)
+		}
+		return fmt.Errorf("service.RemoveMember: cek role target: %w", err)
+	}
+	if targetRole == "admin_workspace" {
+		remaining, err := s.repo.CountAdminsExcluding(ctx, exec, workspaceID, userID)
+		if err != nil {
+			return fmt.Errorf("service.RemoveMember: cek admin tersisa: %w", err)
+		}
+		if remaining == 0 {
+			return domain.ErrCannotRemoveLastWorkspaceAdmin
+		}
+	}
+
 	if err := s.repo.RemoveMember(ctx, exec, workspaceID, userID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.RemoveMember: %w", err)
 	}
@@ -168,4 +205,14 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 		return fmt.Errorf("service.RemoveMember: invalidate cache: %w", err)
 	}
 	return nil
+}
+
+// ListWorkspaceMemberCandidates -- pass-through tipis ke repo (S4W-02),
+// dipakai WorkspaceService untuk "pool kandidat" modal Undang Member AW.
+func (s *RBACService) ListWorkspaceMemberCandidates(ctx context.Context, exec db.Executor, orgID, workspaceID string) ([]repository.Member, error) {
+	members, err := s.repo.ListWorkspaceMemberCandidates(ctx, exec, orgID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListWorkspaceMemberCandidates: %w", err)
+	}
+	return members, nil
 }

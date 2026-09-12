@@ -34,6 +34,12 @@ type stubWorkspaceMemberRepository struct {
 	removeErr        error
 	removedUserID    string
 	removedWorkspace string
+
+	countAdminsResult int
+	countAdminsErr    error
+
+	candidatesResult []repository.Member
+	candidatesErr    error
 }
 
 func (f *stubWorkspaceMemberRepository) GetRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
@@ -67,6 +73,14 @@ func (f *stubWorkspaceMemberRepository) RemoveMember(_ context.Context, _ db.Exe
 	f.removedWorkspace = workspaceID
 	f.removedUserID = userID
 	return f.removeErr
+}
+
+func (f *stubWorkspaceMemberRepository) CountAdminsExcluding(_ context.Context, _ db.Executor, _, _ string) (int, error) {
+	return f.countAdminsResult, f.countAdminsErr
+}
+
+func (f *stubWorkspaceMemberRepository) ListWorkspaceMemberCandidates(_ context.Context, _ db.Executor, _, _ string) ([]repository.Member, error) {
+	return f.candidatesResult, f.candidatesErr
 }
 
 func strPtr(s string) *string { return &s }
@@ -268,5 +282,62 @@ func TestRBACService_RemoveMember_NotFound(t *testing.T) {
 	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-missing", "actor-1", "admin_workspace")
 	if !errors.Is(err, domain.ErrMemberNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrMemberNotFound", err)
+	}
+}
+
+// S4W-01: target satu-satunya admin_workspace -- CountAdminsExcluding = 0
+// berarti tidak ada admin lain tersisa, RemoveMember harus ditolak SEBELUM
+// repo.RemoveMember (DELETE) sempat dipanggil.
+func TestRBACService_RemoveMember_LastAdmin_Rejected(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
+	svc := NewRBACService(repo, newStubCache())
+
+	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin")
+	if !errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin) {
+		t.Errorf("err = %v, want domain.ErrCannotRemoveLastWorkspaceAdmin", err)
+	}
+	if repo.removedUserID != "" {
+		t.Error("repo.RemoveMember (DELETE) tidak boleh terpanggil kalau guard menolak")
+	}
+}
+
+// Admin BUKAN yang terakhir (masih ada admin lain) -- harus tetap berhasil.
+func TestRBACService_RemoveMember_NotLastAdmin_Succeeds(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 1}
+	svc := NewRBACService(repo, newStubCache())
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.removedUserID != "user-1" {
+		t.Error("repo.RemoveMember harusnya tetap terpanggil kalau masih ada admin lain")
+	}
+}
+
+// Menurunkan admin_workspace TERAKHIR ke role lain (bukan hapus, ganti
+// role) harus ditolak dengan guard yang sama -- root cause sama dengan
+// RemoveMember (invariant "minimal 1 admin_workspace").
+func TestRBACService_AssignRole_DowngradeLastAdmin_Rejected(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
+	svc := NewRBACService(repo, newStubCache())
+
+	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "group_admin")
+	if !errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin) {
+		t.Errorf("err = %v, want domain.ErrCannotRemoveLastWorkspaceAdmin", err)
+	}
+	if repo.assignedRole != "" {
+		t.Error("repo.AssignRole tidak boleh terpanggil kalau guard menolak")
+	}
+}
+
+// Reassign admin_workspace TERAKHIR ke admin_workspace lagi (role sama,
+// mis. panggilan idempoten) BUKAN downgrade -- guard tidak boleh ikut
+// memblokir ini.
+func TestRBACService_AssignRole_SameRoleAdmin_NotBlocked(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
+	svc := NewRBACService(repo, newStubCache())
+
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "admin_workspace", nil, "actor-1", "group_admin"); err != nil {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

@@ -78,6 +78,13 @@ func (h *InvitationHandler) CreateInvitations(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "role tidak valid",
 			[]response.FieldError{{Field: "role", Message: "harus salah satu dari admin_workspace, project_manager, editor, approver, viewer"}}))
 	}
+	// S4W-01: sama guard dengan WorkspaceHandler.UpdateMemberRole -- Admin
+	// Workspace tidak boleh mengundang siapa pun langsung sebagai
+	// admin_workspace, hanya Group Admin/Platform Admin yang berwenang.
+	if req.Role == "admin_workspace" && actorRole == "admin_workspace" {
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN_ROLE_ASSIGNMENT",
+			"Admin Workspace tidak dapat mengundang member sebagai Admin Workspace -- hanya Group Admin atau Platform Admin yang berwenang", nil))
+	}
 
 	workspaceName, err := h.invitations.GetWorkspaceName(c.Context(), exec, workspaceID)
 	if err != nil {
