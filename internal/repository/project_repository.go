@@ -281,8 +281,17 @@ func (r *ProjectRepository) Restore(ctx context.Context, exec db.Executor, proje
 // (beda dari insertProjectMemberAudit yang simpan project_id di metadata
 // karena entity_id-nya di sana adalah target user, bukan project),
 // state_before/state_after untuk perubahan skalar (pola audit trail
-// IG-29: snapshot immutable, bukan live JOIN).
+// IG-29: snapshot immutable, bukan live JOIN). actor_ip/metadata.request_path
+// (implementation_gaps.md IG-64) ditambahkan 2026-09-12 -- sebelumnya
+// TIDAK PERNAH diisi walau state_before/after sudah benar sejak awal.
 func insertProjectAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, projectID, workspaceID string, stateBefore, stateAfter, metadata map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	if path != "" {
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata["request_path"] = path
+	}
 	beforeJSON, err := marshalIfNotEmpty(stateBefore)
 	if err != nil {
 		return fmt.Errorf("insertProjectAudit: encode state_before: %w", err)
@@ -296,8 +305,8 @@ func insertProjectAudit(ctx context.Context, exec db.Executor, actorID, actorRol
 		return fmt.Errorf("insertProjectAudit: encode metadata: %w", err)
 	}
 	_, err = exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, state_before, state_after, metadata)
-		VALUES ($1, $2, $3, 'project', $4, $5, $6, $7, $8)
-	`, actorID, actorRole, action, projectID, workspaceID, beforeJSON, afterJSON, metaJSON)
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, 'project', $4, $5, $6::inet, $7, $8, $9)
+	`, actorID, actorRole, action, projectID, workspaceID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }

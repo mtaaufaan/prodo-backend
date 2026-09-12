@@ -107,7 +107,7 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 		return nil, fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrSlugAlreadyExists))
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.created", org.ID); err != nil {
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.created", org.ID, nil, nil); err != nil {
 		return nil, fmt.Errorf("repository.Create: audit: %w", err)
 	}
 
@@ -136,6 +136,19 @@ func (r *OrganizationRepository) Create(ctx context.Context, exec db.Executor, g
 // RemoveDomain, organisasi sekarang bisa punya lebih dari satu domain,
 // tidak lagi cocok sebagai satu field dalam form nama/slug.
 func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, orgID, name, slug, actorID, actorRole string) error {
+	// Nilai lama diambil DULU (2026-09-12, ditemukan user: audit trail
+	// "Organisasi diperbarui" tidak pernah menampilkan NILAI SEBELUM/SESUDAH
+	// -- insertOrgAudit sebelumnya tidak menerima state_before/state_after
+	// sama sekali, beda dari insertProjectAudit yang sudah punya pola ini)
+	// supaya bisa dibandingkan ke nilai baru untuk audit trail.
+	var oldName, oldSlug string
+	if err := exec.QueryRow(ctx, `SELECT name, slug FROM organizations WHERE id = $1 AND deleted_at IS NULL`, orgID).Scan(&oldName, &oldSlug); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.Update: %w", domain.ErrOrganizationNotFound)
+		}
+		return fmt.Errorf("repository.Update: %w", err)
+	}
+
 	tag, err := exec.Exec(ctx, `
 		UPDATE organizations SET name = $2, slug = $3, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
@@ -147,7 +160,9 @@ func (r *OrganizationRepository) Update(ctx context.Context, exec db.Executor, o
 		return fmt.Errorf("repository.Update: %w", domain.ErrOrganizationNotFound)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.updated", orgID); err != nil {
+	before := map[string]any{"name": oldName, "slug": oldSlug}
+	after := map[string]any{"name": name, "slug": slug}
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.updated", orgID, before, after); err != nil {
 		return fmt.Errorf("repository.Update: audit: %w", err)
 	}
 	return nil
@@ -256,6 +271,14 @@ func insertOrgDomainAudit(ctx context.Context, exec db.Executor, actorID, actorR
 
 // UpdateSettings mengubah default_language organisasi (S3-30, US-010).
 func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Executor, orgID, defaultLanguage, actorID, actorRole string) error {
+	var oldLanguage string
+	if err := exec.QueryRow(ctx, `SELECT default_language FROM organizations WHERE id = $1 AND deleted_at IS NULL`, orgID).Scan(&oldLanguage); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpdateSettings: %w", domain.ErrOrganizationNotFound)
+		}
+		return fmt.Errorf("repository.UpdateSettings: %w", err)
+	}
+
 	tag, err := exec.Exec(ctx, `
 		UPDATE organizations SET default_language = $2::org_language, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
@@ -267,7 +290,9 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 		return fmt.Errorf("repository.UpdateSettings: %w", domain.ErrOrganizationNotFound)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.settings_updated", orgID); err != nil {
+	before := map[string]any{"default_language": oldLanguage}
+	after := map[string]any{"default_language": defaultLanguage}
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.settings_updated", orgID, before, after); err != nil {
 		return fmt.Errorf("repository.UpdateSettings: audit: %w", err)
 	}
 	return nil
@@ -287,9 +312,13 @@ func (r *OrganizationRepository) UpdateSettings(ctx context.Context, exec db.Exe
 // ck_organizations_retention_days (§5.7, batas keras 30-365) tetap jadi
 // jaring pengaman kedua.
 func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db.Executor, orgID string, quotaBytes int64, retentionDays int, actorID, actorRole string) error {
-	var maxBytes, usedMB int64
+	var maxBytes, usedMB, oldQuotaBytes int64
+	var oldRetentionDays int
 	var groupID string
-	if err := exec.QueryRow(ctx, `SELECT storage_max_bytes, group_id, storage_used_mb FROM organizations WHERE id = $1 AND deleted_at IS NULL`, orgID).Scan(&maxBytes, &groupID, &usedMB); err != nil {
+	if err := exec.QueryRow(ctx, `
+		SELECT storage_max_bytes, group_id, storage_used_mb, storage_quota_bytes, retention_days
+		FROM organizations WHERE id = $1 AND deleted_at IS NULL
+	`, orgID).Scan(&maxBytes, &groupID, &usedMB, &oldQuotaBytes, &oldRetentionDays); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.UpdateStorageQuota: %w", domain.ErrOrganizationNotFound)
 		}
@@ -341,7 +370,9 @@ func (r *OrganizationRepository) UpdateStorageQuota(ctx context.Context, exec db
 		return fmt.Errorf("repository.UpdateStorageQuota: %w", err)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.storage_quota_updated", orgID); err != nil {
+	before := map[string]any{"storage_quota_bytes": oldQuotaBytes, "retention_days": oldRetentionDays}
+	after := map[string]any{"storage_quota_bytes": quotaBytes, "retention_days": retentionDays}
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.storage_quota_updated", orgID, before, after); err != nil {
 		return fmt.Errorf("repository.UpdateStorageQuota: audit: %w", err)
 	}
 	return nil
@@ -428,7 +459,7 @@ func (r *OrganizationRepository) Deactivate(ctx context.Context, exec db.Executo
 		return fmt.Errorf("repository.Deactivate: %w", domain.ErrOrganizationNotFound)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.deactivated", orgID); err != nil {
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.deactivated", orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.Deactivate: audit: %w", err)
 	}
 	return nil
@@ -452,7 +483,7 @@ func (r *OrganizationRepository) Reactivate(ctx context.Context, exec db.Executo
 		return fmt.Errorf("repository.Reactivate: %w", domain.ErrOrganizationNotFound)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.reactivated", orgID); err != nil {
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.reactivated", orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.Reactivate: audit: %w", err)
 	}
 	return nil
@@ -598,7 +629,7 @@ func (r *OrganizationRepository) SoftDelete(ctx context.Context, exec db.Executo
 		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrOrganizationNotFound)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.deleted", orgID); err != nil {
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.deleted", orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.SoftDelete: audit: %w", err)
 	}
 	return nil
@@ -619,7 +650,7 @@ func (r *OrganizationRepository) Restore(ctx context.Context, exec db.Executor, 
 		return fmt.Errorf("repository.Restore: %w", domain.ErrOrganizationNotDeleted)
 	}
 
-	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.restored", orgID); err != nil {
+	if err := insertOrgAudit(ctx, exec, actorID, actorRole, "organization.restored", orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.Restore: audit: %w", err)
 	}
 	return nil
@@ -665,10 +696,39 @@ func (r *OrganizationRepository) GetSummary(ctx context.Context, exec db.Executo
 	return &s, nil
 }
 
-func insertOrgAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, orgID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id)
-		VALUES ($1, $2, $3, 'organization', $4, $4)
-	`, actorID, actorRole, action, orgID)
+// insertOrgAudit -- stateBefore/stateAfter (2026-09-12, ditemukan user: GA
+// Audit Trail tidak pernah menampilkan NILAI SEBELUM/SESUDAH untuk aksi
+// organisasi apa pun) mengikuti pola insertProjectAudit -- nil untuk aksi
+// yang namanya sudah cukup menjelaskan diri sendiri (created/deactivated/
+// reactivated/deleted/restored), diisi untuk aksi "diperbarui" yang
+// nilainya benar-benar berubah (Update/UpdateSettings/UpdateStorageQuota).
+// actor_ip + metadata.request_path (2026-09-12, ditemukan user lewat
+// pertanyaan yang sama: kolom ASAL di GA Audit Trail kosong untuk SEMUA
+// aksi organisasi) -- insertOrgAudit sebelumnya TIDAK PERNAH memanggil
+// requestMetaFromContext sama sekali, beda dari insertOrgDomainAudit
+// (helper audit organisasi LAIN, dipakai add/remove domain) yang sudah
+// benar sejak awal.
+func insertOrgAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, orgID string, stateBefore, stateAfter map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	var metaJSON []byte
+	if path != "" {
+		encoded, err := marshalIfNotEmpty(map[string]any{"request_path": path})
+		if err != nil {
+			return fmt.Errorf("insertOrgAudit: encode metadata: %w", err)
+		}
+		metaJSON = encoded
+	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("insertOrgAudit: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("insertOrgAudit: encode state_after: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, 'organization', $4, $4, $5::inet, $6, $7, $8)
+	`, actorID, actorRole, action, orgID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }

@@ -131,10 +131,20 @@ func (r *WorkspaceMemberRepository) AssignRole(
 	if afterJSON, err = json.Marshal(after); err != nil {
 		return fmt.Errorf("repository.AssignRole: marshal state_after: %w", err)
 	}
+	// actor_ip/metadata.request_path (implementation_gaps.md IG-64) --
+	// sebelumnya tidak pernah diisi, kolom ASAL di GA/AW Audit Trail kosong
+	// untuk aksi ganti role workspace.
+	ip, path := requestMetaFromContext(ctx)
+	var metaJSON []byte
+	if path != "" {
+		if metaJSON, err = marshalIfNotEmpty(map[string]any{"request_path": path}); err != nil {
+			return fmt.Errorf("repository.AssignRole: encode metadata: %w", err)
+		}
+	}
 	if _, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, state_before, state_after)
-		VALUES ($1, $2, 'member.role_changed', 'workspace_member', $3, $4, $5::jsonb, $6::jsonb)
-	`, actorID, actorRole, userID, workspaceID, beforeJSON, afterJSON); err != nil {
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, 'member.role_changed', 'workspace_member', $3, $4, $5::inet, $6::jsonb, $7::jsonb, $8)
+	`, actorID, actorRole, userID, workspaceID, ip, beforeJSON, afterJSON, metaJSON); err != nil {
 		return fmt.Errorf("repository.AssignRole: audit: %w", err)
 	}
 
@@ -238,10 +248,19 @@ func (r *WorkspaceMemberRepository) RemoveMember(ctx context.Context, exec db.Ex
 		return fmt.Errorf("repository.RemoveMember: %w", domain.ErrMemberNotFound)
 	}
 
+	ip, path := requestMetaFromContext(ctx)
+	var metaJSON []byte
+	if path != "" {
+		encoded, err := marshalIfNotEmpty(map[string]any{"request_path": path})
+		if err != nil {
+			return fmt.Errorf("repository.RemoveMember: encode metadata: %w", err)
+		}
+		metaJSON = encoded
+	}
 	if _, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id)
-		VALUES ($1, $2, 'member.removed', 'workspace_member', $3, $4)
-	`, actorID, actorRole, userID, workspaceID); err != nil {
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, actor_ip, metadata)
+		VALUES ($1, $2, 'member.removed', 'workspace_member', $3, $4, $5::inet, $6)
+	`, actorID, actorRole, userID, workspaceID, ip, metaJSON); err != nil {
 		return fmt.Errorf("repository.RemoveMember: audit: %w", err)
 	}
 	return nil

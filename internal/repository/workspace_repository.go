@@ -55,7 +55,7 @@ func (r *WorkspaceRepository) Create(ctx context.Context, exec db.Executor, orgI
 		return nil, fmt.Errorf("repository.Create: %w", err)
 	}
 
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.created", ws.ID, orgID); err != nil {
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.created", ws.ID, orgID, nil, nil); err != nil {
 		return nil, fmt.Errorf("repository.Create: audit: %w", err)
 	}
 	// Task Management Core Phase 1 (forward-pull): 5 status sistem di-seed
@@ -98,6 +98,14 @@ func (r *WorkspaceRepository) GetOrgID(ctx context.Context, exec db.Executor, wo
 // punya kolom deskripsi/avatar seperti wording asli task ini, cuma `name`
 // (dan `mention_cooldown_minutes`, di luar scope S3-10).
 func (r *WorkspaceRepository) Update(ctx context.Context, exec db.Executor, workspaceID, name, actorID, actorRole string) error {
+	var oldName string
+	if err := exec.QueryRow(ctx, `SELECT name FROM workspaces WHERE id = $1 AND deleted_at IS NULL`, workspaceID).Scan(&oldName); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.Update: %w", domain.ErrWorkspaceNotFound)
+		}
+		return fmt.Errorf("repository.Update: %w", err)
+	}
+
 	tag, err := exec.Exec(ctx, `
 		UPDATE workspaces SET name = $2, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
@@ -113,7 +121,9 @@ func (r *WorkspaceRepository) Update(ctx context.Context, exec db.Executor, work
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
 	}
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.updated", workspaceID, orgID); err != nil {
+	before := map[string]any{"name": oldName}
+	after := map[string]any{"name": name}
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.updated", workspaceID, orgID, before, after); err != nil {
 		return fmt.Errorf("repository.Update: audit: %w", err)
 	}
 	return nil
@@ -163,7 +173,7 @@ func (r *WorkspaceRepository) setArchived(ctx context.Context, exec db.Executor,
 	if err != nil {
 		return fmt.Errorf("repository.setArchived: %w", err)
 	}
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, action, workspaceID, orgID); err != nil {
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, action, workspaceID, orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.setArchived: audit: %w", err)
 	}
 	return nil
@@ -215,7 +225,7 @@ func (r *WorkspaceRepository) setDeactivated(ctx context.Context, exec db.Execut
 	if err != nil {
 		return fmt.Errorf("repository.setDeactivated: %w", err)
 	}
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, action, workspaceID, orgID); err != nil {
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, action, workspaceID, orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.setDeactivated: audit: %w", err)
 	}
 	return nil
@@ -231,6 +241,11 @@ func (r *WorkspaceRepository) setDeactivated(ctx context.Context, exec db.Execut
 // 2026-08-30 -- lihat komentar WorkspaceService.MoveWorkspace untuk
 // pengecekan otorisasi+status org yang MEMANG ditegakkan di sini.
 func (r *WorkspaceRepository) MoveToOrg(ctx context.Context, exec db.Executor, workspaceID, targetOrgID, actorID, actorRole string) error {
+	oldOrgID, err := r.GetOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("repository.MoveToOrg: %w", err)
+	}
+
 	tag, err := exec.Exec(ctx, `
 		UPDATE workspaces SET org_id = $2, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
@@ -242,7 +257,9 @@ func (r *WorkspaceRepository) MoveToOrg(ctx context.Context, exec db.Executor, w
 		return fmt.Errorf("repository.MoveToOrg: %w", domain.ErrWorkspaceNotFound)
 	}
 
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.moved", workspaceID, targetOrgID); err != nil {
+	before := map[string]any{"org_id": oldOrgID}
+	after := map[string]any{"org_id": targetOrgID}
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.moved", workspaceID, targetOrgID, before, after); err != nil {
 		return fmt.Errorf("repository.MoveToOrg: audit: %w", err)
 	}
 	return nil
@@ -294,7 +311,7 @@ func (r *WorkspaceRepository) SoftDelete(ctx context.Context, exec db.Executor, 
 		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrWorkspaceNotFound)
 	}
 
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.deleted", workspaceID, orgID); err != nil {
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.deleted", workspaceID, orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.SoftDelete: audit: %w", err)
 	}
 	return nil
@@ -318,7 +335,7 @@ func (r *WorkspaceRepository) Restore(ctx context.Context, exec db.Executor, wor
 	if err != nil {
 		return fmt.Errorf("repository.Restore: %w", err)
 	}
-	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.restored", workspaceID, orgID); err != nil {
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.restored", workspaceID, orgID, nil, nil); err != nil {
 		return fmt.Errorf("repository.Restore: audit: %w", err)
 	}
 	return nil
@@ -437,10 +454,34 @@ func (r *WorkspaceRepository) ListByGroup(ctx context.Context, exec db.Executor,
 	return list, nil
 }
 
-func insertWorkspaceAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, workspaceID, orgID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id, workspace_id)
-		VALUES ($1, $2, $3, 'workspace', $4, $5, $4)
-	`, actorID, actorRole, action, workspaceID, orgID)
+// insertWorkspaceAudit -- diperluas menerima stateBefore/stateAfter +
+// actor_ip/metadata.request_path (implementation_gaps.md IG-64, mengikuti
+// pola persis insertOrgAudit yang diperbaiki lebih dulu) -- sebelumnya
+// TIDAK PERNAH mengisi keduanya sama sekali, GA Audit Trail selalu
+// menampilkan NILAI SEBELUM/SESUDAH dan ASAL kosong untuk aksi workspace
+// apa pun. nil untuk aksi yang namanya sudah menjelaskan diri sendiri
+// (created/archived/unarchived/deactivated/reactivated/deleted/restored).
+func insertWorkspaceAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, workspaceID, orgID string, stateBefore, stateAfter map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	var metaJSON []byte
+	if path != "" {
+		encoded, err := marshalIfNotEmpty(map[string]any{"request_path": path})
+		if err != nil {
+			return fmt.Errorf("insertWorkspaceAudit: encode metadata: %w", err)
+		}
+		metaJSON = encoded
+	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("insertWorkspaceAudit: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("insertWorkspaceAudit: encode state_after: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id, workspace_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, 'workspace', $4, $5, $4, $6::inet, $7, $8, $9)
+	`, actorID, actorRole, action, workspaceID, orgID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }
