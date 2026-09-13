@@ -54,8 +54,8 @@ type Project struct {
 	PMPendingEmail        string
 	PMPendingInvitationID string
 	CreatedAt             time.Time
-	ArchivedAt     *time.Time
-	DeletedAt      *time.Time
+	ArchivedAt            *time.Time
+	DeletedAt             *time.Time
 }
 
 // GetWorkspaceID mengembalikan workspace_id pemilik projectID -- dasar

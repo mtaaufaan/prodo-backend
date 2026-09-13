@@ -202,10 +202,15 @@ func (s *ProjectService) resolvePM(ctx context.Context, exec db.Executor, worksp
 
 // invitePM membuat undangan project_manager tertaut projectID (S4W
 // susulan) -- dipanggil Create/AssignPM setelah resolvePM mengembalikan
-// InviteEmail (email belum terdaftar). Best-effort mengambil nama
-// workspace untuk isi email; kegagalan CreateInvitation PROPAGATE (bukan
-// best-effort) karena tanpa undangan project akan permanen tanpa PM.
-func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspaceID, projectID, email, displayName, actorID, inviterName string) error {
+// InviteEmail (email belum terdaftar). pm.InviteName SENGAJA tidak
+// diteruskan ke sini -- cuma dipakai resolvePM sebagai syarat validasi
+// (wajib diisi), sama pola WorkspaceService.CreateWorkspace's adminName;
+// user_invitations tidak punya kolom display_name untuk undangan bentuk
+// workspace (cuma bentuk Eksekutif), invitee mengisi namanya sendiri saat
+// menerima. Mengambil nama workspace untuk isi email; kegagalan
+// CreateInvitation PROPAGATE (bukan best-effort) karena tanpa undangan
+// project akan permanen tanpa PM.
+func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspaceID, projectID, email, actorID, inviterName string) error {
 	workspaceName, err := s.invites.GetWorkspaceName(ctx, exec, workspaceID)
 	if err != nil {
 		return fmt.Errorf("service.invitePM: %w", err)
@@ -268,7 +273,7 @@ func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspace
 	}
 
 	if pm.InviteEmail != "" {
-		if err := s.invitePM(ctx, exec, workspaceID, p.ID, pm.InviteEmail, pm.InviteName, actorID, inviterName); err != nil {
+		if err := s.invitePM(ctx, exec, workspaceID, p.ID, pm.InviteEmail, actorID, inviterName); err != nil {
 			return nil, fmt.Errorf("service.Create: %w", err)
 		}
 	}
@@ -354,7 +359,7 @@ func (s *ProjectService) AssignPM(ctx context.Context, exec db.Executor, project
 	if err := s.repo.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.AssignPM: %w", err)
 	}
-	if err := s.invitePM(ctx, exec, workspaceID, projectID, pm.InviteEmail, pm.InviteName, actorID, inviterName); err != nil {
+	if err := s.invitePM(ctx, exec, workspaceID, projectID, pm.InviteEmail, actorID, inviterName); err != nil {
 		return fmt.Errorf("service.AssignPM: %w", err)
 	}
 	return nil
