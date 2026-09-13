@@ -58,8 +58,11 @@ func (r *GroupDirectoryRepository) List(ctx context.Context, actorUserID, platfo
 				JOIN users u ON u.id = gaa.user_id
 				WHERE gaa.group_id = g.id
 			) ga_agg ON true
+			-- o.deleted_at IS NULL (implementation_gaps.md IG-70, 2026-09-13):
+			-- organisasi yang sudah soft-delete sebelumnya tetap terhitung
+			-- selamanya di org_count.
 			LEFT JOIN LATERAL (
-				SELECT count(*) AS org_count FROM organizations o WHERE o.group_id = g.id
+				SELECT count(*) AS org_count FROM organizations o WHERE o.group_id = g.id AND o.deleted_at IS NULL
 			) org_agg ON true
 			WHERE (prodo_is_platform_admin() OR prodo_is_group_admin_of_group(g.id))
 			  AND ($1 = '' OR g.name ILIKE '%' || $1 || '%' OR EXISTS (

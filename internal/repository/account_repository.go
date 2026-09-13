@@ -346,16 +346,20 @@ const groupAdminSummaryQuery = `
 	LEFT JOIN group_admin_assignments gaa ON gaa.user_id = u.id
 	LEFT JOIN groups g ON g.id = gaa.group_id
 	LEFT JOIN service_tiers st ON st.id = g.tier_id
+	-- deleted_at IS NULL di org_agg/mem_agg (implementation_gaps.md IG-70,
+	-- 2026-09-13): organisasi/workspace yang sudah soft-delete sebelumnya
+	-- tetap terhitung selamanya di used_org_count/used_member_count (baris
+	-- tidak pernah benar-benar hilang dari tabel, cuma deleted_at diisi).
 	LEFT JOIN LATERAL (
 		SELECT count(*) AS org_count, COALESCE(sum(o.storage_used_mb), 0) AS storage_used_mb
-		FROM organizations o WHERE o.group_id = g.id
+		FROM organizations o WHERE o.group_id = g.id AND o.deleted_at IS NULL
 	) org_agg ON true
 	LEFT JOIN LATERAL (
 		SELECT count(DISTINCT wm.user_id) AS member_count
 		FROM workspace_members wm
 		JOIN workspaces w ON w.id = wm.workspace_id
 		JOIN organizations o2 ON o2.id = w.org_id
-		WHERE o2.group_id = g.id
+		WHERE o2.group_id = g.id AND o2.deleted_at IS NULL AND w.deleted_at IS NULL
 	) mem_agg ON true
 	LEFT JOIN LATERAL (
 		SELECT gc.start_at, gc.subscription_period, gc.end_at, gc.invoice_number
