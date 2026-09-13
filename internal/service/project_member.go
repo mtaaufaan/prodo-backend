@@ -12,6 +12,7 @@ import (
 // projectMemberRepository -- interface didefinisikan di consumer, §3.9.
 type projectMemberRepository interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	HasPM(ctx context.Context, exec db.Executor, projectID string) (bool, error)
 	AddMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error
 	UpdateRole(ctx context.Context, exec db.Executor, projectID, userID, role, actorID, actorRole string) error
 	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
@@ -21,10 +22,13 @@ type projectMemberRepository interface {
 }
 
 // projectRoleChecker -- interface didefinisikan di consumer, §3.9.
-// Diimplementasikan *RBACService (GetMemberRole, GetWorkspaceOrgID).
+// Diimplementasikan *RBACService (GetMemberRole, GetWorkspaceOrgID,
+// AssignRole -- AssignRole ditambah S4W susulan, dipakai ProjectService
+// resolvePM menaikkan role member existing jadi project_manager).
 type projectRoleChecker interface {
 	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error)
 }
 
 // ProjectMemberService -- S3-21/22/23/25/26/27, US-009b. Route
@@ -78,6 +82,18 @@ func (s *ProjectMemberService) AddMember(ctx context.Context, exec db.Executor, 
 	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return err
+	}
+
+	// S4W susulan (dikonfirmasi user 2026-09-13): project yang masih
+	// "menunggu PM" (undangan project_manager belum diterima) tidak boleh
+	// menambah member project-scoped lain dulu -- lihat domain.
+	// ErrProjectAwaitingPM.
+	hasPM, err := s.repo.HasPM(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("service.AddMember: %w", err)
+	}
+	if !hasPM {
+		return fmt.Errorf("service.AddMember: %w", domain.ErrProjectAwaitingPM)
 	}
 
 	existingRole, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, targetUserID)

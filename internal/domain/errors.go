@@ -219,6 +219,15 @@ var (
 	// perbandingannya case-insensitive.
 	ErrProjectNameTaken = errors.New("project name already used in this workspace")
 
+	// ErrProjectAwaitingPM dikembalikan POST /projects/:id/members (S4W
+	// susulan, dikonfirmasi user 2026-09-13) saat project.pm_user_id masih
+	// NULL (PM masih undangan pending, belum diterima) -- project tidak
+	// boleh menambah member project-scoped lain sebelum benar-benar punya
+	// PM aktif. Project ITU SENDIRI tetap boleh dibuat dalam kondisi ini
+	// (beda dari dulu yang mewajibkan pm_user_id terisi saat Create) --
+	// cuma penambahan member turunannya yang digerbangi.
+	ErrProjectAwaitingPM = errors.New("project is awaiting a project manager to accept invitation")
+
 	// ErrInvalidCIDR dikembalikan saat input allowlist IP Platform Admin
 	// (S4P-18) bukan notasi CIDR yang valid.
 	ErrInvalidCIDR = errors.New("invalid cidr notation")

@@ -55,7 +55,7 @@ type stubInvitationRepo struct {
 	listPendingErr    error
 }
 
-func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error) {
+func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID string, expiresAt time.Time) (string, error) {
 	if r.createErr != nil {
 		return "", r.createErr
 	}
@@ -181,16 +181,33 @@ func (a *stubWorkspaceAssigner) AssignRole(_ context.Context, _ db.Executor, wor
 	return &RoleChangeResult{NewRole: role}, nil
 }
 
-func newTestInvitationService(repo *stubInvitationRepo, emailer *stubInvitationEmailer, kc *fakeKeycloakClient, users *stubExistingUserFinder, assigner *stubWorkspaceAssigner) *InvitationService {
-	return NewInvitationService(repo, emailer, kc, users, assigner, zap.NewNop(), "http://localhost:5173")
+type recordedPendingPM struct {
+	projectID, userID string
+}
+
+type stubProjectPMAssigner struct {
+	assignErr error
+	assigned  []recordedPendingPM
+}
+
+func (a *stubProjectPMAssigner) AssignPendingPM(_ context.Context, _ db.Executor, projectID, userID string) error {
+	if a.assignErr != nil {
+		return a.assignErr
+	}
+	a.assigned = append(a.assigned, recordedPendingPM{projectID, userID})
+	return nil
+}
+
+func newTestInvitationService(repo *stubInvitationRepo, emailer *stubInvitationEmailer, kc *fakeKeycloakClient, users *stubExistingUserFinder, assigner *stubWorkspaceAssigner, projects *stubProjectPMAssigner) *InvitationService {
+	return NewInvitationService(repo, emailer, kc, users, assigner, projects, zap.NewNop(), "http://localhost:5173")
 }
 
 func TestInvitationService_CreateInvitation_Success(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	inv, err := svc.CreateInvitation(context.Background(), nil, "budi@example.com", "ws-1", "editor", "actor-1", "Tim Marketing", "Siti Aminah")
+	inv, err := svc.CreateInvitation(context.Background(), nil, "budi@example.com", "ws-1", "editor", "actor-1", "Tim Marketing", "Siti Aminah", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,12 +234,12 @@ func TestInvitationService_CreateInvitation_Success(t *testing.T) {
 func TestInvitationService_CreateInvitation_TokenUniquePerCall(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor"); err != nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := svc.CreateInvitation(context.Background(), nil, "b@x.com", "ws-1", "editor", "actor-1", "WS", "Actor"); err != nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "b@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -237,9 +254,9 @@ func TestInvitationService_CreateInvitation_TokenUniquePerCall(t *testing.T) {
 func TestInvitationService_CreateInvitation_RepoError_Propagates(t *testing.T) {
 	repo := &stubInvitationRepo{createErr: errors.New("db down")}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor"); err == nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
 	if len(emailer.sent) != 0 {
@@ -250,9 +267,9 @@ func TestInvitationService_CreateInvitation_RepoError_Propagates(t *testing.T) {
 func TestInvitationService_CreateInvitation_EmailError_Propagates(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{sendErr: errors.New("smtp down")}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor"); err == nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
 }
@@ -260,7 +277,7 @@ func TestInvitationService_CreateInvitation_EmailError_Propagates(t *testing.T) 
 func TestInvitationService_CreateBulkInvitations_ValidAndDuplicate(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	emails := []string{"a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com", "a@x.com"} // a@x.com duplikat
 	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
@@ -278,7 +295,7 @@ func TestInvitationService_CreateBulkInvitations_ValidAndDuplicate(t *testing.T)
 func TestInvitationService_CreateBulkInvitations_InvalidFormat_ErrorPerRow(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	emails := []string{"a@x.com", "bukan-email", "c@x.com"}
 	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
@@ -302,7 +319,7 @@ func TestInvitationService_CreateBulkInvitations_InvalidFormat_ErrorPerRow(t *te
 func TestInvitationService_CreateBulkInvitations_OneEmailFails_OthersStillSucceed(t *testing.T) {
 	repo := &stubInvitationRepo{failCreateFor: "sudah-pending@x.com"}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	emails := []string{"sudah-pending@x.com", "valid@x.com"}
 	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
@@ -321,7 +338,7 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_AddedDirectly(t *t
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
 	assigner := &stubWorkspaceAssigner{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, assigner)
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, assigner, &stubProjectPMAssigner{})
 
 	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-terdaftar@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
 	if err != nil {
@@ -346,7 +363,7 @@ func TestInvitationService_AcceptInvitation_Success(t *testing.T) {
 		findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "budi@example.com", WorkspaceID: "ws-1", Role: "editor"},
 		acceptedUserID:    "user-new",
 	}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{userID: "kc-sub-1"}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{userID: "kc-sub-1"}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	result, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!")
 	if err != nil {
@@ -357,9 +374,49 @@ func TestInvitationService_AcceptInvitation_Success(t *testing.T) {
 	}
 }
 
+// TestInvitationService_AcceptInvitation_ProjectLinked_AssignsPendingPM --
+// S4W susulan: undangan project_manager yang tertaut project TERTENTU
+// (target.ProjectID) harus memicu AssignPendingPM begitu diterima, supaya
+// project itu otomatis dapat pm_user_id tanpa langkah manual tambahan.
+func TestInvitationService_AcceptInvitation_ProjectLinked_AssignsPendingPM(t *testing.T) {
+	repo := &stubInvitationRepo{
+		findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "budi@example.com", WorkspaceID: "ws-1", Role: "project_manager", ProjectID: "proj-1"},
+		acceptedUserID:    "user-new",
+	}
+	projects := &stubProjectPMAssigner{}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{userID: "kc-sub-1"}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, projects)
+
+	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projects.assigned) != 1 || projects.assigned[0].projectID != "proj-1" || projects.assigned[0].userID != "user-new" {
+		t.Errorf("projects.assigned = %+v, want satu entri proj-1/user-new", projects.assigned)
+	}
+}
+
+// TestInvitationService_AcceptInvitation_NoProjectLink_DoesNotAssignPM --
+// undangan BIASA (tanpa ProjectID) tidak boleh memicu AssignPendingPM sama
+// sekali -- pastikan cabang baru tidak jadi tidak sengaja aktif untuk
+// undangan admin_workspace/editor/dst yang sudah ada sebelumnya.
+func TestInvitationService_AcceptInvitation_NoProjectLink_DoesNotAssignPM(t *testing.T) {
+	repo := &stubInvitationRepo{
+		findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "budi@example.com", WorkspaceID: "ws-1", Role: "editor"},
+		acceptedUserID:    "user-new",
+	}
+	projects := &stubProjectPMAssigner{}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{userID: "kc-sub-1"}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, projects)
+
+	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projects.assigned) != 0 {
+		t.Errorf("projects.assigned = %+v, want kosong untuk undangan tanpa project_id", projects.assigned)
+	}
+}
+
 func TestInvitationService_AcceptInvitation_TokenNotFound(t *testing.T) {
 	repo := &stubInvitationRepo{findPendingErr: fmt.Errorf("repository.FindPendingByTokenHash: %w", domain.ErrInvitationNotFound)}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	_, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
@@ -369,7 +426,7 @@ func TestInvitationService_AcceptInvitation_TokenNotFound(t *testing.T) {
 
 func TestInvitationService_AcceptInvitation_DisplayNameTooShort(t *testing.T) {
 	repo := &stubInvitationRepo{findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "a@x.com", WorkspaceID: "ws-1", Role: "editor"}}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "A", "", "Password123!"); !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
@@ -378,7 +435,7 @@ func TestInvitationService_AcceptInvitation_DisplayNameTooShort(t *testing.T) {
 
 func TestInvitationService_AcceptInvitation_KeycloakError_Propagates(t *testing.T) {
 	repo := &stubInvitationRepo{findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "a@x.com", WorkspaceID: "ws-1", Role: "editor"}}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{err: errors.New("keycloak down")}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{err: errors.New("keycloak down")}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!"); err == nil {
 		t.Fatal("harusnya error, tapi nil")
@@ -387,7 +444,7 @@ func TestInvitationService_AcceptInvitation_KeycloakError_Propagates(t *testing.
 
 func TestInvitationService_CancelInvitation_NotFound(t *testing.T) {
 	repo := &stubInvitationRepo{cancelErr: fmt.Errorf("repository.Cancel: %w", domain.ErrInvitationNotFound)}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	err := svc.CancelInvitation(context.Background(), nil, "ws-1", "inv-1", "actor-1")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
@@ -397,7 +454,7 @@ func TestInvitationService_CancelInvitation_NotFound(t *testing.T) {
 
 func TestInvitationService_CancelInvitation_Success(t *testing.T) {
 	repo := &stubInvitationRepo{}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	if err := svc.CancelInvitation(context.Background(), nil, "ws-1", "inv-1", "actor-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -407,7 +464,7 @@ func TestInvitationService_CancelInvitation_Success(t *testing.T) {
 func TestInvitationService_ResendInvitation_Success(t *testing.T) {
 	repo := &stubInvitationRepo{resendResult: &repository.ResendTarget{Email: "budi@example.com", Role: "editor"}}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	if err := svc.ResendInvitation(context.Background(), nil, "ws-1", "inv-1", "WS", "Actor"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -421,7 +478,7 @@ func TestInvitationService_ListPendingInvitations_ReturnsList(t *testing.T) {
 	repo := &stubInvitationRepo{listPendingResult: []repository.PendingInvitation{
 		{ID: "inv-1", Email: "a@x.com", Role: "editor", ExpiresAt: time.Now().Add(72 * time.Hour)},
 	}}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	invitations, err := svc.ListPendingInvitations(context.Background(), nil, "ws-1")
 	if err != nil {
@@ -434,7 +491,7 @@ func TestInvitationService_ListPendingInvitations_ReturnsList(t *testing.T) {
 
 func TestInvitationService_ResendInvitation_NotFound(t *testing.T) {
 	repo := &stubInvitationRepo{resendErr: fmt.Errorf("repository.Resend: %w", domain.ErrInvitationNotFound)}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	err := svc.ResendInvitation(context.Background(), nil, "ws-1", "inv-1", "WS", "Actor")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {

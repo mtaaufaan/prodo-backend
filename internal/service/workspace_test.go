@@ -166,7 +166,7 @@ type fakeInvitationCreator struct {
 	err error
 }
 
-func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _ string) (*Invitation, error) {
+func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, _ string) (*Invitation, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
