@@ -218,7 +218,7 @@ func run() error {
 	sessionSvc := service.NewSessionService(sessionRepo, rdb)
 	authSvc := service.NewAuthService(accountRepo, oidcClient, kcAdmin, mfaSvc, sessionSvc, emailSvc, logger)
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
-	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
+	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, projectRepo, logger, cfg.AppBaseURL)
 	organizationSvc := service.NewOrganizationService(organizationRepo)
 	ssoConfigSvc := service.NewSSOConfigService(ssoConfigRepo, organizationSvc)
 	workspaceRepo := repository.NewWorkspaceRepository()
@@ -230,7 +230,7 @@ func run() error {
 	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
 	groupLocaleSvc := service.NewGroupLocaleService(groupRepo, organizationRepo)
 	groupSummarySvc := service.NewGroupSummaryService(organizationRepo, groupAuditRepo, retentionRepo, invitationRepo, organizationRepo)
-	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, logger)
+	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, accountRepo, invitationSvc, logger)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
@@ -280,7 +280,7 @@ func run() error {
 	ssoConfigHandler := handler.NewSSOConfigHandler(ssoConfigSvc, logger)
 	groupHandler := handler.NewGroupHandler(groupSvc, logger)
 	projectMemberHandler := handler.NewProjectMemberHandler(projectMemberSvc, logger)
-	projectHandler := handler.NewProjectHandler(projectSvc, logger)
+	projectHandler := handler.NewProjectHandler(projectSvc, accountSvc, logger)
 	retentionHandler := handler.NewRetentionHandler(retentionSvc, pool, logger)
 	csvImportHandler := handler.NewCSVImportHandler(csvImportSvc, logger)
 	webhookHandler := handler.NewWebhookHandler(webhookSvc, logger)
@@ -653,6 +653,10 @@ func run() error {
 	// Update/Archive/Delete, GA/PA saja untuk Restore -- lihat komentar
 	// ProjectService.authorizeOrgOnly).
 	v1.Put("/projects/:id", jwtAuth, dbCtx, projectHandler.Update)
+	// S4W susulan (dikonfirmasi user 2026-09-13): PM dipisah dari Update --
+	// panel Kelola punya seksi PM sendiri (assign/ganti/hapus).
+	v1.Post("/projects/:id/pm", jwtAuth, dbCtx, projectHandler.AssignPM)
+	v1.Delete("/projects/:id/pm", jwtAuth, dbCtx, projectHandler.RemovePM)
 	v1.Put("/projects/:id/archive", jwtAuth, dbCtx, projectHandler.Archive)
 	v1.Put("/projects/:id/unarchive", jwtAuth, dbCtx, projectHandler.Unarchive)
 	v1.Delete("/projects/:id", jwtAuth, dbCtx, projectHandler.Delete)

@@ -60,6 +60,22 @@ func (r *ProjectMemberRepository) GetWorkspaceID(ctx context.Context, exec db.Ex
 	return workspaceID, nil
 }
 
+// HasPM (S4W susulan, dikonfirmasi user 2026-09-13) -- true kalau project
+// sudah punya pm_user_id aktif. Dipakai AddMember menolak penambahan
+// member project-scoped selama project masih "menunggu PM" (undangan
+// project_manager belum diterima).
+func (r *ProjectMemberRepository) HasPM(ctx context.Context, exec db.Executor, projectID string) (bool, error) {
+	var hasPM bool
+	err := exec.QueryRow(ctx, `SELECT pm_user_id IS NOT NULL FROM projects WHERE id = $1`, projectID).Scan(&hasPM)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("repository.HasPM: %w", domain.ErrProjectNotFound)
+		}
+		return false, fmt.Errorf("repository.HasPM: %w", err)
+	}
+	return hasPM, nil
+}
+
 // AddMember menambahkan project member (S3-21) + audit trail + notifikasi
 // AW kalau cross-org (S3-17). isScoped ditentukan CALLER (service)
 // berdasarkan apakah targetnya sudah workspace member -- lihat

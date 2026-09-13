@@ -77,10 +77,11 @@ func run() error {
 
 	accountRepo := repository.NewAccountRepository(pool)
 	invitationRepo := repository.NewInvitationRepository()
+	projectRepo := repository.NewProjectRepository()
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	csvImportRepo := repository.NewCSVImportRepository()
 	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
-	invitationSvc := service.NewInvitationService(invitationRepo, emailer, kcAdmin, accountRepo, rbacSvc, logger, cfg.AppBaseURL)
+	invitationSvc := service.NewInvitationService(invitationRepo, emailer, kcAdmin, accountRepo, rbacSvc, projectRepo, logger, cfg.AppBaseURL)
 	csvImportHandlerDeps := worker.NewCSVImportHandler(pool, csvImportRepo, invitationSvc, logger)
 
 	// WebhookDeliveryJob (Track S4G) -- worker HANYA mengirim+mencatat
