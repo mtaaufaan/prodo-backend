@@ -25,17 +25,21 @@ func NewProjectHandler(projects *service.ProjectService, logger *zap.Logger) *Pr
 
 func projectToMap(p *repository.Project) fiber.Map {
 	return fiber.Map{
-		"id":           p.ID,
-		"workspace_id": p.WorkspaceID,
-		"name":         p.Name,
-		"code":         p.Code,
-		"pm_user_id":   p.PMUserID,
-		"pm_name":      p.PMName,
-		"pm_email":     p.PMEmail,
-		"is_archived":  p.IsArchived,
-		"member_count": p.MemberCount,
-		"created_at":   p.CreatedAt,
-		"archived_at":  p.ArchivedAt,
+		"id":               p.ID,
+		"workspace_id":     p.WorkspaceID,
+		"name":             p.Name,
+		"code":             p.Code,
+		"pm_user_id":       p.PMUserID,
+		"pm_name":          p.PMName,
+		"pm_email":         p.PMEmail,
+		"is_archived":      p.IsArchived,
+		"member_count":     p.MemberCount,
+		"sprint_count":     p.SprintCount,
+		"task_count":       p.TaskCount,
+		"created_by_name":  p.CreatedByName,
+		"created_by_email": p.CreatedByEmail,
+		"created_at":       p.CreatedAt,
+		"archived_at":      p.ArchivedAt,
 	}
 }
 
@@ -255,6 +259,8 @@ func (h *ProjectHandler) mapProjectError(c *fiber.Ctx, err error, fallbackMessag
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Project tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrProjectCodeTaken):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_CODE_TAKEN", "Kode task sudah dipakai project lain di workspace ini", nil))
+	case errors.Is(err, domain.ErrProjectNameTaken):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NAME_TAKEN", "Nama project sudah dipakai di workspace ini", nil))
 	case errors.Is(err, domain.ErrProjectNotDeleted):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NOT_DELETED", "Project ini tidak sedang dihapus", nil))
 	default:

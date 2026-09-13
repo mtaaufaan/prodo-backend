@@ -212,6 +212,13 @@ var (
 	// saat project target tidak sedang dalam status soft-deleted.
 	ErrProjectNotDeleted = errors.New("project is not soft-deleted")
 
+	// ErrProjectNameTaken dikembalikan POST/PUT project (S4W-03, AW Add
+	// Project.dc.html) saat nama project (case-insensitive) sudah dipakai
+	// project lain DI WORKSPACE YANG SAMA -- beda dari ErrProjectCodeTaken
+	// yang ditegakkan constraint DB, ini dicek di service karena
+	// perbandingannya case-insensitive.
+	ErrProjectNameTaken = errors.New("project name already used in this workspace")
+
 	// ErrInvalidCIDR dikembalikan saat input allowlist IP Platform Admin
 	// (S4P-18) bukan notasi CIDR yang valid.
 	ErrInvalidCIDR = errors.New("invalid cidr notation")

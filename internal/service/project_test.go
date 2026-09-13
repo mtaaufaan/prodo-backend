@@ -19,6 +19,7 @@ type fakeProjectRepo struct {
 	archiveErr  error
 	deleteErr   error
 	restoreErr  error
+	nameExists  bool
 }
 
 func (f *fakeProjectRepo) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
@@ -41,6 +42,10 @@ func (f *fakeProjectRepo) Create(_ context.Context, _ db.Executor, workspaceID, 
 
 func (f *fakeProjectRepo) List(_ context.Context, _ db.Executor, _ string) ([]repository.Project, error) {
 	return f.listResult, nil
+}
+
+func (f *fakeProjectRepo) NameExists(_ context.Context, _ db.Executor, _, _, _ string) (bool, error) {
+	return f.nameExists, nil
 }
 
 func (f *fakeProjectRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
@@ -104,6 +109,26 @@ func TestProjectService_Create_RejectsPMNotProjectManagerRole(t *testing.T) {
 	_, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "user-1", "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput saat pm bukan project_manager, got %v", err)
+	}
+}
+
+func TestProjectService_Create_RejectsDuplicateName(t *testing.T) {
+	repo := &fakeProjectRepo{nameExists: true}
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "project_manager"}, nil, nil)
+
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "pm-1", "aw-1", "member")
+	if !errors.Is(err, domain.ErrProjectNameTaken) {
+		t.Fatalf("expected ErrProjectNameTaken, got %v", err)
+	}
+}
+
+func TestProjectService_Update_RejectsDuplicateName(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, nameExists: true}
+	svc := NewProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, nil, nil)
+
+	err := svc.Update(context.Background(), nil, "proj-1", "Nama Bentrok", "", "aw-1", "member")
+	if !errors.Is(err, domain.ErrProjectNameTaken) {
+		t.Fatalf("expected ErrProjectNameTaken, got %v", err)
 	}
 }
 
