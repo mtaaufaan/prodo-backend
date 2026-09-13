@@ -28,21 +28,27 @@ func NewProjectRepository() *ProjectRepository {
 }
 
 // Project -- satu baris hasil Create/Get/List (AW Projects.dc.html).
+// CreatedByName/CreatedByEmail (dikonfirmasi user 2026-09-13) -- workspace
+// bisa punya lebih dari satu admin_workspace, jadi perlu jelas project mana
+// dibuat oleh siapa; kolom `created_by` sendiri sudah terisi sejak Create
+// (S4-02), cuma belum pernah di-JOIN/ditampilkan.
 type Project struct {
-	ID          string
-	WorkspaceID string
-	Name        string
-	Code        string
-	PMUserID    *string
-	PMName      string
-	PMEmail     string
-	IsArchived  bool
-	MemberCount int
-	SprintCount int
-	TaskCount   int
-	CreatedAt   time.Time
-	ArchivedAt  *time.Time
-	DeletedAt   *time.Time
+	ID             string
+	WorkspaceID    string
+	Name           string
+	Code           string
+	PMUserID       *string
+	PMName         string
+	PMEmail        string
+	IsArchived     bool
+	MemberCount    int
+	SprintCount    int
+	TaskCount      int
+	CreatedByName  string
+	CreatedByEmail string
+	CreatedAt      time.Time
+	ArchivedAt     *time.Time
+	DeletedAt      *time.Time
 }
 
 // GetWorkspaceID mengembalikan workspace_id pemilik projectID -- dasar
@@ -118,9 +124,11 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		       p.is_archived, p.created_at, p.archived_at,
 		       (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id),
 		       (SELECT COUNT(*) FROM sprints s WHERE s.project_id = p.id),
-		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL)
+		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL),
+		       COALESCE(creator.display_name, ''), COALESCE(creator.email, '')
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.pm_user_id
+		LEFT JOIN users creator ON creator.id = p.created_by
 		WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
 		ORDER BY p.created_at DESC
 	`, workspaceID)
@@ -134,7 +142,7 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		var p Project
 		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code, &p.PMUserID,
 			&p.PMName, &p.PMEmail, &p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
-			&p.SprintCount, &p.TaskCount); err != nil {
+			&p.SprintCount, &p.TaskCount, &p.CreatedByName, &p.CreatedByEmail); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		list = append(list, p)

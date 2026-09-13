@@ -25,19 +25,21 @@ func NewProjectHandler(projects *service.ProjectService, logger *zap.Logger) *Pr
 
 func projectToMap(p *repository.Project) fiber.Map {
 	return fiber.Map{
-		"id":           p.ID,
-		"workspace_id": p.WorkspaceID,
-		"name":         p.Name,
-		"code":         p.Code,
-		"pm_user_id":   p.PMUserID,
-		"pm_name":      p.PMName,
-		"pm_email":     p.PMEmail,
-		"is_archived":  p.IsArchived,
-		"member_count": p.MemberCount,
-		"sprint_count": p.SprintCount,
-		"task_count":   p.TaskCount,
-		"created_at":   p.CreatedAt,
-		"archived_at":  p.ArchivedAt,
+		"id":               p.ID,
+		"workspace_id":     p.WorkspaceID,
+		"name":             p.Name,
+		"code":             p.Code,
+		"pm_user_id":       p.PMUserID,
+		"pm_name":          p.PMName,
+		"pm_email":         p.PMEmail,
+		"is_archived":      p.IsArchived,
+		"member_count":     p.MemberCount,
+		"sprint_count":     p.SprintCount,
+		"task_count":       p.TaskCount,
+		"created_by_name":  p.CreatedByName,
+		"created_by_email": p.CreatedByEmail,
+		"created_at":       p.CreatedAt,
+		"archived_at":      p.ArchivedAt,
 	}
 }
 
