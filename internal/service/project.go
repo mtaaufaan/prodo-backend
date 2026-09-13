@@ -20,6 +20,7 @@ type projectRepository interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 	Create(ctx context.Context, exec db.Executor, workspaceID, name, code, pmUserID, actorID, actorRole string) (*repository.Project, error)
 	List(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Project, error)
+	NameExists(ctx context.Context, exec db.Executor, workspaceID, name, excludeProjectID string) (bool, error)
 	Update(ctx context.Context, exec db.Executor, projectID, name, pmUserID, actorID, actorRole string) error
 	SetArchived(ctx context.Context, exec db.Executor, projectID string, archive bool, actorID, actorRole string) error
 	SoftDelete(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
@@ -131,6 +132,13 @@ func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspace
 	if !projectCodePattern.MatchString(code) {
 		return nil, fmt.Errorf("service.Create: %w", domain.ErrInvalidInput)
 	}
+	nameTaken, err := s.repo.NameExists(ctx, exec, workspaceID, name, "")
+	if err != nil {
+		return nil, fmt.Errorf("service.Create: %w", err)
+	}
+	if nameTaken {
+		return nil, fmt.Errorf("service.Create: %w", domain.ErrProjectNameTaken)
+	}
 
 	pmRole, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, pmUserID)
 	if err != nil {
@@ -173,6 +181,13 @@ func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID
 	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return err
+	}
+	nameTaken, err := s.repo.NameExists(ctx, exec, workspaceID, name, projectID)
+	if err != nil {
+		return err
+	}
+	if nameTaken {
+		return fmt.Errorf("service.Update: %w", domain.ErrProjectNameTaken)
 	}
 	if pmUserID != "" {
 		pmRole, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, pmUserID)

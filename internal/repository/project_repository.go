@@ -28,19 +28,27 @@ func NewProjectRepository() *ProjectRepository {
 }
 
 // Project -- satu baris hasil Create/Get/List (AW Projects.dc.html).
+// CreatedByName/CreatedByEmail (dikonfirmasi user 2026-09-13) -- workspace
+// bisa punya lebih dari satu admin_workspace, jadi perlu jelas project mana
+// dibuat oleh siapa; kolom `created_by` sendiri sudah terisi sejak Create
+// (S4-02), cuma belum pernah di-JOIN/ditampilkan.
 type Project struct {
-	ID          string
-	WorkspaceID string
-	Name        string
-	Code        string
-	PMUserID    *string
-	PMName      string
-	PMEmail     string
-	IsArchived  bool
-	MemberCount int
-	CreatedAt   time.Time
-	ArchivedAt  *time.Time
-	DeletedAt   *time.Time
+	ID             string
+	WorkspaceID    string
+	Name           string
+	Code           string
+	PMUserID       *string
+	PMName         string
+	PMEmail        string
+	IsArchived     bool
+	MemberCount    int
+	SprintCount    int
+	TaskCount      int
+	CreatedByName  string
+	CreatedByEmail string
+	CreatedAt      time.Time
+	ArchivedAt     *time.Time
+	DeletedAt      *time.Time
 }
 
 // GetWorkspaceID mengembalikan workspace_id pemilik projectID -- dasar
@@ -114,9 +122,13 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		SELECT p.id, p.workspace_id, p.name, p.code, p.pm_user_id,
 		       COALESCE(u.display_name, ''), COALESCE(u.email, ''),
 		       p.is_archived, p.created_at, p.archived_at,
-		       (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id)
+		       (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id),
+		       (SELECT COUNT(*) FROM sprints s WHERE s.project_id = p.id),
+		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL),
+		       COALESCE(creator.display_name, ''), COALESCE(creator.email, '')
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.pm_user_id
+		LEFT JOIN users creator ON creator.id = p.created_by
 		WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
 		ORDER BY p.created_at DESC
 	`, workspaceID)
@@ -129,7 +141,8 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code, &p.PMUserID,
-			&p.PMName, &p.PMEmail, &p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount); err != nil {
+			&p.PMName, &p.PMEmail, &p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
+			&p.SprintCount, &p.TaskCount, &p.CreatedByName, &p.CreatedByEmail); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		list = append(list, p)
@@ -138,6 +151,26 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		return nil, fmt.Errorf("repository.List: %w", err)
 	}
 	return list, nil
+}
+
+// NameExists mengecek apakah nama project (case-insensitive) sudah dipakai
+// project lain DI WORKSPACE yang sama -- S4W-03, "AW Add Project.dc.html"
+// (`taken = projects.some(p => p.name.toLowerCase() === name.toLowerCase())`).
+// excludeProjectID kosong berarti tidak ada pengecualian (Create); diisi
+// projectID sendiri saat Update supaya project itu sendiri tidak dianggap
+// bentrok dengan namanya sendiri.
+func (r *ProjectRepository) NameExists(ctx context.Context, exec db.Executor, workspaceID, name, excludeProjectID string) (bool, error) {
+	var exists bool
+	err := exec.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM projects
+			WHERE workspace_id = $1 AND deleted_at IS NULL AND lower(name) = lower($2) AND id::text != $3
+		)
+	`, workspaceID, name, excludeProjectID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repository.NameExists: %w", err)
+	}
+	return exists, nil
 }
 
 // Update mengubah nama dan/atau PM penanggung jawab (S4-02). pmUserID
