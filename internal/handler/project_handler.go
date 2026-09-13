@@ -34,6 +34,8 @@ func projectToMap(p *repository.Project) fiber.Map {
 		"pm_email":     p.PMEmail,
 		"is_archived":  p.IsArchived,
 		"member_count": p.MemberCount,
+		"sprint_count": p.SprintCount,
+		"task_count":   p.TaskCount,
 		"created_at":   p.CreatedAt,
 		"archived_at":  p.ArchivedAt,
 	}
@@ -255,6 +257,8 @@ func (h *ProjectHandler) mapProjectError(c *fiber.Ctx, err error, fallbackMessag
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Project tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrProjectCodeTaken):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_CODE_TAKEN", "Kode task sudah dipakai project lain di workspace ini", nil))
+	case errors.Is(err, domain.ErrProjectNameTaken):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NAME_TAKEN", "Nama project sudah dipakai di workspace ini", nil))
 	case errors.Is(err, domain.ErrProjectNotDeleted):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NOT_DELETED", "Project ini tidak sedang dihapus", nil))
 	default:
