@@ -516,15 +516,19 @@ func (r *OrganizationRepository) List(ctx context.Context, exec db.Executor, gro
 	// "GA Organizations.dc.html" kolom "WS · MEMBER") -- dihitung per baris
 	// lewat subquery correlated, sama pola GetSummary, TAPI di sini
 	// multi-row -- reuse yang sama supaya tidak N+1 request GetSummary per
-	// organisasi dari FE.
+	// organisasi dari FE. w.deleted_at IS NULL (implementation_gaps.md
+	// IG-70, 2026-09-13): sebelumnya cuma archived_at yang dicek -- workspace
+	// yang sudah soft-delete (Data Retention, SoftDelete cuma set deleted_at,
+	// TIDAK ikut set archived_at) tetap terhitung selamanya di workspace_count
+	// dan member_count (via w2.deleted_at).
 	query := `
 		SELECT o.id, o.group_id, o.name, o.slug,
 		       COALESCE((SELECT array_agg(od.domain ORDER BY od.created_at) FROM organization_domains od WHERE od.organization_id = o.id), ARRAY[]::text[]),
 		       o.default_language,
 		       o.storage_quota_bytes, o.storage_max_bytes, o.storage_used_mb * 1024 * 1024, o.retention_days,
-		       COALESCE((SELECT COUNT(*) FROM workspaces w WHERE w.org_id = o.id AND w.archived_at IS NULL), 0),
+		       COALESCE((SELECT COUNT(*) FROM workspaces w WHERE w.org_id = o.id AND w.archived_at IS NULL AND w.deleted_at IS NULL), 0),
 		       COALESCE((SELECT COUNT(DISTINCT wm.user_id) FROM workspace_members wm
-		                 JOIN workspaces w2 ON w2.id = wm.workspace_id WHERE w2.org_id = o.id), 0),
+		                 JOIN workspaces w2 ON w2.id = wm.workspace_id WHERE w2.org_id = o.id AND w2.deleted_at IS NULL), 0),
 		       o.deactivated_at, o.created_at
 		FROM organizations o
 	`
@@ -675,14 +679,17 @@ func (r *OrganizationRepository) GetSummary(ctx context.Context, exec db.Executo
 	// FROM organizations o WHERE o.id = $1 sebagai anchor -- kalau org tidak
 	// ada, query ini mengembalikan NOL baris (bukan satu baris dengan
 	// agregat 0/NULL) sehingga pgx.ErrNoRows benar-benar ter-trigger.
+	// w.deleted_at IS NULL (implementation_gaps.md IG-70, 2026-09-13): sama
+	// fix dengan List() di atas -- workspace yang sudah soft-delete tidak
+	// boleh ikut terhitung.
 	err := exec.QueryRow(ctx, `
 		SELECT
 			o.storage_used_mb,
-			COALESCE((SELECT COUNT(*) FROM workspaces WHERE org_id = o.id AND archived_at IS NULL), 0),
+			COALESCE((SELECT COUNT(*) FROM workspaces WHERE org_id = o.id AND archived_at IS NULL AND deleted_at IS NULL), 0),
 			COALESCE((SELECT COUNT(DISTINCT wm.user_id)
 				FROM workspace_members wm
 				JOIN workspaces w ON w.id = wm.workspace_id
-				WHERE w.org_id = o.id), 0)
+				WHERE w.org_id = o.id AND w.deleted_at IS NULL), 0)
 		FROM organizations o
 		WHERE o.id = $1
 	`, orgID).Scan(&storageUsedMB, &s.WorkspaceCount, &s.MemberCount)
