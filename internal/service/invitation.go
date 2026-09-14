@@ -28,7 +28,7 @@ const invitationTTL = 72 * time.Hour
 // terautentikasi biasa), untuk AcceptInvitation dari konteks khusus rute
 // publik (lihat komentar AcceptInvitation).
 type invitationRepository interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID string, expiresAt time.Time) (string, error)
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName string, expiresAt time.Time) (string, error)
 	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*repository.InvitationTarget, error)
 	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, workspaceID, role string) (string, error)
@@ -131,11 +131,16 @@ type Invitation struct {
 // dari param request) -- service ini tidak query ulang nama workspace/user.
 // projectID kosong untuk undangan biasa; diisi kalau ini undangan "Project
 // Manager baru" tertaut SATU project tertentu (S4W susulan) -- lihat
-// AcceptInvitation.
+// AcceptInvitation. displayName (ditambahkan 2026-09-14, ditemukan user:
+// nama PM yang diisi saat undang PM baru tidak pernah muncul di form
+// aktivasi) kosong kalau caller tidak tahu/tidak mengumpulkan nama invitee
+// di muka (mis. undangan massal AW/GA Members & Roles) -- diisi PreviewInvitation
+// sebagai prefill "Nama Tampilan" (AcceptInvitationPage.tsx), tetap bisa
+// diedit invitee, BUKAN final.
 func (s *InvitationService) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID string,
+	email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID, displayName string,
 ) (*Invitation, error) {
 	rawToken, tokenHash, err := generateActivationToken()
 	if err != nil {
@@ -143,7 +148,7 @@ func (s *InvitationService) CreateInvitation(
 	}
 	expiresAt := time.Now().Add(invitationTTL)
 
-	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, tokenHash, projectID, expiresAt)
+	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateInvitation: %w", err)
 	}
@@ -275,7 +280,7 @@ func (s *InvitationService) CreateBulkInvitations(
 			var inv *Invitation
 			err := withSavepoint(ctx, exec, savepoint, func() error {
 				var err error
-				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID)
+				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID, "")
 				return err
 			})
 			if err != nil {

@@ -121,17 +121,17 @@ func (f *fakeProjectRepo) GetPendingPMInvitationID(_ context.Context, _ db.Execu
 // "undang PM baru".
 type fakeProjectPMInviter struct {
 	createErr    error
-	createCalls  []struct{ email, workspaceID, role, projectID string }
+	createCalls  []struct{ email, workspaceID, role, projectID, displayName string }
 	cancelErr    error
 	cancelCalls  []struct{ workspaceID, invitationID string }
 	workspaceErr error
 }
 
-func (f *fakeProjectPMInviter) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, projectID string) (*Invitation, error) {
+func (f *fakeProjectPMInviter) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, projectID, displayName string) (*Invitation, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	f.createCalls = append(f.createCalls, struct{ email, workspaceID, role, projectID string }{email, workspaceID, role, projectID})
+	f.createCalls = append(f.createCalls, struct{ email, workspaceID, role, projectID, displayName string }{email, workspaceID, role, projectID, displayName})
 	return &Invitation{Email: email, WorkspaceID: workspaceID, Role: role}, nil
 }
 
@@ -259,6 +259,12 @@ func TestProjectService_Create_PMEmail_NewUser_CreatesProjectAwaitingPM(t *testi
 	}
 	if len(invites.createCalls) != 1 || invites.createCalls[0].email != "baru@example.com" || invites.createCalls[0].role != "project_manager" {
 		t.Errorf("createCalls = %+v, want satu entri baru@example.com/project_manager", invites.createCalls)
+	}
+	// Ditemukan user 2026-09-14: pmName ("Budi Baru") diisi saat undang PM
+	// baru tapi tidak pernah muncul di form aktivasi -- root cause: dibuang
+	// begitu saja, tidak pernah diteruskan sebagai display_name undangan.
+	if invites.createCalls[0].displayName != "Budi Baru" {
+		t.Errorf("createCalls[0].displayName = %q, want %q (nama PM harus diteruskan sebagai display_name undangan)", invites.createCalls[0].displayName, "Budi Baru")
 	}
 }
 
