@@ -81,7 +81,7 @@ func run() error {
 	projectMemberRepo := repository.NewProjectMemberRepository()
 	workspaceMemberRepo := repository.NewWorkspaceMemberRepository()
 	csvImportRepo := repository.NewCSVImportRepository()
-	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
+	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb, projectRepo, projectMemberRepo)
 	invitationSvc := service.NewInvitationService(invitationRepo, emailer, kcAdmin, accountRepo, rbacSvc, projectRepo, projectMemberRepo, logger, cfg.AppBaseURL)
 	csvImportHandlerDeps := worker.NewCSVImportHandler(pool, csvImportRepo, invitationSvc, logger)
 

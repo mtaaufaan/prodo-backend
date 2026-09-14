@@ -177,7 +177,7 @@ func (s *ProjectService) resolvePM(ctx context.Context, exec db.Executor, worksp
 		if role == "" {
 			return nil, fmt.Errorf("service.resolvePM: %w", domain.ErrInvalidInput)
 		}
-		if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, pmUserID, "project_manager", nil, actorID, actorRole); err != nil {
+		if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, pmUserID, "project_manager", nil, actorID, actorRole, ""); err != nil {
 			return nil, fmt.Errorf("service.resolvePM: %w", err)
 		}
 		return &pmResolution{ResolvedUserID: pmUserID}, nil
@@ -186,7 +186,7 @@ func (s *ProjectService) resolvePM(ctx context.Context, exec db.Executor, worksp
 	existingID, err := s.contacts.FindUserIDByEmail(ctx, pmEmail)
 	switch {
 	case err == nil:
-		if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, existingID, "project_manager", &actorID, actorID, actorRole); err != nil {
+		if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, existingID, "project_manager", &actorID, actorID, actorRole, ""); err != nil {
 			return nil, fmt.Errorf("service.resolvePM: %w", err)
 		}
 		return &pmResolution{ResolvedUserID: existingID}, nil

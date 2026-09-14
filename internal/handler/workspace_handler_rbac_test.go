@@ -80,6 +80,39 @@ func (stubMemberRepo) AssignRole(context.Context, db.Executor, string, string, s
 	return nil
 }
 
+// stubProjectRepo/stubProjectMemberRepo -- pemenuhan interface project
+// RBACService.AssignRole (Kelola Member & Roles, S4W susulan role
+// restructuring 2026-09-14). GetWorkspaceID SELALU mengembalikan
+// testWorkspaceID -- test boundary role di file ini mengirim
+// project_id="proj-1" (role "editor" WAJIB project_id sejak restructuring)
+// tapi tidak peduli project_id itu sungguhan atau tidak, cuma menguji
+// otorisasi CALL endpoint. Guard "project kehilangan PM" (pmProjectsResult
+// kosong) dan move semantics diuji terisolasi di
+// internal/service/rbac_test.go.
+type stubProjectRepo struct{}
+
+func (stubProjectRepo) GetWorkspaceID(context.Context, db.Executor, string) (string, error) {
+	return testWorkspaceID, nil
+}
+func (stubProjectRepo) ListPMProjectNames(context.Context, db.Executor, string, string) ([]repository.PMProjectRef, error) {
+	return nil, nil
+}
+func (stubProjectRepo) SetPM(context.Context, db.Executor, string, string, string, string) error {
+	return nil
+}
+
+type stubProjectMemberRepo struct{}
+
+func (stubProjectMemberRepo) ListProjectIDsForUserInWorkspace(context.Context, db.Executor, string, string) ([]string, error) {
+	return nil, nil
+}
+func (stubProjectMemberRepo) RemoveMember(context.Context, db.Executor, string, string, string, string) error {
+	return nil
+}
+func (stubProjectMemberRepo) AddMember(context.Context, db.Executor, string, string, string, string, bool, string, string) error {
+	return nil
+}
+
 func (r stubMemberRepo) ListMembers(context.Context, db.Executor, string) ([]repository.Member, error) {
 	return []repository.Member{{UserID: testMemberID, Role: r.role}}, nil
 }
@@ -121,7 +154,7 @@ func (noopCache) Close() error                                             { ret
 // (jwtAuth+dbCtx diganti stub yang setara -- injeksi claims + db.Executor
 // langsung ke Locals, tanpa JWT/Postgres sungguhan).
 func newTestApp(actorUserID, platformRole string, repo stubMemberRepo) *fiber.App {
-	rbacSvc := service.NewRBACService(repo, noopCache{})
+	rbacSvc := service.NewRBACService(repo, noopCache{}, stubProjectRepo{}, stubProjectMemberRepo{})
 	h := handler.NewWorkspaceHandler(rbacSvc, nil, nil, zap.NewNop())
 	users := stubUserResolver{userID: actorUserID}
 
@@ -166,7 +199,7 @@ func TestRBAC_UpdateMemberRole_BoundaryPerRole(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := newTestApp(tt.actorUserID, tt.platformRole, stubMemberRepo{role: tt.memberRole})
-			body := bytes.NewBufferString(`{"role":"editor"}`)
+			body := bytes.NewBufferString(`{"role":"editor","project_id":"proj-1"}`)
 			req := httptest.NewRequest(http.MethodPut, "/workspaces/"+testWorkspaceID+"/members/"+testMemberID+"/role", body)
 			req.Header.Set("Content-Type", "application/json")
 
@@ -209,7 +242,7 @@ func TestRBAC_UpdateMemberRole_AWCannotAssignAdminWorkspace(t *testing.T) {
 // benar sampai ke response HTTP lewat mapWorkspaceError.
 func TestRBAC_UpdateMemberRole_LastAdminDowngrade_Rejected(t *testing.T) {
 	app := newTestApp(testMemberID, "member", stubMemberRepo{role: "admin_workspace", lastAdmin: true})
-	body := bytes.NewBufferString(`{"role":"editor"}`)
+	body := bytes.NewBufferString(`{"role":"editor","project_id":"proj-1"}`)
 	req := httptest.NewRequest(http.MethodPut, "/workspaces/"+testWorkspaceID+"/members/"+testMemberID+"/role", body)
 	req.Header.Set("Content-Type", "application/json")
 

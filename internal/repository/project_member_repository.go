@@ -60,6 +60,38 @@ func (r *ProjectMemberRepository) GetWorkspaceID(ctx context.Context, exec db.Ex
 	return workspaceID, nil
 }
 
+// ListProjectIDsForUserInWorkspace mengembalikan project_id project_members
+// milik userID yang project-nya ada di workspaceID ini -- dipakai
+// RBACService.AssignRole (Kelola Member & Roles, S4W susulan role
+// restructuring 2026-09-14) memindahkan keterkaitan project_members lama
+// (kalau ada) ke project baru saat role project-scoped diubah lewat panel
+// itu (move semantics, dikonfirmasi user -- satu member cuma pegang SATU
+// keterkaitan project lewat panel ini).
+func (r *ProjectMemberRepository) ListProjectIDsForUserInWorkspace(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]string, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT pm.project_id FROM project_members pm
+		JOIN projects p ON p.id = pm.project_id
+		WHERE pm.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL
+	`, userID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListProjectIDsForUserInWorkspace: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("repository.ListProjectIDsForUserInWorkspace: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListProjectIDsForUserInWorkspace: rows: %w", err)
+	}
+	return ids, nil
+}
+
 // HasPM (S4W susulan, dikonfirmasi user 2026-09-13) -- true kalau project
 // sudah punya pm_user_id aktif. Dipakai AddMember menolak penambahan
 // member project-scoped selama project masih "menunggu PM" (undangan
