@@ -56,18 +56,19 @@ func NewInvitationRepository() *InvitationRepository {
 func (r *InvitationRepository) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	email, workspaceID, role, invitedByUserID, tokenHash, projectID string,
+	email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName string,
 	expiresAt time.Time,
 ) (string, error) {
 	var id string
 	err := exec.QueryRow(ctx, `
-		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at, project_id)
-		VALUES ($1, $2, $3::workspace_role, $4, $5, $6, NULLIF($7, '')::uuid)
+		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at, project_id, display_name)
+		VALUES ($1, $2, $3::workspace_role, $4, $5, $6, NULLIF($7, '')::uuid, NULLIF($8, ''))
 		ON CONFLICT (workspace_id, email) WHERE accepted_at IS NULL AND cancelled_at IS NULL
 		DO UPDATE SET role = EXCLUDED.role, invited_by = EXCLUDED.invited_by, token_hash = EXCLUDED.token_hash,
-		              expires_at = EXCLUDED.expires_at, project_id = EXCLUDED.project_id, created_at = NOW()
+		              expires_at = EXCLUDED.expires_at, project_id = EXCLUDED.project_id,
+		              display_name = EXCLUDED.display_name, created_at = NOW()
 		RETURNING id
-	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt, projectID).Scan(&id)
+	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt, projectID, displayName).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("repository.CreateInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}

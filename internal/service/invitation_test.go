@@ -30,8 +30,8 @@ func (stubExecutor) Query(context.Context, string, ...any) (pgx.Rows, error) { r
 func (stubExecutor) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
 
 type recordedInvitation struct {
-	email, workspaceID, role, invitedByUserID, tokenHash string
-	expiresAt                                            time.Time
+	email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName string
+	expiresAt                                                                    time.Time
 }
 
 type stubInvitationRepo struct {
@@ -55,7 +55,7 @@ type stubInvitationRepo struct {
 	listPendingErr    error
 }
 
-func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID string, expiresAt time.Time) (string, error) {
+func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName string, expiresAt time.Time) (string, error) {
 	if r.createErr != nil {
 		return "", r.createErr
 	}
@@ -63,7 +63,7 @@ func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, 
 		return "", domain.ErrInvitationAlreadyPending
 	}
 	r.nextID++
-	r.created = append(r.created, recordedInvitation{email, workspaceID, role, invitedByUserID, tokenHash, expiresAt})
+	r.created = append(r.created, recordedInvitation{email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName, expiresAt})
 	return fmt.Sprintf("inv-%d", r.nextID), nil
 }
 
@@ -75,7 +75,7 @@ func (r *stubInvitationRepo) CreateExecutiveInvitation(_ context.Context, _ db.E
 		return "", domain.ErrInvitationAlreadyPending
 	}
 	r.nextID++
-	r.created = append(r.created, recordedInvitation{email, groupID, "", invitedByUserID, tokenHash, expiresAt})
+	r.created = append(r.created, recordedInvitation{email: email, workspaceID: groupID, invitedByUserID: invitedByUserID, tokenHash: tokenHash, expiresAt: expiresAt})
 	return fmt.Sprintf("inv-%d", r.nextID), nil
 }
 
@@ -266,7 +266,7 @@ func TestInvitationService_CreateInvitation_Success(t *testing.T) {
 	emailer := &stubInvitationEmailer{}
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	inv, err := svc.CreateInvitation(context.Background(), nil, "budi@example.com", "ws-1", "editor", "actor-1", "Tim Marketing", "Siti Aminah", "")
+	inv, err := svc.CreateInvitation(context.Background(), nil, "budi@example.com", "ws-1", "editor", "actor-1", "Tim Marketing", "Siti Aminah", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -290,15 +290,33 @@ func TestInvitationService_CreateInvitation_Success(t *testing.T) {
 	}
 }
 
+// TestInvitationService_CreateInvitation_DisplayNamePersisted -- ditemukan
+// user 2026-09-14: nama PM ("Fia") diisi saat undang PM baru lewat Tambah
+// Project tapi tidak pernah muncul di form aktivasi -- root cause:
+// displayName dibuang begitu saja, tidak pernah diteruskan ke repo. Test
+// ini menutup regresi di titik paling dasar (service -> repo).
+func TestInvitationService_CreateInvitation_DisplayNamePersisted(t *testing.T) {
+	repo := &stubInvitationRepo{}
+	emailer := &stubInvitationEmailer{}
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
+
+	if _, err := svc.CreateInvitation(context.Background(), nil, "fia@example.com", "ws-1", "project_manager", "actor-1", "WS", "Actor", "proj-1", "Fia"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.created) != 1 || repo.created[0].displayName != "Fia" {
+		t.Errorf("repo.created = %+v, want satu entri displayName %q", repo.created, "Fia")
+	}
+}
+
 func TestInvitationService_CreateInvitation_TokenUniquePerCall(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	emailer := &stubInvitationEmailer{}
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err != nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", "", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := svc.CreateInvitation(context.Background(), nil, "b@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err != nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "b@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", "", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -315,7 +333,7 @@ func TestInvitationService_CreateInvitation_RepoError_Propagates(t *testing.T) {
 	emailer := &stubInvitationEmailer{}
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err == nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", "", ""); err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
 	if len(emailer.sent) != 0 {
@@ -328,7 +346,7 @@ func TestInvitationService_CreateInvitation_EmailError_Propagates(t *testing.T) 
 	emailer := &stubInvitationEmailer{sendErr: errors.New("smtp down")}
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
-	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", ""); err == nil {
+	if _, err := svc.CreateInvitation(context.Background(), nil, "a@x.com", "ws-1", "editor", "actor-1", "WS", "Actor", "", ""); err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
 }
