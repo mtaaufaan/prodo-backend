@@ -28,7 +28,7 @@ type projectMemberRepository interface {
 type projectRoleChecker interface {
 	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
-	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error)
+	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole, projectID string) (*RoleChangeResult, error)
 }
 
 // ProjectMemberService -- S3-21/22/23/25/26/27, US-009b. Route

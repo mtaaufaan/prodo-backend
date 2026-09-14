@@ -28,14 +28,38 @@ type workspaceMemberRepository interface {
 	CountAdminsExcluding(ctx context.Context, exec db.Executor, workspaceID, excludeUserID string) (int, error)
 }
 
-// RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
-type RBACService struct {
-	repo  workspaceMemberRepository
-	cache cache.Cache
+// projectPMRepository -- interface didefinisikan di consumer,
+// diimplementasikan *ProjectRepository -- dipakai AssignRole (Kelola
+// Member & Roles, S4W susulan role restructuring 2026-09-14, dikonfirmasi
+// user) untuk validasi project_id milik workspace ini, guard "project
+// tidak boleh kehilangan PM tanpa pengganti", dan menetapkan PM baru.
+type projectPMRepository interface {
+	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	ListPMProjectNames(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]repository.PMProjectRef, error)
+	SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 }
 
-func NewRBACService(repo workspaceMemberRepository, c cache.Cache) *RBACService {
-	return &RBACService{repo: repo, cache: c}
+// projectMembershipRepository -- interface didefinisikan di consumer,
+// diimplementasikan *ProjectMemberRepository -- dipakai AssignRole
+// memindahkan keterkaitan project_members lama (kalau ada) ke project
+// baru saat role project-scoped diubah lewat Kelola Member & Roles (move
+// semantics, dikonfirmasi user).
+type projectMembershipRepository interface {
+	ListProjectIDsForUserInWorkspace(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]string, error)
+	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	AddMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error
+}
+
+// RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
+type RBACService struct {
+	repo           workspaceMemberRepository
+	cache          cache.Cache
+	projects       projectPMRepository
+	projectMembers projectMembershipRepository
+}
+
+func NewRBACService(repo workspaceMemberRepository, c cache.Cache, projects projectPMRepository, projectMembers projectMembershipRepository) *RBACService {
+	return &RBACService{repo: repo, cache: c, projects: projects, projectMembers: projectMembers}
 }
 
 // roleCacheKey -- dibaca RequireRole middleware (S2-09) lewat GetMemberRole
@@ -71,8 +95,17 @@ type RoleChangeResult struct {
 // sesaat dan self-heal ke nilai lama yang benar di GetMemberRole
 // berikutnya, bukan korupsi data.
 // actorID/actorRole adalah user yang MELAKUKAN perubahan, beda dari
-// userID (target yang role-nya berubah).
-func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error) {
+// userID (target yang role-nya berubah). projectID (S4W susulan role
+// restructuring 2026-09-14, Kelola Member & Roles, dikonfirmasi user)
+// kosong untuk 8 pemanggil AssignRole lain (admin swap, jalur invite yang
+// sudah menautkan project sendiri terpisah) -- TIDAK ADA perubahan
+// perilaku untuk mereka. Diisi HANYA oleh WorkspaceHandler.UpdateMemberRole
+// untuk role project-level (project_manager/editor/approver/viewer):
+// project_id divalidasi milik workspace ini, mengubah role SEORANG PM ke
+// role lain ditolak kalau akan menyisakan project tanpa PM (guard baru,
+// domain.ErrProjectWouldLoseLastPM), dan keterkaitan project_members lama
+// (kalau ada) DIPINDAH ke project baru (move semantics, bukan ditambah).
+func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole, projectID string) (*RoleChangeResult, error) {
 	previousRole, err := s.repo.GetRole(ctx, exec, workspaceID, userID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("service.AssignRole: cek role lama: %w", err)
@@ -92,6 +125,25 @@ func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspac
 		}
 	}
 
+	if projectID != "" {
+		projectWorkspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("service.AssignRole: %w", err)
+		}
+		if projectWorkspaceID != workspaceID {
+			return nil, fmt.Errorf("service.AssignRole: %w", domain.ErrProjectNotFound)
+		}
+		if role != "project_manager" {
+			pmProjects, err := s.projects.ListPMProjectNames(ctx, exec, workspaceID, userID)
+			if err != nil {
+				return nil, fmt.Errorf("service.AssignRole: cek project yang dipimpin: %w", err)
+			}
+			if len(pmProjects) > 0 {
+				return nil, fmt.Errorf("service.AssignRole: %w", domain.ErrProjectWouldLoseLastPM)
+			}
+		}
+	}
+
 	var before map[string]string
 	if previousRole != "" {
 		before = map[string]string{"role": previousRole}
@@ -106,6 +158,27 @@ func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspac
 
 	if err := s.cache.Del(ctx, roleCacheKey(userID, workspaceID)); err != nil {
 		return nil, fmt.Errorf("service.AssignRole: invalidate cache: %w", err)
+	}
+
+	if projectID != "" {
+		existingProjectIDs, err := s.projectMembers.ListProjectIDsForUserInWorkspace(ctx, exec, workspaceID, userID)
+		if err != nil {
+			return nil, fmt.Errorf("service.AssignRole: cek project_members lama: %w", err)
+		}
+		for _, pid := range existingProjectIDs {
+			if err := s.projectMembers.RemoveMember(ctx, exec, pid, userID, actorID, actorRole); err != nil {
+				return nil, fmt.Errorf("service.AssignRole: pindahkan project_members lama: %w", err)
+			}
+		}
+		if role == "project_manager" {
+			if err := s.projects.SetPM(ctx, exec, projectID, userID, actorID, actorRole); err != nil {
+				return nil, fmt.Errorf("service.AssignRole: tetapkan PM: %w", err)
+			}
+		} else {
+			if err := s.projectMembers.AddMember(ctx, exec, projectID, workspaceID, userID, role, false, actorID, actorRole); err != nil {
+				return nil, fmt.Errorf("service.AssignRole: tambah project member: %w", err)
+			}
+		}
 	}
 
 	return &RoleChangeResult{PreviousRole: previousRole, NewRole: role}, nil

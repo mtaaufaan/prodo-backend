@@ -74,6 +74,40 @@ func (r *ProjectRepository) GetWorkspaceID(ctx context.Context, exec db.Executor
 	return workspaceID, nil
 }
 
+// PMProjectRef -- satu baris hasil ListPMProjectNames.
+type PMProjectRef struct {
+	ID   string
+	Name string
+}
+
+// ListPMProjectNames mengembalikan project di workspaceID ini yang
+// pm_user_id-nya userID -- dipakai RBACService.AssignRole (Kelola Member &
+// Roles, S4W susulan role restructuring 2026-09-14) sebagai guard:
+// mengubah role SEORANG PM ke role lain tidak boleh menyisakan project
+// manapun tanpa PM, AW harus tetapkan PM baru dulu lewat Kelola Project.
+func (r *ProjectRepository) ListPMProjectNames(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]PMProjectRef, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, name FROM projects WHERE workspace_id = $1 AND pm_user_id = $2 AND deleted_at IS NULL
+	`, workspaceID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListPMProjectNames: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []PMProjectRef
+	for rows.Next() {
+		var ref PMProjectRef
+		if err := rows.Scan(&ref.ID, &ref.Name); err != nil {
+			return nil, fmt.Errorf("repository.ListPMProjectNames: scan: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListPMProjectNames: rows: %w", err)
+	}
+	return refs, nil
+}
+
 // GetAllowEditorStoryPoints -- Phase 4 (US-018a/S4-56): gate izin Editor
 // mengisi story point, dikonfigurasi per project (default FALSE, PM-only).
 func (r *ProjectRepository) GetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string) (bool, error) {

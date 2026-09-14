@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/mtaaufaan/prodo-backend/internal/cache"
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/repository"
@@ -85,11 +86,100 @@ func (f *stubWorkspaceMemberRepository) ListWorkspaceMemberCandidates(_ context.
 
 func strPtr(s string) *string { return &s }
 
+// stubProjectPMRepo -- projectPMRepository palsu (Kelola Member & Roles,
+// S4W susulan role restructuring 2026-09-14) -- workspaceIDFor kosong
+// berarti GetWorkspaceID mengembalikan projectID APA ADANYA dianggap
+// cocok (test yang tidak peduli validasi lintas-workspace bisa biarkan
+// kosong); isi eksplisit kalau test ingin menguji mismatch.
+type stubProjectPMRepo struct {
+	workspaceIDFor    map[string]string
+	getWorkspaceIDErr error
+
+	pmProjectsResult []repository.PMProjectRef
+	pmProjectsErr    error
+
+	setPMErr  error
+	setPMCall []struct{ projectID, userID string }
+}
+
+func (r *stubProjectPMRepo) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
+	if r.getWorkspaceIDErr != nil {
+		return "", r.getWorkspaceIDErr
+	}
+	if r.workspaceIDFor != nil {
+		if ws, ok := r.workspaceIDFor[projectID]; ok {
+			return ws, nil
+		}
+	}
+	return "ws-1", nil
+}
+
+func (r *stubProjectPMRepo) ListPMProjectNames(_ context.Context, _ db.Executor, _, _ string) ([]repository.PMProjectRef, error) {
+	return r.pmProjectsResult, r.pmProjectsErr
+}
+
+func (r *stubProjectPMRepo) SetPM(_ context.Context, _ db.Executor, projectID, userID, _, _ string) error {
+	if r.setPMErr != nil {
+		return r.setPMErr
+	}
+	r.setPMCall = append(r.setPMCall, struct{ projectID, userID string }{projectID, userID})
+	return nil
+}
+
+// stubProjectMembershipRepo -- projectMembershipRepository palsu.
+type stubProjectMembershipRepo struct {
+	existingProjectIDs []string
+	listErr            error
+
+	removedProjectIDs []string
+	removeErr         error
+
+	addCall []struct{ projectID, userID, role string }
+	addErr  error
+}
+
+func (r *stubProjectMembershipRepo) ListProjectIDsForUserInWorkspace(_ context.Context, _ db.Executor, _, _ string) ([]string, error) {
+	return r.existingProjectIDs, r.listErr
+}
+
+func (r *stubProjectMembershipRepo) RemoveMember(_ context.Context, _ db.Executor, projectID, _, _, _ string) error {
+	if r.removeErr != nil {
+		return r.removeErr
+	}
+	r.removedProjectIDs = append(r.removedProjectIDs, projectID)
+	return nil
+}
+
+func (r *stubProjectMembershipRepo) AddMember(_ context.Context, _ db.Executor, projectID, _, userID, role string, _ bool, _, _ string) error {
+	if r.addErr != nil {
+		return r.addErr
+	}
+	r.addCall = append(r.addCall, struct{ projectID, userID, role string }{projectID, userID, role})
+	return nil
+}
+
+// newTestRBACService -- helper konstruksi standar, projects/projectMembers
+// opsional (variadic) supaya test lama yang tidak peduli fitur project
+// tidak perlu diubah -- stub kosong dipakai sebagai default.
+func newTestRBACService(repo workspaceMemberRepository, c cache.Cache, deps ...any) *RBACService {
+	var projects projectPMRepository = &stubProjectPMRepo{}
+	var projectMembers projectMembershipRepository = &stubProjectMembershipRepo{}
+	for _, d := range deps {
+		switch v := d.(type) {
+		case *stubProjectPMRepo:
+			projects = v
+		case *stubProjectMembershipRepo:
+			projectMembers = v
+		}
+	}
+	return NewRBACService(repo, c, projects, projectMembers)
+}
+
 func TestRBACService_AssignRole_NewMember_NoPreviousRole(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleErr: pgx.ErrNoRows}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
-	result, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", strPtr("inviter-1"), "actor-1", "admin_workspace")
+	result, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", strPtr("inviter-1"), "actor-1", "admin_workspace", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -115,9 +205,9 @@ func TestRBACService_AssignRole_NewMember_NoPreviousRole(t *testing.T) {
 
 func TestRBACService_AssignRole_ExistingMember_RoleChanged(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "viewer"}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
-	result, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "project_manager", nil, "actor-1", "admin_workspace")
+	result, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "project_manager", nil, "actor-1", "admin_workspace", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,8 +227,8 @@ func TestRBACService_AssignRole_InvalidatesCache(t *testing.T) {
 	c := newStubCache()
 	c.store[roleCacheKey("user-1", "ws-1")] = "viewer"
 
-	svc := NewRBACService(repo, c)
-	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace"); err != nil {
+	svc := newTestRBACService(repo, c)
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -149,9 +239,9 @@ func TestRBACService_AssignRole_InvalidatesCache(t *testing.T) {
 
 func TestRBACService_AssignRole_GetRoleRealError_PropagatesAndSkipsWrite(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleErr: errors.New("connection refused")}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
-	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace")
+	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace", "")
 	if err == nil {
 		t.Fatal("harusnya error, tapi nil")
 	}
@@ -162,7 +252,7 @@ func TestRBACService_AssignRole_GetRoleRealError_PropagatesAndSkipsWrite(t *test
 
 func TestRBACService_GetMemberRole_NotAMember_ReturnsEmpty(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleErr: pgx.ErrNoRows}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	role, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1")
 	if err != nil {
@@ -175,7 +265,7 @@ func TestRBACService_GetMemberRole_NotAMember_ReturnsEmpty(t *testing.T) {
 
 func TestRBACService_GetMemberRole_ReturnsRole(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace"}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	role, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1")
 	if err != nil {
@@ -189,7 +279,7 @@ func TestRBACService_GetMemberRole_ReturnsRole(t *testing.T) {
 func TestRBACService_GetMemberRole_CacheMiss_PopulatesCache(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"}
 	c := newStubCache()
-	svc := NewRBACService(repo, c)
+	svc := newTestRBACService(repo, c)
 
 	if _, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -206,7 +296,7 @@ func TestRBACService_GetMemberRole_CacheHit_SkipsRepo(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"} // kalau ke-panggil, akan mismatch dgn cache
 	c := newStubCache()
 	c.store[roleCacheKey("user-1", "ws-1")] = "admin_workspace"
-	svc := NewRBACService(repo, c)
+	svc := newTestRBACService(repo, c)
 
 	role, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1")
 	if err != nil {
@@ -223,7 +313,7 @@ func TestRBACService_GetMemberRole_CacheHit_SkipsRepo(t *testing.T) {
 func TestRBACService_GetMemberRole_NotAMember_DoesNotCache(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleErr: pgx.ErrNoRows}
 	c := newStubCache()
-	svc := NewRBACService(repo, c)
+	svc := newTestRBACService(repo, c)
 
 	if _, err := svc.GetMemberRole(context.Background(), nil, "ws-1", "user-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -238,7 +328,7 @@ func TestRBACService_ListMembers_ReturnsMembers(t *testing.T) {
 		{UserID: "user-1", Email: "a@x.com", DisplayName: "A", Role: "admin_workspace"},
 		{UserID: "user-2", Email: "b@x.com", DisplayName: "B", Role: "editor"},
 	}}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	members, err := svc.ListMembers(context.Background(), nil, "ws-1")
 	if err != nil {
@@ -251,7 +341,7 @@ func TestRBACService_ListMembers_ReturnsMembers(t *testing.T) {
 
 func TestRBACService_RemoveMember_Success(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -265,7 +355,7 @@ func TestRBACService_RemoveMember_InvalidatesCache(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{}
 	c := newStubCache()
 	c.store[roleCacheKey("user-1", "ws-1")] = "editor"
-	svc := NewRBACService(repo, c)
+	svc := newTestRBACService(repo, c)
 
 	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -277,7 +367,7 @@ func TestRBACService_RemoveMember_InvalidatesCache(t *testing.T) {
 
 func TestRBACService_RemoveMember_NotFound(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{removeErr: domain.ErrMemberNotFound}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-missing", "actor-1", "admin_workspace")
 	if !errors.Is(err, domain.ErrMemberNotFound) {
@@ -290,7 +380,7 @@ func TestRBACService_RemoveMember_NotFound(t *testing.T) {
 // repo.RemoveMember (DELETE) sempat dipanggil.
 func TestRBACService_RemoveMember_LastAdmin_Rejected(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin")
 	if !errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin) {
@@ -304,7 +394,7 @@ func TestRBACService_RemoveMember_LastAdmin_Rejected(t *testing.T) {
 // Admin BUKAN yang terakhir (masih ada admin lain) -- harus tetap berhasil.
 func TestRBACService_RemoveMember_NotLastAdmin_Succeeds(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 1}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
 	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -319,9 +409,9 @@ func TestRBACService_RemoveMember_NotLastAdmin_Succeeds(t *testing.T) {
 // RemoveMember (invariant "minimal 1 admin_workspace").
 func TestRBACService_AssignRole_DowngradeLastAdmin_Rejected(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
-	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "group_admin")
+	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "group_admin", "")
 	if !errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin) {
 		t.Errorf("err = %v, want domain.ErrCannotRemoveLastWorkspaceAdmin", err)
 	}
@@ -335,9 +425,117 @@ func TestRBACService_AssignRole_DowngradeLastAdmin_Rejected(t *testing.T) {
 // memblokir ini.
 func TestRBACService_AssignRole_SameRoleAdmin_NotBlocked(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
-	svc := NewRBACService(repo, newStubCache())
+	svc := newTestRBACService(repo, newStubCache())
 
-	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "admin_workspace", nil, "actor-1", "group_admin"); err != nil {
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "admin_workspace", nil, "actor-1", "group_admin", ""); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// --- S4W susulan role restructuring 2026-09-14 (Kelola Member & Roles,
+// dikonfirmasi user): AssignRole gains projectID -- guard "project tidak
+// boleh kehilangan PM tanpa pengganti", validasi project_id milik
+// workspace ini, dan move semantics project_members. ---
+
+func TestRBACService_AssignRole_ProjectID_NotInWorkspace_Rejected(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "viewer"}
+	projects := &stubProjectPMRepo{workspaceIDFor: map[string]string{"proj-other": "ws-lain"}}
+	svc := newTestRBACService(repo, newStubCache(), projects)
+
+	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace", "proj-other")
+	if !errors.Is(err, domain.ErrProjectNotFound) {
+		t.Errorf("err = %v, want domain.ErrProjectNotFound", err)
+	}
+	if repo.assignedRole != "" {
+		t.Error("repo.AssignRole tidak boleh terpanggil kalau project_id tidak valid")
+	}
+}
+
+// Mengubah role SEORANG PM (pmProjectsResult tidak kosong) ke role
+// NON-PM harus ditolak -- project yang dia pimpin akan kehilangan PM
+// tanpa pengganti, dikonfirmasi user ("validasi untuk project harus ada
+// minimal 1 PM").
+func TestRBACService_AssignRole_WouldLoseLastPM_Rejected(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "project_manager"}
+	projects := &stubProjectPMRepo{pmProjectsResult: []repository.PMProjectRef{{ID: "proj-1", Name: "Rilis Q4"}}}
+	svc := newTestRBACService(repo, newStubCache(), projects)
+
+	_, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace", "proj-2")
+	if !errors.Is(err, domain.ErrProjectWouldLoseLastPM) {
+		t.Errorf("err = %v, want domain.ErrProjectWouldLoseLastPM", err)
+	}
+	if repo.assignedRole != "" {
+		t.Error("repo.AssignRole tidak boleh terpanggil kalau guard menolak")
+	}
+}
+
+// Tetap mengangkat PM ke role project_manager (pmProjectsResult TIDAK
+// dicek karena role baru == project_manager) harus tetap berhasil --
+// guard cuma berlaku saat role BARU bukan project_manager.
+func TestRBACService_AssignRole_StillPM_NotBlockedByGuard(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "project_manager"}
+	projects := &stubProjectPMRepo{pmProjectsResult: []repository.PMProjectRef{{ID: "proj-1", Name: "Rilis Q4"}}}
+	svc := newTestRBACService(repo, newStubCache(), projects)
+
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "project_manager", nil, "actor-1", "admin_workspace", "proj-2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projects.setPMCall) != 1 || projects.setPMCall[0].projectID != "proj-2" {
+		t.Errorf("setPMCall = %+v, want satu entri proj-2", projects.setPMCall)
+	}
+}
+
+// Role project_manager -> SetPM dipanggil, TIDAK ADA AddMember (PM tidak
+// butuh baris project_members).
+func TestRBACService_AssignRole_ProjectManager_CallsSetPM(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"}
+	projects := &stubProjectPMRepo{}
+	projectMembers := &stubProjectMembershipRepo{}
+	svc := newTestRBACService(repo, newStubCache(), projects, projectMembers)
+
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "project_manager", nil, "actor-1", "admin_workspace", "proj-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projects.setPMCall) != 1 || projects.setPMCall[0].projectID != "proj-1" || projects.setPMCall[0].userID != "user-1" {
+		t.Errorf("setPMCall = %+v, want satu entri proj-1/user-1", projects.setPMCall)
+	}
+	if len(projectMembers.addCall) != 0 {
+		t.Errorf("addCall = %+v, want kosong (PM tidak butuh project_members)", projectMembers.addCall)
+	}
+}
+
+// Move semantics (dikonfirmasi user "point 1"): keterkaitan project_members
+// LAMA (proj-old) dipindah -- dihapus dulu, baru ditambahkan ke project
+// baru (proj-new) dengan role baru.
+func TestRBACService_AssignRole_EditorRole_MovesProjectMembership(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "viewer"}
+	projects := &stubProjectPMRepo{}
+	projectMembers := &stubProjectMembershipRepo{existingProjectIDs: []string{"proj-old"}}
+	svc := newTestRBACService(repo, newStubCache(), projects, projectMembers)
+
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace", "proj-new"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projectMembers.removedProjectIDs) != 1 || projectMembers.removedProjectIDs[0] != "proj-old" {
+		t.Errorf("removedProjectIDs = %v, want [proj-old]", projectMembers.removedProjectIDs)
+	}
+	if len(projectMembers.addCall) != 1 || projectMembers.addCall[0].projectID != "proj-new" || projectMembers.addCall[0].role != "editor" {
+		t.Errorf("addCall = %+v, want satu entri proj-new/editor", projectMembers.addCall)
+	}
+}
+
+// projectID kosong (8 pemanggil AssignRole lain -- admin swap, invite
+// flow) TIDAK BOLEH menyentuh guard/project sama sekali -- regresi nihil.
+func TestRBACService_AssignRole_EmptyProjectID_SkipsProjectLogic(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "project_manager"}
+	projects := &stubProjectPMRepo{pmProjectsResult: []repository.PMProjectRef{{ID: "proj-1", Name: "Rilis Q4"}}}
+	projectMembers := &stubProjectMembershipRepo{existingProjectIDs: []string{"proj-old"}}
+	svc := newTestRBACService(repo, newStubCache(), projects, projectMembers)
+
+	if _, err := svc.AssignRole(context.Background(), nil, "ws-1", "user-1", "editor", nil, "actor-1", "admin_workspace", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projectMembers.removedProjectIDs) != 0 || len(projectMembers.addCall) != 0 || len(projects.setPMCall) != 0 {
+		t.Error("projectID kosong tidak boleh memicu logika project apa pun (guard/move/SetPM)")
 	}
 }

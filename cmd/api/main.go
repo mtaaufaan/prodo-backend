@@ -217,7 +217,7 @@ func run() error {
 	activationSvc := service.NewActivationService(accountRepo, kcAdmin, mfaSvc, logger)
 	sessionSvc := service.NewSessionService(sessionRepo, rdb)
 	authSvc := service.NewAuthService(accountRepo, oidcClient, kcAdmin, mfaSvc, sessionSvc, emailSvc, logger)
-	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb)
+	rbacSvc := service.NewRBACService(workspaceMemberRepo, rdb, projectRepo, projectMemberRepo)
 	invitationSvc := service.NewInvitationService(invitationRepo, emailSvc, kcAdmin, accountRepo, rbacSvc, projectRepo, projectMemberRepo, logger, cfg.AppBaseURL)
 	organizationSvc := service.NewOrganizationService(organizationRepo)
 	ssoConfigSvc := service.NewSSOConfigService(ssoConfigRepo, organizationSvc)

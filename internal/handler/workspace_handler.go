@@ -104,7 +104,8 @@ func (h *WorkspaceHandler) CreateWorkspace(c *fiber.Ctx) error {
 }
 
 type updateMemberRoleRequest struct {
-	Role string `json:"role"`
+	Role      string `json:"role"`
+	ProjectID string `json:"project_id"`
 }
 
 // UpdateMemberRole menangani PUT /workspaces/:wsId/members/:userId/role
@@ -147,8 +148,21 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN_ROLE_ASSIGNMENT",
 			"Admin Workspace tidak dapat memberi role Admin Workspace -- hanya Group Admin atau Platform Admin yang berwenang", nil))
 	}
+	// Role restructuring 2026-09-14 (Kelola Member & Roles, dikonfirmasi
+	// user): role project-level (PM/editor/approver/viewer) WAJIB
+	// mencantumkan project_id -- sama daftar/pesan dengan
+	// InvitationHandler.CreateInvitations (projectScopedInvitationRoles,
+	// satu peta dipakai bersama, package yang sama).
+	if projectScopedInvitationRoles[req.Role] && req.ProjectID == "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "project_id wajib diisi untuk role ini",
+			[]response.FieldError{{Field: "project_id", Message: "wajib diisi untuk role project_manager/editor/approver/viewer"}}))
+	}
+	if !projectScopedInvitationRoles[req.Role] && req.ProjectID != "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "project_id tidak boleh diisi untuk role ini",
+			[]response.FieldError{{Field: "project_id", Message: "hanya berlaku untuk role project_manager/editor/approver/viewer"}}))
+	}
 
-	result, err := h.rbac.AssignRole(c.Context(), exec, workspaceID, targetUserID, req.Role, nil, actorUserID, actorRole)
+	result, err := h.rbac.AssignRole(c.Context(), exec, workspaceID, targetUserID, req.Role, nil, actorUserID, actorRole, req.ProjectID)
 	if err != nil {
 		return h.mapWorkspaceError(c, err, "Gagal mengubah role")
 	}
@@ -567,6 +581,11 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Member tidak ditemukan di workspace ini", nil))
 	case errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("CANNOT_REMOVE_LAST_ADMIN", "Minimal satu Admin Workspace harus tersisa di workspace ini", nil))
+	case errors.Is(err, domain.ErrProjectWouldLoseLastPM):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PROJECT_WOULD_LOSE_PM",
+			"Mengubah role ini akan menyisakan project tanpa Project Manager -- tetapkan PM baru dulu lewat Kelola Project", nil))
+	case errors.Is(err, domain.ErrProjectNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("PROJECT_NOT_FOUND", "Project tidak ditemukan di workspace ini", nil))
 	case errors.Is(err, domain.ErrWorkspaceHasProjects):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("WORKSPACE_HAS_PROJECTS", "Workspace masih punya project aktif", nil))
 	case errors.Is(err, domain.ErrWorkspaceNotDeleted):

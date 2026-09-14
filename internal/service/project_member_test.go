@@ -78,7 +78,7 @@ func (f *fakeProjectRoleChecker) GetWorkspaceOrgID(_ context.Context, _ db.Execu
 	return f.orgID, f.orgErr
 }
 
-func (f *fakeProjectRoleChecker) AssignRole(_ context.Context, _ db.Executor, _, _, role string, _ *string, _, _ string) (*RoleChangeResult, error) {
+func (f *fakeProjectRoleChecker) AssignRole(_ context.Context, _ db.Executor, _, _, role string, _ *string, _, _, _ string) (*RoleChangeResult, error) {
 	if f.assignErr != nil {
 		return nil, f.assignErr
 	}

@@ -173,7 +173,7 @@ type stubWorkspaceAssigner struct {
 	assigned  []recordedAssignment
 }
 
-func (a *stubWorkspaceAssigner) AssignRole(_ context.Context, _ db.Executor, workspaceID, userID, role string, _ *string, _, _ string) (*RoleChangeResult, error) {
+func (a *stubWorkspaceAssigner) AssignRole(_ context.Context, _ db.Executor, workspaceID, userID, role string, _ *string, _, _, _ string) (*RoleChangeResult, error) {
 	if a.assignErr != nil {
 		return nil, a.assignErr
 	}

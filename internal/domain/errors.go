@@ -190,6 +190,14 @@ var (
 	// ErrMinimumActiveAdminRequired untuk Platform Admin).
 	ErrCannotRemoveLastWorkspaceAdmin = errors.New("at least one admin_workspace must remain in the workspace")
 
+	// ErrProjectWouldLoseLastPM dikembalikan RBACService.AssignRole (Kelola
+	// Member & Roles, S4W susulan role restructuring 2026-09-14, dikonfirmasi
+	// user) saat mengubah role SEORANG project_manager ke role lain akan
+	// menyisakan project yang dia pimpin tanpa PM sama sekali -- AW harus
+	// tetapkan PM baru dulu lewat Kelola Project (SetPM/invite PM baru)
+	// sebelum bisa memindahkan orang ini ke role lain.
+	ErrProjectWouldLoseLastPM = errors.New("changing this role would leave a project without a project manager")
+
 	// ErrProjectNotFound dikembalikan saat projects.id tidak ditemukan
 	// (S3-21/22/23).
 	ErrProjectNotFound = errors.New("project not found")
