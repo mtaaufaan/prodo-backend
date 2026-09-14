@@ -353,6 +353,14 @@ func (h *ProjectHandler) mapProjectError(c *fiber.Ctx, err error, fallbackMessag
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NAME_TAKEN", "Nama project sudah dipakai di workspace ini", nil))
 	case errors.Is(err, domain.ErrProjectNotDeleted):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NOT_DELETED", "Project ini tidak sedang dihapus", nil))
+	case errors.Is(err, domain.ErrInvitationAlreadyPending):
+		// S4W susulan (ditemukan user 2026-09-14): resolvePM/invitePM
+		// memanggil InvitationService.CreateInvitation langsung (bukan
+		// lewat CreateBulkInvitations yang sudah menangani error per-email
+		// via result.Errors) -- sebelumnya error ini jatuh ke default
+		// INTERNAL_ERROR generic "Gagal membuat project"/"Gagal menetapkan
+		// PM", tidak menjelaskan penyebab sama sekali.
+		return c.Status(fiber.StatusConflict).JSON(response.Error("INVITATION_ALREADY_PENDING", "Email ini sudah punya undangan pending di workspace ini -- cek menu Members & Roles untuk kirim ulang atau batalkan undangan lama sebelum mengundang lagi", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))
