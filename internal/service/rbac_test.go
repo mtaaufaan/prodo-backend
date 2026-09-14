@@ -100,6 +100,9 @@ type stubProjectPMRepo struct {
 
 	setPMErr  error
 	setPMCall []struct{ projectID, userID string }
+
+	removePMErr   error
+	removePMCalls []string
 }
 
 func (r *stubProjectPMRepo) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
@@ -123,6 +126,14 @@ func (r *stubProjectPMRepo) SetPM(_ context.Context, _ db.Executor, projectID, u
 		return r.setPMErr
 	}
 	r.setPMCall = append(r.setPMCall, struct{ projectID, userID string }{projectID, userID})
+	return nil
+}
+
+func (r *stubProjectPMRepo) RemovePM(_ context.Context, _ db.Executor, projectID, _, _ string) error {
+	if r.removePMErr != nil {
+		return r.removePMErr
+	}
+	r.removePMCalls = append(r.removePMCalls, projectID)
 	return nil
 }
 
@@ -343,7 +354,7 @@ func TestRBACService_RemoveMember_Success(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{}
 	svc := newTestRBACService(repo, newStubCache())
 
-	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace"); err != nil {
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if repo.removedWorkspace != "ws-1" || repo.removedUserID != "user-1" {
@@ -357,7 +368,7 @@ func TestRBACService_RemoveMember_InvalidatesCache(t *testing.T) {
 	c.store[roleCacheKey("user-1", "ws-1")] = "editor"
 	svc := newTestRBACService(repo, c)
 
-	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace"); err != nil {
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, ok := c.store[roleCacheKey("user-1", "ws-1")]; ok {
@@ -369,7 +380,7 @@ func TestRBACService_RemoveMember_NotFound(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{removeErr: domain.ErrMemberNotFound}
 	svc := newTestRBACService(repo, newStubCache())
 
-	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-missing", "actor-1", "admin_workspace")
+	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-missing", "actor-1", "admin_workspace", "")
 	if !errors.Is(err, domain.ErrMemberNotFound) {
 		t.Errorf("err = %v, want wrapped domain.ErrMemberNotFound", err)
 	}
@@ -382,7 +393,7 @@ func TestRBACService_RemoveMember_LastAdmin_Rejected(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 0}
 	svc := newTestRBACService(repo, newStubCache())
 
-	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin")
+	err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin", "")
 	if !errors.Is(err, domain.ErrCannotRemoveLastWorkspaceAdmin) {
 		t.Errorf("err = %v, want domain.ErrCannotRemoveLastWorkspaceAdmin", err)
 	}
@@ -396,7 +407,7 @@ func TestRBACService_RemoveMember_NotLastAdmin_Succeeds(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "admin_workspace", countAdminsResult: 1}
 	svc := newTestRBACService(repo, newStubCache())
 
-	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin"); err != nil {
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "group_admin", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if repo.removedUserID != "user-1" {
@@ -537,5 +548,101 @@ func TestRBACService_AssignRole_EmptyProjectID_SkipsProjectLogic(t *testing.T) {
 	}
 	if len(projectMembers.removedProjectIDs) != 0 || len(projectMembers.addCall) != 0 || len(projects.setPMCall) != 0 {
 		t.Error("projectID kosong tidak boleh memicu logika project apa pun (guard/move/SetPM)")
+	}
+}
+
+// --- S4W susulan 2026-09-14 (Kelola Member & Roles, dikonfirmasi user
+// setelah screenshot Fia/IT-Eldwin, "jika pm dan editor approver viewer,
+// hanya dikeluarkan dari project"): RemoveMember gains projectID. ---
+
+// Role project-scoped tapi cuma terkait SATU project -- hasilnya SAMA
+// seperti sebelumnya (dihapus total dari workspace_members), karena tidak
+// ada project lain yang jadi alasan dia tetap member workspace ini.
+func TestRBACService_RemoveMember_EditorSingleProjectTie_FullRemoval(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"}
+	projectMembers := &stubProjectMembershipRepo{existingProjectIDs: []string{"proj-1"}}
+	svc := newTestRBACService(repo, newStubCache(), projectMembers)
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", "proj-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.removedUserID != "user-1" {
+		t.Error("repo.RemoveMember (DELETE workspace_members) harusnya tetap terpanggil -- cuma satu keterkaitan project")
+	}
+	if len(projectMembers.removedProjectIDs) != 0 {
+		t.Error("projectMembers.RemoveMember tidak boleh terpanggil terpisah -- DELETE workspace_members sudah cukup")
+	}
+}
+
+// Role project-scoped terkait LEBIH dari satu project (jarang) -- cuma
+// project yang dipilih di panel (projectID) yang dilepas, workspace_members
+// TIDAK dihapus (member masih terkait project lain).
+func TestRBACService_RemoveMember_EditorMultiProjectTie_PartialOnly(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"}
+	projectMembers := &stubProjectMembershipRepo{existingProjectIDs: []string{"proj-1", "proj-2"}}
+	svc := newTestRBACService(repo, newStubCache(), projectMembers)
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", "proj-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projectMembers.removedProjectIDs) != 1 || projectMembers.removedProjectIDs[0] != "proj-1" {
+		t.Errorf("removedProjectIDs = %v, want [proj-1]", projectMembers.removedProjectIDs)
+	}
+	if repo.removedUserID != "" {
+		t.Error("repo.RemoveMember (DELETE workspace_members) TIDAK boleh terpanggil -- member masih terkait proj-2")
+	}
+}
+
+// PM cuma memimpin SATU project -- hasilnya SAMA seperti sebelumnya
+// (dihapus total dari workspace_members).
+func TestRBACService_RemoveMember_PMSingleProjectTie_FullRemoval(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "project_manager"}
+	projects := &stubProjectPMRepo{pmProjectsResult: []repository.PMProjectRef{{ID: "proj-1", Name: "Rilis Q4"}}}
+	svc := newTestRBACService(repo, newStubCache(), projects)
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", "proj-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.removedUserID != "user-1" {
+		t.Error("repo.RemoveMember (DELETE workspace_members) harusnya tetap terpanggil -- cuma memimpin satu project")
+	}
+	if len(projects.removePMCalls) != 0 {
+		t.Error("RemovePM tidak boleh terpanggil terpisah -- DELETE workspace_members sudah cukup")
+	}
+}
+
+// PM memimpin LEBIH dari satu project -- cuma PM di project yang dipilih
+// (projectID) yang dilepas (RemovePM), workspace_members TIDAK dihapus.
+func TestRBACService_RemoveMember_PMMultiProjectTie_PartialOnly(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "project_manager"}
+	projects := &stubProjectPMRepo{pmProjectsResult: []repository.PMProjectRef{
+		{ID: "proj-1", Name: "Rilis Q4"}, {ID: "proj-2", Name: "Rilis Q1"},
+	}}
+	svc := newTestRBACService(repo, newStubCache(), projects)
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", "proj-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projects.removePMCalls) != 1 || projects.removePMCalls[0] != "proj-1" {
+		t.Errorf("removePMCalls = %v, want [proj-1]", projects.removePMCalls)
+	}
+	if repo.removedUserID != "" {
+		t.Error("repo.RemoveMember (DELETE workspace_members) TIDAK boleh terpanggil -- masih PM di proj-2")
+	}
+}
+
+// Role workspace-scoped (admin_workspace/division_viewer) -- projectID
+// diabaikan sama sekali, tetap dihapus total seperti sebelumnya (FE tidak
+// pernah mengirim project_id untuk role ini, tapi service tidak boleh
+// bergantung pada itu).
+func TestRBACService_RemoveMember_WorkspaceScopedRole_IgnoresProjectID(t *testing.T) {
+	repo := &stubWorkspaceMemberRepository{getRoleResult: "division_viewer"}
+	svc := newTestRBACService(repo, newStubCache())
+
+	if err := svc.RemoveMember(context.Background(), nil, "ws-1", "user-1", "actor-1", "admin_workspace", "proj-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.removedUserID != "user-1" {
+		t.Error("repo.RemoveMember (DELETE workspace_members) harusnya tetap terpanggil -- role bukan project-scoped")
 	}
 }
