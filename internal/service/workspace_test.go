@@ -163,13 +163,15 @@ func (f *fakeAdminChangeNotifier) SendWorkspaceAdminChangedEmail(_ context.Conte
 }
 
 type fakeInvitationCreator struct {
-	err error
+	err         error
+	createCalls []struct{ email, displayName string }
 }
 
-func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, _ string) (*Invitation, error) {
+func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, _, displayName string) (*Invitation, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
+	f.createCalls = append(f.createCalls, struct{ email, displayName string }{email, displayName})
 	return &Invitation{Email: email, WorkspaceID: workspaceID, Role: role}, nil
 }
 
@@ -190,7 +192,8 @@ func TestWorkspaceService_CreateWorkspace_Success(t *testing.T) {
 }
 
 func TestWorkspaceService_CreateWorkspace_InviteNewEmail(t *testing.T) {
-	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
+	invites := &fakeInvitationCreator{}
+	svc := NewWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{}, &fakeContactLookup{}, &fakeAdminChangeNotifier{}, invites, zap.NewNop())
 
 	ws, err := svc.CreateWorkspace(context.Background(), nil, "org-1", "Engineering", "", "baru@acme.co.id", "Admin Baru", "ga-1", "group_admin", "GA Satu")
 	if err != nil {
@@ -198,6 +201,12 @@ func TestWorkspaceService_CreateWorkspace_InviteNewEmail(t *testing.T) {
 	}
 	if ws.ID != "ws-new" {
 		t.Errorf("ws = %+v, unexpected", ws)
+	}
+	// Ditemukan user 2026-09-14 (kasus analog ProjectService.invitePM):
+	// adminName ("Admin Baru") diisi tapi tidak pernah diteruskan sebagai
+	// display_name undangan -- form aktivasi selalu kosong.
+	if len(invites.createCalls) != 1 || invites.createCalls[0].displayName != "Admin Baru" {
+		t.Errorf("createCalls = %+v, want satu entri dengan displayName %q", invites.createCalls, "Admin Baru")
 	}
 }
 
