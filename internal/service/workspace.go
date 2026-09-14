@@ -54,7 +54,7 @@ type orgAuthorizer interface {
 // ListOrgCandidates ditambahkan S4G-05 (Track S4G) untuk picker "MEMBER
 // YANG ADA" (Tambah Workspace) dan dropdown ganti admin (Kelola Workspace).
 type roleAssigner interface {
-	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error)
+	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole, projectID string) (*RoleChangeResult, error)
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
 	ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]repository.Member, error)
 }
@@ -128,7 +128,7 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor
 	}
 
 	if adminWorkspaceUserID != "" {
-		if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, adminWorkspaceUserID, "admin_workspace", nil, actorID, actorRole); err != nil {
+		if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, adminWorkspaceUserID, "admin_workspace", nil, actorID, actorRole, ""); err != nil {
 			return nil, fmt.Errorf("service.CreateWorkspace: assign admin_workspace: %w", err)
 		}
 		return ws, nil
@@ -140,7 +140,7 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor
 	existingUserID, err := s.contacts.FindUserIDByEmail(ctx, adminEmail)
 	switch {
 	case err == nil:
-		if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, existingUserID, "admin_workspace", &actorID, actorID, actorRole); err != nil {
+		if _, err := s.rbac.AssignRole(ctx, exec, ws.ID, existingUserID, "admin_workspace", &actorID, actorID, actorRole, ""); err != nil {
 			return nil, fmt.Errorf("service.CreateWorkspace: assign admin_workspace (email existing): %w", err)
 		}
 	case errors.Is(err, pgx.ErrNoRows):
@@ -291,11 +291,11 @@ func (s *WorkspaceService) ReassignAdmin(ctx context.Context, exec db.Executor, 
 		}
 	}
 
-	if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, newAdminUserID, "admin_workspace", nil, actorID, actorRole); err != nil {
+	if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, newAdminUserID, "admin_workspace", nil, actorID, actorRole, ""); err != nil {
 		return fmt.Errorf("service.ReassignAdmin: assign admin baru: %w", err)
 	}
 	if oldAdminID != "" && oldAdminID != newAdminUserID {
-		if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, oldAdminID, "editor", nil, actorID, actorRole); err != nil {
+		if _, err := s.rbac.AssignRole(ctx, exec, workspaceID, oldAdminID, "editor", nil, actorID, actorRole, ""); err != nil {
 			return fmt.Errorf("service.ReassignAdmin: turunkan admin lama: %w", err)
 		}
 	}

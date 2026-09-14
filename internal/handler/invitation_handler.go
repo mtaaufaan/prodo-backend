@@ -265,11 +265,12 @@ func (h *InvitationHandler) ListPendingInvitations(c *fiber.Ctx) error {
 	for i := range invitations {
 		inv := &invitations[i]
 		data[i] = fiber.Map{
-			"id":         inv.ID,
-			"email":      inv.Email,
-			"role":       inv.Role,
-			"created_at": inv.CreatedAt,
-			"expires_at": inv.ExpiresAt,
+			"id":           inv.ID,
+			"email":        inv.Email,
+			"role":         inv.Role,
+			"created_at":   inv.CreatedAt,
+			"expires_at":   inv.ExpiresAt,
+			"project_name": inv.ProjectName,
 		}
 	}
 

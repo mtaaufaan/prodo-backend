@@ -418,6 +418,10 @@ type PendingInvitation struct {
 	Role      string
 	CreatedAt time.Time
 	ExpiresAt time.Time
+	// ProjectName -- kosong untuk role workspace-scoped (admin_workspace/
+	// division_viewer); nama project yang ditautkan (project_id, S4W susulan
+	// role restructuring 2026-09-14) untuk role project-level.
+	ProjectName string
 }
 
 // ListPending mengembalikan seluruh undangan PENDING (belum accepted,
@@ -427,10 +431,11 @@ type PendingInvitation struct {
 // task backend terpisah -- lihat implementation_gaps.md IG-09.
 func (r *InvitationRepository) ListPending(ctx context.Context, exec db.Executor, workspaceID string) ([]PendingInvitation, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, email, role, created_at, expires_at
-		FROM user_invitations
-		WHERE workspace_id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL
-		ORDER BY created_at DESC
+		SELECT ui.id, ui.email, ui.role, ui.created_at, ui.expires_at, COALESCE(p.name, '')
+		FROM user_invitations ui
+		LEFT JOIN projects p ON p.id = ui.project_id
+		WHERE ui.workspace_id = $1 AND ui.accepted_at IS NULL AND ui.cancelled_at IS NULL
+		ORDER BY ui.created_at DESC
 	`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListPending: %w", err)
@@ -440,7 +445,7 @@ func (r *InvitationRepository) ListPending(ctx context.Context, exec db.Executor
 	var invitations []PendingInvitation
 	for rows.Next() {
 		var inv PendingInvitation
-		if err := rows.Scan(&inv.ID, &inv.Email, &inv.Role, &inv.CreatedAt, &inv.ExpiresAt); err != nil {
+		if err := rows.Scan(&inv.ID, &inv.Email, &inv.Role, &inv.CreatedAt, &inv.ExpiresAt, &inv.ProjectName); err != nil {
 			return nil, fmt.Errorf("repository.ListPending: scan: %w", err)
 		}
 		invitations = append(invitations, inv)

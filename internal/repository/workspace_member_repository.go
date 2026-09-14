@@ -166,6 +166,13 @@ type Member struct {
 	Title       *string
 	Role        string
 	JoinedAt    time.Time
+	// ProjectNames -- nama project (dipisah ", ", urut abjad) tempat user
+	// ini punya keterkaitan project-level di workspace INI -- PM lewat
+	// projects.pm_user_id, editor/approver/viewer lewat project_members
+	// (S4W susulan role restructuring, 2026-09-14). Kosong untuk role
+	// workspace-scoped murni (admin_workspace/division_viewer) atau kalau
+	// belum ditautkan ke project mana pun.
+	ProjectNames string
 }
 
 // ListMembers mengembalikan seluruh member LANGSUNG workspace (S2-07/08
@@ -175,9 +182,18 @@ type Member struct {
 // RolePickerModal S2-07/08).
 func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]Member, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT wm.user_id, u.email, u.display_name, u.title, wm.role, wm.joined_at
+		SELECT wm.user_id, u.email, u.display_name, u.title, wm.role, wm.joined_at,
+		       COALESCE(proj.names, '')
 		FROM workspace_members wm
 		JOIN users u ON u.id = wm.user_id
+		LEFT JOIN LATERAL (
+			SELECT string_agg(DISTINCT p.name, ', ' ORDER BY p.name) AS names
+			FROM projects p
+			WHERE p.workspace_id = wm.workspace_id AND p.deleted_at IS NULL
+			  AND (p.pm_user_id = wm.user_id OR EXISTS (
+			        SELECT 1 FROM project_members pmem WHERE pmem.project_id = p.id AND pmem.user_id = wm.user_id
+			      ))
+		) proj ON true
 		WHERE wm.workspace_id = $1
 		ORDER BY wm.joined_at ASC
 	`, workspaceID)
@@ -189,7 +205,7 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.Role, &m.JoinedAt); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.Role, &m.JoinedAt, &m.ProjectNames); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		members = append(members, m)

@@ -59,7 +59,7 @@ type existingUserFinder interface {
 // diimplementasikan *RBACService (S2-23: shortcut tambah langsung ke
 // workspace, bukan bikin undangan, kalau email sudah terdaftar).
 type workspaceAssigner interface {
-	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error)
+	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole, projectID string) (*RoleChangeResult, error)
 }
 
 // projectPMAssigner -- interface didefinisikan di consumer, diimplementasikan
@@ -260,7 +260,7 @@ func (s *InvitationService) CreateBulkInvitations(
 		case err == nil:
 			// S2-23: email sudah terdaftar -- tambah langsung, tanpa undangan/email.
 			err := withSavepoint(ctx, exec, savepoint, func() error {
-				if _, err := s.assigner.AssignRole(ctx, exec, workspaceID, existingUserID, role, &invitedByUserID, invitedByUserID, actorRole); err != nil {
+				if _, err := s.assigner.AssignRole(ctx, exec, workspaceID, existingUserID, role, &invitedByUserID, invitedByUserID, actorRole, ""); err != nil {
 					return err
 				}
 				if projectID == "" {

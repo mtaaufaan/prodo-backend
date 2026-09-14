@@ -126,7 +126,7 @@ type fakeRoleAssigner struct {
 	candidates []repository.Member
 }
 
-func (f *fakeRoleAssigner) AssignRole(_ context.Context, _ db.Executor, _, _, _ string, _ *string, _, _ string) (*RoleChangeResult, error) {
+func (f *fakeRoleAssigner) AssignRole(_ context.Context, _ db.Executor, _, _, _ string, _ *string, _, _, _ string) (*RoleChangeResult, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
