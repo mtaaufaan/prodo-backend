@@ -36,9 +36,24 @@ func NewInvitationHandler(invitations *service.InvitationService, accounts displ
 
 // validInvitationRoles -- sama dengan validWorkspaceRoles (workspace_handler.go),
 // disalin di sini supaya invitation_handler.go tidak bergantung ke
-// workspace_handler.go untuk satu daftar konstanta.
+// workspace_handler.go untuk satu daftar konstanta. division_viewer
+// ditambahkan 2026-09-14 (role restructuring, sebelumnya cuma bisa
+// diberikan lewat jalur lain -- gap, tidak pernah ada di daftar ini).
 var validInvitationRoles = map[string]bool{
 	"admin_workspace": true,
+	"project_manager": true,
+	"editor":          true,
+	"approver":        true,
+	"division_viewer": true,
+	"viewer":          true,
+}
+
+// projectScopedInvitationRoles -- role yang berjalan PADA project tertentu
+// (dikonfirmasi user 2026-09-14: "role lainnya adalah role berbasis
+// project... PM, Editor, Approver, dan Viewer harus mencantumkan sampai
+// level project"). admin_workspace/division_viewer SEBALIKNYA workspace-
+// scoped murni -- project_id wajib kosong untuk keduanya.
+var projectScopedInvitationRoles = map[string]bool{
 	"project_manager": true,
 	"editor":          true,
 	"approver":        true,
@@ -46,8 +61,9 @@ var validInvitationRoles = map[string]bool{
 }
 
 type createInvitationsRequest struct {
-	Emails []string `json:"emails"`
-	Role   string   `json:"role"`
+	Emails    []string `json:"emails"`
+	Role      string   `json:"role"`
+	ProjectID string   `json:"project_id"`
 }
 
 // CreateInvitations menangani POST /workspaces/:wsId/invitations (S2-19) --
@@ -76,15 +92,26 @@ func (h *InvitationHandler) CreateInvitations(c *fiber.Ctx) error {
 	}
 	if !validInvitationRoles[req.Role] {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "role tidak valid",
-			[]response.FieldError{{Field: "role", Message: "harus salah satu dari admin_workspace, project_manager, editor, approver, viewer"}}))
+			[]response.FieldError{{Field: "role", Message: "harus salah satu dari admin_workspace, project_manager, editor, approver, division_viewer, viewer"}}))
 	}
-	// S4W-01: sama guard dengan WorkspaceHandler.UpdateMemberRole -- Admin
-	// Workspace tidak boleh mengundang siapa pun langsung sebagai
-	// admin_workspace, hanya Group Admin/Platform Admin yang berwenang.
-	if req.Role == "admin_workspace" && actorRole == "admin_workspace" {
-		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN_ROLE_ASSIGNMENT",
-			"Admin Workspace tidak dapat mengundang member sebagai Admin Workspace -- hanya Group Admin atau Platform Admin yang berwenang", nil))
+	// Role restructuring 2026-09-14 (dikonfirmasi user): role project-level
+	// (PM/editor/approver/viewer) WAJIB mencantumkan project_id, role
+	// workspace-level (admin_workspace/division_viewer) SEBALIKNYA tidak
+	// boleh -- tidak ada lagi wacana mengundang member tanpa role/scope.
+	if projectScopedInvitationRoles[req.Role] && req.ProjectID == "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "project_id wajib diisi untuk role ini",
+			[]response.FieldError{{Field: "project_id", Message: "wajib diisi untuk role project_manager/editor/approver/viewer"}}))
 	}
+	if !projectScopedInvitationRoles[req.Role] && req.ProjectID != "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "project_id tidak boleh diisi untuk role ini",
+			[]response.FieldError{{Field: "project_id", Message: "hanya berlaku untuk role project_manager/editor/approver/viewer"}}))
+	}
+	// S4W-01 guard admin_workspace->admin_workspace (WorkspaceHandler.
+	// UpdateMemberRole) SENGAJA TIDAK disalin ke sini lagi -- dibuka
+	// kembali 2026-09-14 atas konfirmasi eksplisit user ("Ya, buka -- AW
+	// boleh undang AW lain"): AW boleh MENGUNDANG AW lain lewat endpoint
+	// ini, guard di UpdateMemberRole (ubah role member existing) TETAP ADA
+	// tidak berubah -- dua wewenang yang sengaja dipisah.
 
 	workspaceName, err := h.invitations.GetWorkspaceName(c.Context(), exec, workspaceID)
 	if err != nil {
@@ -97,8 +124,11 @@ func (h *InvitationHandler) CreateInvitations(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses undangan", nil))
 	}
 
-	result, err := h.invitations.CreateBulkInvitations(c.Context(), exec, req.Emails, workspaceID, req.Role, actorUserID, actorRole, workspaceName, inviterName)
+	result, err := h.invitations.CreateBulkInvitations(c.Context(), exec, req.Emails, workspaceID, req.Role, actorUserID, actorRole, workspaceName, inviterName, req.ProjectID)
 	if err != nil {
+		if errors.Is(err, domain.ErrProjectNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(response.Error("PROJECT_NOT_FOUND", "Project tidak ditemukan di workspace ini", nil))
+		}
 		h.logger.Error("gagal membuat undangan", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat undangan", nil))
 	}

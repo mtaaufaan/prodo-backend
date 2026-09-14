@@ -185,9 +185,16 @@ type recordedPendingPM struct {
 	projectID, userID string
 }
 
+type recordedSetPM struct {
+	projectID, userID, actorID, actorRole string
+}
+
 type stubProjectPMAssigner struct {
 	assignErr error
 	assigned  []recordedPendingPM
+
+	setPMErr error
+	setPM    []recordedSetPM
 }
 
 func (a *stubProjectPMAssigner) AssignPendingPM(_ context.Context, _ db.Executor, projectID, userID string) error {
@@ -198,8 +205,60 @@ func (a *stubProjectPMAssigner) AssignPendingPM(_ context.Context, _ db.Executor
 	return nil
 }
 
-func newTestInvitationService(repo *stubInvitationRepo, emailer *stubInvitationEmailer, kc *fakeKeycloakClient, users *stubExistingUserFinder, assigner *stubWorkspaceAssigner, projects *stubProjectPMAssigner) *InvitationService {
-	return NewInvitationService(repo, emailer, kc, users, assigner, projects, zap.NewNop(), "http://localhost:5173")
+func (a *stubProjectPMAssigner) SetPM(_ context.Context, _ db.Executor, projectID, userID, actorID, actorRole string) error {
+	if a.setPMErr != nil {
+		return a.setPMErr
+	}
+	a.setPM = append(a.setPM, recordedSetPM{projectID, userID, actorID, actorRole})
+	return nil
+}
+
+type recordedProjectMember struct {
+	projectID, workspaceID, userID, role string
+	isScoped                             bool
+	addedBy, actorRole                   string
+}
+
+// stubProjectMemberLinker -- workspaceID kosong berarti GetWorkspaceID
+// mengembalikan projectID APA ADANYA dianggap cocok (test yang tidak
+// peduli validasi lintas-workspace bisa biarkan kosong); isi eksplisit
+// kalau test ingin menguji mismatch (ErrProjectNotFound).
+type stubProjectMemberLinker struct {
+	workspaceIDFor    map[string]string
+	getWorkspaceIDErr error
+
+	addErr error
+	added  []recordedProjectMember
+}
+
+func (l *stubProjectMemberLinker) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
+	if l.getWorkspaceIDErr != nil {
+		return "", l.getWorkspaceIDErr
+	}
+	if l.workspaceIDFor != nil {
+		if ws, ok := l.workspaceIDFor[projectID]; ok {
+			return ws, nil
+		}
+	}
+	return "ws-1", nil
+}
+
+func (l *stubProjectMemberLinker) AddMember(_ context.Context, _ db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error {
+	if l.addErr != nil {
+		return l.addErr
+	}
+	l.added = append(l.added, recordedProjectMember{projectID, workspaceID, userID, role, isScoped, addedBy, actorRole})
+	return nil
+}
+
+func newTestInvitationService(repo *stubInvitationRepo, emailer *stubInvitationEmailer, kc *fakeKeycloakClient, users *stubExistingUserFinder, assigner *stubWorkspaceAssigner, projects *stubProjectPMAssigner, projectMembers ...*stubProjectMemberLinker) *InvitationService {
+	var pm *stubProjectMemberLinker
+	if len(projectMembers) > 0 {
+		pm = projectMembers[0]
+	} else {
+		pm = &stubProjectMemberLinker{}
+	}
+	return NewInvitationService(repo, emailer, kc, users, assigner, projects, pm, zap.NewNop(), "http://localhost:5173")
 }
 
 func TestInvitationService_CreateInvitation_Success(t *testing.T) {
@@ -280,7 +339,7 @@ func TestInvitationService_CreateBulkInvitations_ValidAndDuplicate(t *testing.T)
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	emails := []string{"a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com", "a@x.com"} // a@x.com duplikat
-	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -298,7 +357,7 @@ func TestInvitationService_CreateBulkInvitations_InvalidFormat_ErrorPerRow(t *te
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	emails := []string{"a@x.com", "bukan-email", "c@x.com"}
-	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -322,7 +381,7 @@ func TestInvitationService_CreateBulkInvitations_OneEmailFails_OthersStillSuccee
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
 
 	emails := []string{"sudah-pending@x.com", "valid@x.com"}
-	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, emails, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,7 +399,7 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_AddedDirectly(t *t
 	assigner := &stubWorkspaceAssigner{}
 	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, assigner, &stubProjectPMAssigner{})
 
-	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-terdaftar@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor")
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-terdaftar@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -355,6 +414,72 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_AddedDirectly(t *t
 	}
 	if len(assigner.assigned) != 1 || assigner.assigned[0].userID != "user-existing" || assigner.assigned[0].role != "editor" {
 		t.Errorf("assigner.assigned = %+v, want satu entri user-existing/editor", assigner.assigned)
+	}
+}
+
+// TestInvitationService_CreateBulkInvitations_ExistingUser_ProjectManager_SetsPM
+// -- role restructuring 2026-09-14: email SUDAH terdaftar diundang sebagai
+// project_manager DENGAN project_id harus langsung SetPM (bukan cuma
+// AssignRole workspace) -- jalur ini tidak lewat AcceptInvitation sama
+// sekali (tidak ada undangan yang perlu diterima).
+func TestInvitationService_CreateBulkInvitations_ExistingUser_ProjectManager_SetsPM(t *testing.T) {
+	repo := &stubInvitationRepo{}
+	projects := &stubProjectPMAssigner{}
+	pm := &stubProjectMemberLinker{}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, &stubWorkspaceAssigner{}, projects, pm)
+
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-terdaftar@x.com"}, "ws-1", "project_manager", "actor-1", "admin_workspace", "WS", "Actor", "proj-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.AddedDirectly) != 1 {
+		t.Fatalf("AddedDirectly = %v, want satu entri", result.AddedDirectly)
+	}
+	if len(projects.setPM) != 1 || projects.setPM[0].projectID != "proj-1" || projects.setPM[0].userID != "user-existing" {
+		t.Errorf("projects.setPM = %+v, want satu entri proj-1/user-existing", projects.setPM)
+	}
+	if len(pm.added) != 0 {
+		t.Errorf("pm.added = %+v, want kosong untuk role project_manager (bukan project_members)", pm.added)
+	}
+}
+
+// TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProjectMember
+// -- varian di atas untuk role project-scoped (editor/approver/viewer):
+// AddMember ke project_members, BUKAN SetPM.
+func TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProjectMember(t *testing.T) {
+	repo := &stubInvitationRepo{}
+	projects := &stubProjectPMAssigner{}
+	pm := &stubProjectMemberLinker{}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, &stubWorkspaceAssigner{}, projects, pm)
+
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-terdaftar@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "proj-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.AddedDirectly) != 1 {
+		t.Fatalf("AddedDirectly = %v, want satu entri", result.AddedDirectly)
+	}
+	if len(pm.added) != 1 || pm.added[0].projectID != "proj-1" || pm.added[0].userID != "user-existing" || pm.added[0].role != "editor" || pm.added[0].isScoped {
+		t.Errorf("pm.added = %+v, want satu entri proj-1/user-existing/editor/isScoped=false", pm.added)
+	}
+	if len(projects.setPM) != 0 {
+		t.Errorf("projects.setPM = %+v, want kosong untuk role editor", projects.setPM)
+	}
+}
+
+// TestInvitationService_CreateBulkInvitations_ProjectNotInWorkspace_Rejected
+// -- projectID yang DIKLAIM tapi sebenarnya milik workspace LAIN harus
+// ditolak (ErrProjectNotFound), bukan diam-diam menaut project lintas
+// workspace -- pertahanan berlapis, FE seharusnya tidak pernah kirim ini
+// tapi endpoint tidak boleh percaya begitu saja pada project_id dari client.
+func TestInvitationService_CreateBulkInvitations_ProjectNotInWorkspace_Rejected(t *testing.T) {
+	repo := &stubInvitationRepo{}
+	pm := &stubProjectMemberLinker{workspaceIDFor: map[string]string{"proj-other-ws": "ws-lain"}}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{}, pm)
+
+	_, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"a@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "proj-other-ws")
+	if !errors.Is(err, domain.ErrProjectNotFound) {
+		t.Errorf("err = %v, want domain.ErrProjectNotFound", err)
 	}
 }
 
@@ -411,6 +536,31 @@ func TestInvitationService_AcceptInvitation_NoProjectLink_DoesNotAssignPM(t *tes
 	}
 	if len(projects.assigned) != 0 {
 		t.Errorf("projects.assigned = %+v, want kosong untuk undangan tanpa project_id", projects.assigned)
+	}
+}
+
+// TestInvitationService_AcceptInvitation_ProjectLinked_EditorAddsProjectMember
+// -- role restructuring 2026-09-14: undangan editor/approver/viewer yang
+// tertaut project TERTENTU harus menghasilkan baris project_members
+// (is_scoped=false, orang ini SUDAH jadi workspace_members lewat undangan
+// yang sama), bukan cuma AssignPendingPM (yang khusus project_manager).
+func TestInvitationService_AcceptInvitation_ProjectLinked_EditorAddsProjectMember(t *testing.T) {
+	repo := &stubInvitationRepo{
+		findPendingResult: &repository.InvitationTarget{ID: "inv-1", Email: "budi@example.com", WorkspaceID: "ws-1", Role: "editor", ProjectID: "proj-1"},
+		acceptedUserID:    "user-new",
+	}
+	pm := &stubProjectMemberLinker{}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{userID: "kc-sub-1"}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{}, pm)
+
+	if _, err := svc.AcceptInvitation(context.Background(), nil, "raw-token", "Budi Santoso", "", "Password123!"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pm.added) != 1 {
+		t.Fatalf("pm.added = %+v, want satu entri", pm.added)
+	}
+	got := pm.added[0]
+	if got.projectID != "proj-1" || got.workspaceID != "ws-1" || got.userID != "user-new" || got.role != "editor" || got.isScoped {
+		t.Errorf("pm.added[0] = %+v, want proj-1/ws-1/user-new/editor/isScoped=false", got)
 	}
 }
 
