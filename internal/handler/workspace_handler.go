@@ -603,12 +603,13 @@ func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 	for i := range members {
 		m := &members[i]
 		data[i] = fiber.Map{
-			"user_id":      m.UserID,
-			"email":        m.Email,
-			"display_name": m.DisplayName,
-			"title":        m.Title,
-			"role":         m.Role,
-			"joined_at":    m.JoinedAt,
+			"user_id":       m.UserID,
+			"email":         m.Email,
+			"display_name":  m.DisplayName,
+			"title":         m.Title,
+			"role":          m.Role,
+			"joined_at":     m.JoinedAt,
+			"project_names": m.ProjectNames,
 		}
 	}
 
