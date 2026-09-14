@@ -39,19 +39,23 @@ func NewInvitationRepository() *InvitationRepository {
 
 // CreateInvitation menyimpan satu undangan (token plaintext TIDAK pernah
 // disimpan -- hanya hash-nya, lihat DATABASE_SCHEMA.md §5.30) dan mencatat
-// audit trail (S2-24, action 'invitation.created').
+// audit trail (S2-24, action 'invitation.created'). projectID kosong berarti
+// undangan biasa (admin_workspace/role lain); diisi kalau ini undangan
+// "Project Manager baru" dari Tambah Project (S4W susulan, migrasi
+// 20261017090000) -- ditautkan supaya AcceptInvitation tahu project mana
+// yang harus otomatis dapat pm_user_id begitu diterima.
 func (r *InvitationRepository) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	email, workspaceID, role, invitedByUserID, tokenHash string,
+	email, workspaceID, role, invitedByUserID, tokenHash, projectID string,
 	expiresAt time.Time,
 ) (string, error) {
 	var id string
 	err := exec.QueryRow(ctx, `
-		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at)
-		VALUES ($1, $2, $3::workspace_role, $4, $5, $6)
+		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at, project_id)
+		VALUES ($1, $2, $3::workspace_role, $4, $5, $6, NULLIF($7, '')::uuid)
 		RETURNING id
-	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt).Scan(&id)
+	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt, projectID).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("repository.CreateInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
@@ -134,6 +138,12 @@ type InvitationTarget struct {
 	Role              string
 	GroupID           string
 	IsExecutiveInvite bool
+	// ProjectID -- kosong kecuali ini undangan "Project Manager baru" yang
+	// tertaut ke satu project tertentu (migrasi 20261017090000). Dibaca
+	// InvitationService.AcceptInvitation untuk memanggil
+	// ProjectRepository.AssignPendingPM setelah workspace_members berhasil
+	// disisipkan.
+	ProjectID string
 	// DisplayName/Title -- pre-filled lewat "Kelola" GA SEBELUM aktivasi
 	// (Eksekutif saja, migrasi 20261010090000), "" kalau belum diisi.
 	// Halaman aktivasi memakainya sebagai default form yang tetap bisa
@@ -153,13 +163,13 @@ func (r *InvitationRepository) FindPendingByTokenHash(ctx context.Context, exec 
 	err := exec.QueryRow(ctx, `
 		SELECT id, email, COALESCE(workspace_id::text, ''), COALESCE(role::text, ''),
 		       COALESCE(group_id::text, ''), is_executive_invite,
-		       COALESCE(display_name, ''), COALESCE(title, '')
+		       COALESCE(display_name, ''), COALESCE(title, ''), COALESCE(project_id::text, '')
 		FROM user_invitations
 		WHERE token_hash = $1
 		  AND accepted_at IS NULL
 		  AND cancelled_at IS NULL
 		  AND expires_at > NOW()
-	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite, &t.DisplayName, &t.Title)
+	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite, &t.DisplayName, &t.Title, &t.ProjectID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.FindPendingByTokenHash: %w", domain.ErrInvitationNotFound)

@@ -16,30 +16,33 @@ import (
 // ProjectHandler -- S4-02/03, US-012.
 type ProjectHandler struct {
 	projects *service.ProjectService
+	accounts displayNameGetter
 	logger   *zap.Logger
 }
 
-func NewProjectHandler(projects *service.ProjectService, logger *zap.Logger) *ProjectHandler {
-	return &ProjectHandler{projects: projects, logger: logger}
+func NewProjectHandler(projects *service.ProjectService, accounts displayNameGetter, logger *zap.Logger) *ProjectHandler {
+	return &ProjectHandler{projects: projects, accounts: accounts, logger: logger}
 }
 
 func projectToMap(p *repository.Project) fiber.Map {
 	return fiber.Map{
-		"id":               p.ID,
-		"workspace_id":     p.WorkspaceID,
-		"name":             p.Name,
-		"code":             p.Code,
-		"pm_user_id":       p.PMUserID,
-		"pm_name":          p.PMName,
-		"pm_email":         p.PMEmail,
-		"is_archived":      p.IsArchived,
-		"member_count":     p.MemberCount,
-		"sprint_count":     p.SprintCount,
-		"task_count":       p.TaskCount,
-		"created_by_name":  p.CreatedByName,
-		"created_by_email": p.CreatedByEmail,
-		"created_at":       p.CreatedAt,
-		"archived_at":      p.ArchivedAt,
+		"id":                       p.ID,
+		"workspace_id":             p.WorkspaceID,
+		"name":                     p.Name,
+		"code":                     p.Code,
+		"pm_user_id":               p.PMUserID,
+		"pm_name":                  p.PMName,
+		"pm_email":                 p.PMEmail,
+		"is_archived":              p.IsArchived,
+		"member_count":             p.MemberCount,
+		"sprint_count":             p.SprintCount,
+		"task_count":               p.TaskCount,
+		"created_by_name":          p.CreatedByName,
+		"created_by_email":         p.CreatedByEmail,
+		"pm_pending_email":         p.PMPendingEmail,
+		"pm_pending_invitation_id": p.PMPendingInvitationID,
+		"created_at":               p.CreatedAt,
+		"archived_at":              p.ArchivedAt,
 	}
 }
 
@@ -47,10 +50,16 @@ type createProjectRequest struct {
 	Name     string `json:"name"`
 	Code     string `json:"code"`
 	PMUserID string `json:"pm_user_id"`
+	PMEmail  string `json:"pm_email"`
+	PMName   string `json:"pm_name"`
 }
 
-// Create menangani POST /workspaces/:wsId/projects (S4-02) -- digerbangi
-// middleware.RequireRole(admin_workspace, project_manager) di routing.
+// Create menangani POST /workspaces/:wsId/projects (S4-02, diperluas S4W
+// susulan) -- digerbangi middleware.RequireRole(admin_workspace,
+// project_manager) di routing. PM ditunjuk lewat PERSIS SATU dari
+// pm_user_id (member existing workspace ini) atau pm_email (+pm_name kalau
+// belum terdaftar) -- mutual exclusion ditegakkan di sini, sama pola
+// WorkspaceHandler.CreateWorkspace.
 func (h *ProjectHandler) Create(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -68,8 +77,17 @@ func (h *ProjectHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
+	if req.PMUserID != "" && req.PMEmail != "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "pm_user_id dan pm_email tidak boleh diisi bersamaan", nil))
+	}
 
-	p, err := h.projects.Create(c.Context(), exec, workspaceID, req.Name, req.Code, req.PMUserID, actorUserID, actorRole)
+	inviterName, err := h.accounts.GetDisplayName(c.Context(), actorUserID)
+	if err != nil {
+		h.logger.Error("gagal ambil nama actor untuk isi email undangan PM", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membuat project", nil))
+	}
+
+	p, err := h.projects.Create(c.Context(), exec, workspaceID, req.Name, req.Code, req.PMUserID, req.PMEmail, req.PMName, actorUserID, actorRole, inviterName)
 	if err != nil {
 		return h.mapProjectError(c, err, "Gagal membuat project")
 	}
@@ -98,13 +116,13 @@ func (h *ProjectHandler) List(c *fiber.Ctx) error {
 }
 
 type updateProjectRequest struct {
-	Name     string `json:"name"`
-	PMUserID string `json:"pm_user_id"`
+	Name string `json:"name"`
 }
 
-// Update menangani PUT /projects/:id (S4-02) -- TIDAK digerbangi
-// middleware role (route ini tidak punya :wsId), otorisasi penuh di
-// ProjectService.authorize.
+// Update menangani PUT /projects/:id (S4-02) -- ubah NAMA saja sejak S4W
+// susulan (PM dipindah ke AssignPM/RemovePM, seksi terpisah panel Kelola).
+// TIDAK digerbangi middleware role (route ini tidak punya :wsId),
+// otorisasi penuh di ProjectService.authorize.
 func (h *ProjectHandler) Update(c *fiber.Ctx) error {
 	actorUserID, _, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -127,10 +145,82 @@ func (h *ProjectHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
 
-	if err := h.projects.Update(c.Context(), exec, projectID, req.Name, req.PMUserID, actorUserID, claims.PlatformRole); err != nil {
+	if err := h.projects.Update(c.Context(), exec, projectID, req.Name, actorUserID, claims.PlatformRole); err != nil {
 		return h.mapProjectError(c, err, "Gagal mengubah project")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": projectID, "name": req.Name}))
+}
+
+type assignProjectPMRequest struct {
+	PMUserID string `json:"pm_user_id"`
+	PMEmail  string `json:"pm_email"`
+	PMName   string `json:"pm_name"`
+}
+
+// AssignPM menangani POST /projects/:id/pm (S4W susulan) -- tetapkan/ganti
+// PM, sama pola Create (existing member ATAU invite email baru). Dipakai
+// panel Kelola baik untuk mengisi project yang masih "menunggu PM" maupun
+// mengganti PM aktif.
+func (h *ProjectHandler) AssignPM(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectHandler.AssignPM dipanggil tanpa DBContextMiddleware -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectHandler.AssignPM dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	var req assignProjectPMRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if req.PMUserID != "" && req.PMEmail != "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "pm_user_id dan pm_email tidak boleh diisi bersamaan", nil))
+	}
+
+	inviterName, err := h.accounts.GetDisplayName(c.Context(), actorUserID)
+	if err != nil {
+		h.logger.Error("gagal ambil nama actor untuk isi email undangan PM", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menetapkan PM", nil))
+	}
+
+	if err := h.projects.AssignPM(c.Context(), exec, projectID, req.PMUserID, req.PMEmail, req.PMName, actorUserID, claims.PlatformRole, inviterName); err != nil {
+		return h.mapProjectError(c, err, "Gagal menetapkan PM")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": projectID}))
+}
+
+// RemovePM menangani DELETE /projects/:id/pm (S4W susulan) -- kosongkan PM
+// aktif tanpa pengganti, project masuk status "menunggu PM".
+func (h *ProjectHandler) RemovePM(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectHandler.RemovePM dipanggil tanpa DBContextMiddleware -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectHandler.RemovePM dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	if err := h.projects.RemovePM(c.Context(), exec, projectID, actorUserID, claims.PlatformRole); err != nil {
+		return h.mapProjectError(c, err, "Gagal menghapus PM")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": projectID}))
 }
 
 type updateProjectSettingsRequest struct {
@@ -252,7 +342,7 @@ func (h *ProjectHandler) Restore(c *fiber.Ctx) error {
 func (h *ProjectHandler) mapProjectError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- nama, kode (2-5 huruf), dan Project Manager wajib diisi dengan benar", nil))
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- nama, kode (2-5 huruf), dan Project Manager (member existing atau email+nama untuk undangan baru) wajib diisi dengan benar", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas project ini.", nil))
 	case errors.Is(err, domain.ErrProjectNotFound):

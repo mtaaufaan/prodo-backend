@@ -13,12 +13,18 @@ import (
 type fakeProjectMemberRepo struct {
 	workspaceID    map[string]string
 	getWsIDErr     error
+	hasPM          bool
+	hasPMErr       error
 	addErr         error
 	updateErr      error
 	removeErr      error
 	listResult     []repository.ProjectMember
 	crossOrgResult []repository.CrossOrgMembership
 	revokeCount    int64
+}
+
+func (f *fakeProjectMemberRepo) HasPM(_ context.Context, _ db.Executor, _ string) (bool, error) {
+	return f.hasPM, f.hasPMErr
 }
 
 func (f *fakeProjectMemberRepo) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
@@ -57,10 +63,11 @@ func (f *fakeProjectMemberRepo) RevokeAllScopedForUser(_ context.Context, _ db.E
 }
 
 type fakeProjectRoleChecker struct {
-	role    string
-	roleErr error
-	orgID   string
-	orgErr  error
+	role      string
+	roleErr   error
+	orgID     string
+	orgErr    error
+	assignErr error
 }
 
 func (f *fakeProjectRoleChecker) GetMemberRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
@@ -71,8 +78,15 @@ func (f *fakeProjectRoleChecker) GetWorkspaceOrgID(_ context.Context, _ db.Execu
 	return f.orgID, f.orgErr
 }
 
+func (f *fakeProjectRoleChecker) AssignRole(_ context.Context, _ db.Executor, _, _, role string, _ *string, _, _ string) (*RoleChangeResult, error) {
+	if f.assignErr != nil {
+		return nil, f.assignErr
+	}
+	return &RoleChangeResult{NewRole: role}, nil
+}
+
 func TestProjectMemberService_AddMember_PlatformAdminBypass(t *testing.T) {
-	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, hasPM: true}
 	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "pa-1", "platform_admin")
@@ -82,12 +96,25 @@ func TestProjectMemberService_AddMember_PlatformAdminBypass(t *testing.T) {
 }
 
 func TestProjectMemberService_AddMember_WorkspacePM_Allowed(t *testing.T) {
-	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, hasPM: true}
 	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "pm-1", "member")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestProjectMemberService_AddMember_RejectsWhenAwaitingPM -- S4W susulan:
+// project yang masih "menunggu PM" (undangan project_manager belum
+// diterima, HasPM false) tidak boleh menambah member project-scoped lain.
+func TestProjectMemberService_AddMember_RejectsWhenAwaitingPM(t *testing.T) {
+	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, hasPM: false}
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""})
+
+	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "pa-1", "platform_admin")
+	if !errors.Is(err, domain.ErrProjectAwaitingPM) {
+		t.Errorf("err = %v, want wrapped domain.ErrProjectAwaitingPM", err)
 	}
 }
 

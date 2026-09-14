@@ -28,7 +28,7 @@ const invitationTTL = 72 * time.Hour
 // terautentikasi biasa), untuk AcceptInvitation dari konteks khusus rute
 // publik (lihat komentar AcceptInvitation).
 type invitationRepository interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID string, expiresAt time.Time) (string, error)
 	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*repository.InvitationTarget, error)
 	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, workspaceID, role string) (string, error)
@@ -62,6 +62,16 @@ type workspaceAssigner interface {
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string) (*RoleChangeResult, error)
 }
 
+// projectPMAssigner -- interface didefinisikan di consumer, diimplementasikan
+// *ProjectRepository.AssignPendingPM (S4W susulan, migrasi
+// 20261017090000) -- dipanggil AcceptInvitation begitu undangan
+// project_manager yang tertaut project TERTENTU diterima, supaya
+// projects.pm_user_id project itu otomatis terisi tanpa langkah manual
+// tambahan.
+type projectPMAssigner interface {
+	AssignPendingPM(ctx context.Context, exec db.Executor, projectID, userID string) error
+}
+
 // InvitationService menangani lifecycle undangan workspace (S2-17/18/20/
 // 21/22/23, US-006).
 type InvitationService struct {
@@ -70,6 +80,7 @@ type InvitationService struct {
 	keycloak   keycloak.AdminClient
 	users      existingUserFinder
 	assigner   workspaceAssigner
+	projects   projectPMAssigner
 	logger     *zap.Logger
 	appBaseURL string
 }
@@ -80,10 +91,11 @@ func NewInvitationService(
 	kc keycloak.AdminClient,
 	users existingUserFinder,
 	assigner workspaceAssigner,
+	projects projectPMAssigner,
 	logger *zap.Logger,
 	appBaseURL string,
 ) *InvitationService {
-	return &InvitationService{repo: repo, emailer: emailer, keycloak: kc, users: users, assigner: assigner, logger: logger, appBaseURL: appBaseURL}
+	return &InvitationService{repo: repo, emailer: emailer, keycloak: kc, users: users, assigner: assigner, projects: projects, logger: logger, appBaseURL: appBaseURL}
 }
 
 // Invitation -- hasil satu undangan yang berhasil dibuat.
@@ -99,10 +111,13 @@ type Invitation struct {
 // 72 jam) + kirim email berisi link penerimaan. workspaceName/inviterName
 // dipakai untuk isi email, disuplai caller (handler yang sudah resolve
 // dari param request) -- service ini tidak query ulang nama workspace/user.
+// projectID kosong untuk undangan biasa; diisi kalau ini undangan "Project
+// Manager baru" tertaut SATU project tertentu (S4W susulan) -- lihat
+// AcceptInvitation.
 func (s *InvitationService) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	email, workspaceID, role, invitedByUserID, workspaceName, inviterName string,
+	email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID string,
 ) (*Invitation, error) {
 	rawToken, tokenHash, err := generateActivationToken()
 	if err != nil {
@@ -110,7 +125,7 @@ func (s *InvitationService) CreateInvitation(
 	}
 	expiresAt := time.Now().Add(invitationTTL)
 
-	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt)
+	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, tokenHash, projectID, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateInvitation: %w", err)
 	}
@@ -214,7 +229,7 @@ func (s *InvitationService) CreateBulkInvitations(
 			var inv *Invitation
 			err := withSavepoint(ctx, exec, savepoint, func() error {
 				var err error
-				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName)
+				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName, "")
 				return err
 			})
 			if err != nil {
@@ -345,6 +360,19 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 			zap.Error(err),
 		)
 		return nil, fmt.Errorf("service.AcceptInvitation: %w", err)
+	}
+
+	// Undangan "Project Manager baru" tertaut project tertentu (S4W susulan)
+	// -- project itu otomatis dapat pm_user_id sekarang, tidak perlu
+	// langkah manual tambahan. Best-effort dalam transaksi yang sama:
+	// kegagalan di sini TIDAK membatalkan penerimaan undangan yang sudah
+	// berhasil (member tetap masuk workspace) -- cuma di-log, project tetap
+	// "menunggu PM" dan AW bisa assign manual lewat panel Kelola.
+	if target.ProjectID != "" && s.projects != nil {
+		if err := s.projects.AssignPendingPM(ctx, exec, target.ProjectID, userID); err != nil {
+			s.logger.Error("undangan diterima tapi gagal menautkan sebagai PM project",
+				zap.String("project_id", target.ProjectID), zap.String("user_id", userID), zap.Error(err))
+		}
 	}
 
 	return &AcceptedInvitation{UserID: userID, Email: target.Email, WorkspaceID: target.WorkspaceID, Role: target.Role}, nil

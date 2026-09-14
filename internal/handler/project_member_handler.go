@@ -206,6 +206,8 @@ func (h *ProjectMemberHandler) mapProjectMemberError(c *fiber.Ctx, err error, fa
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_MEMBER_ALREADY_EXISTS", "User sudah jadi member project ini", nil))
 	case errors.Is(err, domain.ErrProjectMemberNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Project member tidak ditemukan", nil))
+	case errors.Is(err, domain.ErrProjectAwaitingPM):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PROJECT_AWAITING_PM", "Project ini masih menunggu Project Manager menerima undangan sebelum bisa menambah member lain", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))
