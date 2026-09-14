@@ -40,10 +40,19 @@ func NewInvitationRepository() *InvitationRepository {
 // CreateInvitation menyimpan satu undangan (token plaintext TIDAK pernah
 // disimpan -- hanya hash-nya, lihat DATABASE_SCHEMA.md §5.30) dan mencatat
 // audit trail (S2-24, action 'invitation.created'). projectID kosong berarti
-// undangan biasa (admin_workspace/role lain); diisi kalau ini undangan
-// "Project Manager baru" dari Tambah Project (S4W susulan, migrasi
-// 20261017090000) -- ditautkan supaya AcceptInvitation tahu project mana
-// yang harus otomatis dapat pm_user_id begitu diterima.
+// undangan biasa (admin_workspace/division_viewer/role lain); diisi kalau
+// ini undangan project_manager/editor/approver/viewer tertaut SATU project
+// tertentu (S4W susulan, migrasi 20261017090000) -- ditautkan supaya
+// AcceptInvitation tahu project mana yang harus otomatis dapat
+// pm_user_id/baris project_members begitu diterima.
+//
+// uq_invitation_pending (workspace_id, email) cuma izinkan SATU undangan
+// pending per email per workspace, APAPUN role/project-nya -- ON CONFLICT
+// DO UPDATE dipakai (bukan INSERT polos + error) supaya undangan baru
+// dengan role/project berbeda MENIMPA undangan lama yang masih pending
+// (dikonfirmasi user 2026-09-14: token lama otomatis invalid, sama seperti
+// Resend, bukan diblokir dengan pesan error). id baris TETAP SAMA (UPDATE,
+// bukan baris baru) -- caller tidak perlu tahu ini insert atau reuse.
 func (r *InvitationRepository) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
@@ -54,6 +63,9 @@ func (r *InvitationRepository) CreateInvitation(
 	err := exec.QueryRow(ctx, `
 		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at, project_id)
 		VALUES ($1, $2, $3::workspace_role, $4, $5, $6, NULLIF($7, '')::uuid)
+		ON CONFLICT (workspace_id, email) WHERE accepted_at IS NULL AND cancelled_at IS NULL
+		DO UPDATE SET role = EXCLUDED.role, invited_by = EXCLUDED.invited_by, token_hash = EXCLUDED.token_hash,
+		              expires_at = EXCLUDED.expires_at, project_id = EXCLUDED.project_id, created_at = NOW()
 		RETURNING id
 	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt, projectID).Scan(&id)
 	if err != nil {
