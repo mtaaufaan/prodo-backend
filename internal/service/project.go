@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
@@ -23,7 +24,7 @@ type projectRepository interface {
 	Create(ctx context.Context, exec db.Executor, workspaceID, name, code, pmUserID, actorID, actorRole string) (*repository.Project, error)
 	List(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Project, error)
 	NameExists(ctx context.Context, exec db.Executor, workspaceID, name, excludeProjectID string) (bool, error)
-	Update(ctx context.Context, exec db.Executor, projectID, name, pmUserID, actorID, actorRole string) error
+	Update(ctx context.Context, exec db.Executor, projectID, name, status, pmUserID, actorID, actorRole string, endDate *time.Time) error
 	SetArchived(ctx context.Context, exec db.Executor, projectID string, archive bool, actorID, actorRole string) error
 	SoftDelete(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	Restore(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
@@ -296,14 +297,16 @@ func (s *ProjectService) List(ctx context.Context, exec db.Executor, workspaceID
 	return list, nil
 }
 
-// Update mengubah nama project (S4-02). PM penanggung jawab TIDAK LAGI
+// Update mengubah nama, status siklus hidup, dan/atau tanggal berakhir
+// project (S4-02, susulan 2026-10-18). PM penanggung jawab TIDAK LAGI
 // diubah lewat sini sejak S4W susulan -- lihat AssignPM/RemovePM
 // (panel Kelola punya seksi PM sendiri, terpisah dari "Simpan Perubahan"
 // nama, sama pola ManageWorkspaceModal yang memisahkan ubah nama vs
-// kelola admin).
-func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID, name, actorID, actorRole string) error {
+// kelola admin). status divalidasi di handler (enum tetap, sama pola
+// validWorkspaceRoles) -- di sini cukup dipastikan tidak kosong.
+func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID, name, status, actorID, actorRole string, endDate *time.Time) error {
 	name = strings.TrimSpace(name)
-	if projectID == "" || name == "" {
+	if projectID == "" || name == "" || status == "" {
 		return fmt.Errorf("service.Update: %w", domain.ErrInvalidInput)
 	}
 	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
@@ -317,7 +320,7 @@ func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID
 	if nameTaken {
 		return fmt.Errorf("service.Update: %w", domain.ErrProjectNameTaken)
 	}
-	if err := s.repo.Update(ctx, exec, projectID, name, "", actorID, actorRole); err != nil {
+	if err := s.repo.Update(ctx, exec, projectID, name, status, "", actorID, actorRole, endDate); err != nil {
 		return fmt.Errorf("service.Update: %w", err)
 	}
 	s.dispatchWebhook(ctx, exec, workspaceID, "project.updated", map[string]any{"id": projectID, "name": name})

@@ -40,7 +40,9 @@ type taskRequest struct {
 	AssigneeIDs    []string        `json:"assignee_ids"`
 }
 
-func parseTaskDate(raw *string) (*time.Time, error) {
+// parseDateOnly -- format "YYYY-MM-DD" polos (bukan RFC3339), dipakai task
+// due_date dan (susulan) project end_date, sama package handler.
+func parseDateOnly(raw *string) (*time.Time, error) {
 	if raw == nil || *raw == "" {
 		return nil, nil
 	}
@@ -67,7 +69,7 @@ func (h *TaskHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	dueDate, err := parseTaskDate(body.DueDate)
+	dueDate, err := parseDateOnly(body.DueDate)
 	if err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format due_date harus YYYY-MM-DD", nil))
 	}
@@ -138,7 +140,7 @@ func (h *TaskHandler) Update(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	dueDate, err := parseTaskDate(body.DueDate)
+	dueDate, err := parseDateOnly(body.DueDate)
 	if err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format due_date harus YYYY-MM-DD", nil))
 	}
