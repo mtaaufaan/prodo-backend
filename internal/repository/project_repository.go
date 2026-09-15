@@ -384,10 +384,23 @@ func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projec
 	if newPM == "" {
 		newPM = oldPM
 	}
+	// newPMArg (susulan 2026-09-15, ditemukan lewat verifikasi live dirty
+	// notice ManageProjectModal -- bug PRA-EXISTING, tidak terkait
+	// perubahan itu) -- newPM bisa TETAP kosong di titik ini kalau project
+	// belum punya PM sama sekali (pm_user_id NULL, oldPM juga "" lewat
+	// COALESCE di atas) DAN pmUserID request juga kosong (rename nama saja,
+	// jalur Simpan Perubahan biasa). pm_user_id kolom uuid -- kirim string
+	// kosong lewat exec.Exec bikin Postgres menolak dengan "invalid input
+	// syntax for type uuid" (22P02), bukan NULL. any(nil) supaya pgx
+	// mem-bind SQL NULL yang benar saat memang belum ada PM.
+	var newPMArg any = newPM
+	if newPM == "" {
+		newPMArg = nil
+	}
 	tag, err := exec.Exec(ctx, `
 		UPDATE projects SET name = $2, pm_user_id = $3, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
-	`, projectID, name, newPM)
+	`, projectID, name, newPMArg)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", classifyUniqueViolation(err, domain.ErrProjectCodeTaken))
 	}
