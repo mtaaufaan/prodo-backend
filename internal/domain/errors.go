@@ -198,6 +198,21 @@ var (
 	// sebelum bisa memindahkan orang ini ke role lain.
 	ErrProjectWouldLoseLastPM = errors.New("changing this role would leave a project without a project manager")
 
+	// ErrCannotRemoveLastProjectManager dikembalikan ProjectService.RemovePM
+	// (susulan 2026-09-15, ditemukan user: "kenapa pada project PM bisa
+	// dicabut sampai habis?") -- project cuma punya SATU slot PM
+	// (pm_user_id tunggal, beda dari admin_workspace yang bisa banyak),
+	// jadi "PM aktif ada" berarti SELALU "PM terakhir/satu-satunya".
+	// Menghapus PM aktif tanpa pengganti lewat tombol "Cabut" ditolak --
+	// AW harus pakai "+ Tetapkan PM" (ganti langsung) supaya project tidak
+	// pernah benar-benar kosong PM setelah pernah punya satu, konsisten
+	// dengan Tambah Project yang MEWAJIBKAN PM (existing atau undangan)
+	// sejak awal. Sama pola ErrCannotRemoveLastWorkspaceAdmin, TIDAK
+	// berlaku untuk membatalkan undangan PM pending (project yang memang
+	// belum pernah punya PM aktif sama sekali tetap boleh dibatalkan
+	// undangannya).
+	ErrCannotRemoveLastProjectManager = errors.New("cannot remove the only project manager without a replacement")
+
 	// ErrProjectNotFound dikembalikan saat projects.id tidak ditemukan
 	// (S3-21/22/23).
 	ErrProjectNotFound = errors.New("project not found")
