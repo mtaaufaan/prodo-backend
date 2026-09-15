@@ -287,6 +287,31 @@ func (r *ProjectRepository) RemovePM(ctx context.Context, exec db.Executor, proj
 	return nil
 }
 
+// NotifyPMRemoved (susulan 2026-09-15, dikonfirmasi user "jangan lupa
+// mengeluarkan notifikasi sesuai standar sebelumnya") -- in-app
+// notification ke user yang kehilangan status PM SATU project (dipanggil
+// RBACService.RemoveMember, kasus member itu PM di LEBIH dari satu
+// project -- lihat komentar di sana). RemovePM sendiri SENGAJA tidak
+// diubah supaya tombol "Hapus PM" existing di Kelola Project (gap
+// terpisah, di luar cakupan) tidak ikut berubah perilakunya tanpa
+// diminta. Pola sama AssignRole/AddMember -- insert langsung, tidak ada
+// NotificationRepository terpisah di codebase ini.
+func (r *ProjectRepository) NotifyPMRemoved(ctx context.Context, exec db.Executor, projectID, userID, actorID string) error {
+	var name string
+	if err := exec.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`, projectID).Scan(&name); err != nil {
+		return fmt.Errorf("repository.NotifyPMRemoved: %w", err)
+	}
+	title := "Tidak Lagi Jadi Project Manager"
+	body := fmt.Sprintf("Anda tidak lagi menjadi Project Manager untuk project %s.", name)
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+		VALUES ($1, $2, 'project_pm_removed', 'project', $3, $4, $5)
+	`, userID, actorID, projectID, title, body); err != nil {
+		return fmt.Errorf("repository.NotifyPMRemoved: %w", err)
+	}
+	return nil
+}
+
 // SetPM (S4W susulan) menetapkan pm_user_id TANPA syarat (beda dari
 // AssignPendingPM yang cuma jalan kalau sebelumnya NULL) -- dipakai
 // AssignPM saat AW eksplisit menetapkan/mengganti PM lewat panel Kelola,

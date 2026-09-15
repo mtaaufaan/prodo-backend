@@ -41,6 +41,10 @@ type projectPMRepository interface {
 	// pada role project-scoped, dikonfirmasi user) untuk melepas PM dari
 	// SATU project saja saat member itu PM di LEBIH dari satu project.
 	RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
+	// NotifyPMRemoved -- in-app notification ke target (susulan
+	// 2026-09-15, dikonfirmasi user "jangan lupa mengeluarkan notifikasi
+	// sesuai standar sebelumnya") setelah RemovePM di atas berhasil.
+	NotifyPMRemoved(ctx context.Context, exec db.Executor, projectID, userID, actorID string) error
 }
 
 // projectMembershipRepository -- interface didefinisikan di consumer,
@@ -52,6 +56,14 @@ type projectMembershipRepository interface {
 	ListProjectIDsForUserInWorkspace(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]string, error)
 	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	AddMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error
+	// NotifyMemberRemoved -- in-app notification ke target (susulan
+	// 2026-09-15, dikonfirmasi user "jangan lupa mengeluarkan notifikasi
+	// sesuai standar sebelumnya"), dipakai HANYA oleh RemoveMember
+	// (RBACService) setelah RemoveMember di atas berhasil melepas SATU
+	// project -- TIDAK dipanggil dari move semantics AssignRole (lihat
+	// komentar NotifyMemberRemoved di repository, akan jadi notifikasi
+	// ganda dengan "Role Anda diperbarui").
+	NotifyMemberRemoved(ctx context.Context, exec db.Executor, projectID, userID, actorID string) error
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -298,6 +310,9 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 				if err := s.projects.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
 					return fmt.Errorf("service.RemoveMember: lepas PM dari project: %w", err)
 				}
+				if err := s.projects.NotifyPMRemoved(ctx, exec, projectID, userID, actorID); err != nil {
+					return fmt.Errorf("service.RemoveMember: notifikasi PM dilepas: %w", err)
+				}
 				return nil
 			}
 		case "editor", "approver", "viewer":
@@ -308,6 +323,9 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 			if len(projectIDs) > 1 {
 				if err := s.projectMembers.RemoveMember(ctx, exec, projectID, userID, actorID, actorRole); err != nil {
 					return fmt.Errorf("service.RemoveMember: lepas dari project: %w", err)
+				}
+				if err := s.projectMembers.NotifyMemberRemoved(ctx, exec, projectID, userID, actorID); err != nil {
+					return fmt.Errorf("service.RemoveMember: notifikasi dilepas dari project: %w", err)
 				}
 				return nil
 			}

@@ -103,6 +103,9 @@ type stubProjectPMRepo struct {
 
 	removePMErr   error
 	removePMCalls []string
+
+	notifyPMRemovedErr   error
+	notifyPMRemovedCalls []struct{ projectID, userID string }
 }
 
 func (r *stubProjectPMRepo) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
@@ -137,6 +140,14 @@ func (r *stubProjectPMRepo) RemovePM(_ context.Context, _ db.Executor, projectID
 	return nil
 }
 
+func (r *stubProjectPMRepo) NotifyPMRemoved(_ context.Context, _ db.Executor, projectID, userID, _ string) error {
+	if r.notifyPMRemovedErr != nil {
+		return r.notifyPMRemovedErr
+	}
+	r.notifyPMRemovedCalls = append(r.notifyPMRemovedCalls, struct{ projectID, userID string }{projectID, userID})
+	return nil
+}
+
 // stubProjectMembershipRepo -- projectMembershipRepository palsu.
 type stubProjectMembershipRepo struct {
 	existingProjectIDs []string
@@ -147,6 +158,9 @@ type stubProjectMembershipRepo struct {
 
 	addCall []struct{ projectID, userID, role string }
 	addErr  error
+
+	notifyMemberRemovedErr   error
+	notifyMemberRemovedCalls []struct{ projectID, userID string }
 }
 
 func (r *stubProjectMembershipRepo) ListProjectIDsForUserInWorkspace(_ context.Context, _ db.Executor, _, _ string) ([]string, error) {
@@ -158,6 +172,14 @@ func (r *stubProjectMembershipRepo) RemoveMember(_ context.Context, _ db.Executo
 		return r.removeErr
 	}
 	r.removedProjectIDs = append(r.removedProjectIDs, projectID)
+	return nil
+}
+
+func (r *stubProjectMembershipRepo) NotifyMemberRemoved(_ context.Context, _ db.Executor, projectID, userID, _ string) error {
+	if r.notifyMemberRemovedErr != nil {
+		return r.notifyMemberRemovedErr
+	}
+	r.notifyMemberRemovedCalls = append(r.notifyMemberRemovedCalls, struct{ projectID, userID string }{projectID, userID})
 	return nil
 }
 
@@ -572,6 +594,9 @@ func TestRBACService_RemoveMember_EditorSingleProjectTie_FullRemoval(t *testing.
 	if len(projectMembers.removedProjectIDs) != 0 {
 		t.Error("projectMembers.RemoveMember tidak boleh terpanggil terpisah -- DELETE workspace_members sudah cukup")
 	}
+	if len(projectMembers.notifyMemberRemovedCalls) != 0 {
+		t.Error("NotifyMemberRemoved tidak boleh terpanggil -- full removal tidak butuh notifikasi terpisah")
+	}
 }
 
 // Role project-scoped terkait LEBIH dari satu project (jarang) -- cuma
@@ -591,6 +616,10 @@ func TestRBACService_RemoveMember_EditorMultiProjectTie_PartialOnly(t *testing.T
 	if repo.removedUserID != "" {
 		t.Error("repo.RemoveMember (DELETE workspace_members) TIDAK boleh terpanggil -- member masih terkait proj-2")
 	}
+	if len(projectMembers.notifyMemberRemovedCalls) != 1 || projectMembers.notifyMemberRemovedCalls[0].projectID != "proj-1" ||
+		projectMembers.notifyMemberRemovedCalls[0].userID != "user-1" {
+		t.Errorf("notifyMemberRemovedCalls = %+v, want satu entri proj-1/user-1", projectMembers.notifyMemberRemovedCalls)
+	}
 }
 
 // PM cuma memimpin SATU project -- hasilnya SAMA seperti sebelumnya
@@ -608,6 +637,9 @@ func TestRBACService_RemoveMember_PMSingleProjectTie_FullRemoval(t *testing.T) {
 	}
 	if len(projects.removePMCalls) != 0 {
 		t.Error("RemovePM tidak boleh terpanggil terpisah -- DELETE workspace_members sudah cukup")
+	}
+	if len(projects.notifyPMRemovedCalls) != 0 {
+		t.Error("NotifyPMRemoved tidak boleh terpanggil -- full removal tidak butuh notifikasi terpisah")
 	}
 }
 
@@ -628,6 +660,10 @@ func TestRBACService_RemoveMember_PMMultiProjectTie_PartialOnly(t *testing.T) {
 	}
 	if repo.removedUserID != "" {
 		t.Error("repo.RemoveMember (DELETE workspace_members) TIDAK boleh terpanggil -- masih PM di proj-2")
+	}
+	if len(projects.notifyPMRemovedCalls) != 1 || projects.notifyPMRemovedCalls[0].projectID != "proj-1" ||
+		projects.notifyPMRemovedCalls[0].userID != "user-1" {
+		t.Errorf("notifyPMRemovedCalls = %+v, want satu entri proj-1/user-1", projects.notifyPMRemovedCalls)
 	}
 }
 
