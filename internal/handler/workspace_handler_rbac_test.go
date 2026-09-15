@@ -100,6 +100,12 @@ func (stubProjectRepo) ListPMProjectNames(context.Context, db.Executor, string, 
 func (stubProjectRepo) SetPM(context.Context, db.Executor, string, string, string, string) error {
 	return nil
 }
+func (stubProjectRepo) RemovePM(context.Context, db.Executor, string, string, string) error {
+	return nil
+}
+func (stubProjectRepo) NotifyPMRemoved(context.Context, db.Executor, string, string, string) error {
+	return nil
+}
 
 type stubProjectMemberRepo struct{}
 
@@ -107,6 +113,9 @@ func (stubProjectMemberRepo) ListProjectIDsForUserInWorkspace(context.Context, d
 	return nil, nil
 }
 func (stubProjectMemberRepo) RemoveMember(context.Context, db.Executor, string, string, string, string) error {
+	return nil
+}
+func (stubProjectMemberRepo) NotifyMemberRemoved(context.Context, db.Executor, string, string, string) error {
 	return nil
 }
 func (stubProjectMemberRepo) AddMember(context.Context, db.Executor, string, string, string, string, bool, string, string) error {
