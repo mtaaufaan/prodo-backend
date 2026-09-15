@@ -458,3 +458,48 @@ func TestProjectService_RemovePM_ClearsAndCancelsPending(t *testing.T) {
 		t.Errorf("cancelCalls = %+v, want satu entri inv-1", invites.cancelCalls)
 	}
 }
+
+// Susulan 2026-10-18 ("saat input tambah PM, apabila sudah pernah
+// dimasukkan, setelah selesai input email, agar memunculkan nama di
+// input nama") -- LookupPMByEmail preview baca-saja, tidak menetapkan
+// apa pun (repo.Update/AssignPM tidak boleh terpanggil).
+func TestProjectService_LookupPMByEmail_Found(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{userID: "user-existing"}, &fakeProjectPMInviter{})
+
+	userID, err := svc.LookupPMByEmail(context.Background(), nil, "proj-1", "existing@contoh.co.id", "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if userID != "user-existing" {
+		t.Errorf("userID = %q, want user-existing", userID)
+	}
+}
+
+// email belum terdaftar -- userID kosong, BUKAN error (kasus normal, AW
+// lanjut isi Nama manual untuk jalur undang-baru).
+func TestProjectService_LookupPMByEmail_NotFound(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
+
+	userID, err := svc.LookupPMByEmail(context.Background(), nil, "proj-1", "belum-terdaftar@contoh.co.id", "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if userID != "" {
+		t.Errorf("userID = %q, want kosong (belum terdaftar)", userID)
+	}
+}
+
+// Otorisasi sama seperti AssignPM -- actor yang bukan AW/PM/org-access
+// ditolak SEBELUM lookup email terpanggil sama sekali.
+func TestProjectService_LookupPMByEmail_ForbiddenForNonAWPM(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	contacts := &stubExistingUserFinder{userID: "user-existing"}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"}, contacts, &fakeProjectPMInviter{})
+
+	_, err := svc.LookupPMByEmail(context.Background(), nil, "proj-1", "existing@contoh.co.id", "viewer-1", "member")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want domain.ErrForbidden", err)
+	}
+}

@@ -657,6 +657,7 @@ func run() error {
 	// panel Kelola punya seksi PM sendiri (assign/ganti/hapus).
 	v1.Post("/projects/:id/pm", jwtAuth, dbCtx, projectHandler.AssignPM)
 	v1.Delete("/projects/:id/pm", jwtAuth, dbCtx, projectHandler.RemovePM)
+	v1.Get("/projects/:id/pm-lookup", jwtAuth, dbCtx, projectHandler.LookupPM)
 	v1.Put("/projects/:id/archive", jwtAuth, dbCtx, projectHandler.Archive)
 	v1.Put("/projects/:id/unarchive", jwtAuth, dbCtx, projectHandler.Unarchive)
 	v1.Delete("/projects/:id", jwtAuth, dbCtx, projectHandler.Delete)

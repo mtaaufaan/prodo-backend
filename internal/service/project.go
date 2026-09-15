@@ -388,6 +388,32 @@ func (s *ProjectService) RemovePM(ctx context.Context, exec db.Executor, project
 	return nil
 }
 
+// LookupPMByEmail (susulan 2026-10-18, diminta user "saat input tambah PM,
+// apabila sudah pernah dimasukkan, setelah selesai input email, agar
+// memunculkan nama di input nama") -- preview BACA-SAJA: apakah email yang
+// sedang diketik AW di form "+ Tetapkan PM" sudah terdaftar user PRODO,
+// TANPA benar-benar menetapkan apa pun. Otorisasi SAMA seperti AssignPM
+// (lewat s.authorize). userID kosong ("") berarti belum terdaftar -- BUKAN
+// error, supaya FE bisa bedakan "belum terdaftar" (kasus normal, AW lanjut
+// isi Nama manual untuk jalur undang-baru) dari kegagalan permintaan
+// sungguhan.
+func (s *ProjectService) LookupPMByEmail(ctx context.Context, exec db.Executor, projectID, email, actorID, actorRole string) (string, error) {
+	if projectID == "" || email == "" {
+		return "", fmt.Errorf("service.LookupPMByEmail: %w", domain.ErrInvalidInput)
+	}
+	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+		return "", err
+	}
+	userID, err := s.contacts.FindUserIDByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("service.LookupPMByEmail: %w", err)
+	}
+	return userID, nil
+}
+
 // SetAllowEditorStoryPoints -- PUT /projects/:id/settings (Task Management
 // Core Phase 4, US-018a/S4-56). Gate sama seperti Update (PM/AW/org-access) --
 // reuse s.authorize, tidak ada gate baru.
