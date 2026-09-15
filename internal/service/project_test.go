@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -20,10 +21,14 @@ type fakeProjectRepo struct {
 	createErr   error
 	listResult  []repository.Project
 	updateErr   error
-	archiveErr  error
-	deleteErr   error
-	restoreErr  error
-	nameExists  bool
+	updateCalls []struct {
+		name, status string
+		endDate      *time.Time
+	}
+	archiveErr error
+	deleteErr  error
+	restoreErr error
+	nameExists bool
 
 	assignPendingPMErr   error
 	assignPendingPMCalls []recordedPMSet
@@ -68,7 +73,11 @@ func (f *fakeProjectRepo) NameExists(_ context.Context, _ db.Executor, _, _, _ s
 	return f.nameExists, nil
 }
 
-func (f *fakeProjectRepo) Update(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
+func (f *fakeProjectRepo) Update(_ context.Context, _ db.Executor, _, name, status, _, _, _ string, endDate *time.Time) error {
+	f.updateCalls = append(f.updateCalls, struct {
+		name, status string
+		endDate      *time.Time
+	}{name, status, endDate})
 	return f.updateErr
 }
 
@@ -295,7 +304,7 @@ func TestProjectService_Update_RejectsDuplicateName(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, nameExists: true}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
 
-	err := svc.Update(context.Background(), nil, "proj-1", "Nama Bentrok", "aw-1", "member")
+	err := svc.Update(context.Background(), nil, "proj-1", "Nama Bentrok", "not_started", "aw-1", "member", nil)
 	if !errors.Is(err, domain.ErrProjectNameTaken) {
 		t.Fatalf("expected ErrProjectNameTaken, got %v", err)
 	}
@@ -305,9 +314,45 @@ func TestProjectService_Update_ForbiddenForNonAWPM(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
 
-	err := svc.Update(context.Background(), nil, "proj-1", "Nama Baru", "viewer-1", "member")
+	err := svc.Update(context.Background(), nil, "proj-1", "Nama Baru", "not_started", "viewer-1", "member", nil)
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+// Susulan 2026-10-18 ("tambahkan status project, dan tanggal berakhir
+// project"): status/endDate diteruskan apa adanya ke repo (whole-form
+// save, sama kontrak dengan name -- bukan partial patch seperti pm_user_id).
+func TestProjectService_Update_PassesStatusAndEndDateThrough(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
+
+	end := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	if err := svc.Update(context.Background(), nil, "proj-1", "Rilis Q4", "in_progress", "aw-1", "member", &end); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.updateCalls) != 1 {
+		t.Fatalf("Update (repo) dipanggil %d kali, want 1", len(repo.updateCalls))
+	}
+	call := repo.updateCalls[0]
+	if call.status != "in_progress" || call.endDate == nil || !call.endDate.Equal(end) {
+		t.Errorf("updateCalls[0] = %+v, want status=in_progress endDate=%v", call, end)
+	}
+}
+
+// status kosong ditolak SEBELUM repo.Update terpanggil -- validasi enum
+// sendiri ada di handler (validProjectStatuses), tapi service tetap
+// menjaga invariant "tidak boleh kosong" untuk pemanggil lain.
+func TestProjectService_Update_EmptyStatus_Rejected(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
+
+	err := svc.Update(context.Background(), nil, "proj-1", "Rilis Q4", "", "aw-1", "member", nil)
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
+	}
+	if len(repo.updateCalls) != 0 {
+		t.Error("repo.Update tidak boleh terpanggil kalau status kosong")
 	}
 }
 
@@ -411,5 +456,50 @@ func TestProjectService_RemovePM_ClearsAndCancelsPending(t *testing.T) {
 	}
 	if len(invites.cancelCalls) != 1 || invites.cancelCalls[0].invitationID != "inv-1" {
 		t.Errorf("cancelCalls = %+v, want satu entri inv-1", invites.cancelCalls)
+	}
+}
+
+// Susulan 2026-10-18 ("saat input tambah PM, apabila sudah pernah
+// dimasukkan, setelah selesai input email, agar memunculkan nama di
+// input nama") -- LookupPMByEmail preview baca-saja, tidak menetapkan
+// apa pun (repo.Update/AssignPM tidak boleh terpanggil).
+func TestProjectService_LookupPMByEmail_Found(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{userID: "user-existing"}, &fakeProjectPMInviter{})
+
+	userID, err := svc.LookupPMByEmail(context.Background(), nil, "proj-1", "existing@contoh.co.id", "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if userID != "user-existing" {
+		t.Errorf("userID = %q, want user-existing", userID)
+	}
+}
+
+// email belum terdaftar -- userID kosong, BUKAN error (kasus normal, AW
+// lanjut isi Nama manual untuk jalur undang-baru).
+func TestProjectService_LookupPMByEmail_NotFound(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "admin_workspace"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
+
+	userID, err := svc.LookupPMByEmail(context.Background(), nil, "proj-1", "belum-terdaftar@contoh.co.id", "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if userID != "" {
+		t.Errorf("userID = %q, want kosong (belum terdaftar)", userID)
+	}
+}
+
+// Otorisasi sama seperti AssignPM -- actor yang bukan AW/PM/org-access
+// ditolak SEBELUM lookup email terpanggil sama sekali.
+func TestProjectService_LookupPMByEmail_ForbiddenForNonAWPM(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	contacts := &stubExistingUserFinder{userID: "user-existing"}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"}, contacts, &fakeProjectPMInviter{})
+
+	_, err := svc.LookupPMByEmail(context.Background(), nil, "proj-1", "existing@contoh.co.id", "viewer-1", "member")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want domain.ErrForbidden", err)
 	}
 }
