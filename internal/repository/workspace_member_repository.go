@@ -173,6 +173,16 @@ type Member struct {
 	// workspace-scoped murni (admin_workspace/division_viewer) atau kalau
 	// belum ditautkan ke project mana pun.
 	ProjectNames string
+	// ProjectID -- ID project PERTAMA (urut abjad, sama urutan dengan
+	// ProjectNames) dari keterkaitan di atas -- dipakai FE (ManageMemberPanel)
+	// pre-fill pemilih project saat Kelola dibuka, ditemukan user 2026-09-14
+	// ("dropdown project juga tidak terbinding") karena ProjectNames cuma
+	// nama tampilan, bukan ID yang bisa dipilih ulang. Kosong kalau
+	// ProjectNames juga kosong. Kalau user punya LEBIH dari satu
+	// keterkaitan project (jarang -- PM di >1 project), cuma project
+	// PERTAMA yang di-pre-fill; menyimpan lewat panel ini tetap "move" ke
+	// SATU project terpilih (behavior tidak berubah dari sebelumnya).
+	ProjectID string
 }
 
 // ListMembers mengembalikan seluruh member LANGSUNG workspace (S2-07/08
@@ -183,11 +193,12 @@ type Member struct {
 func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]Member, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT wm.user_id, u.email, u.display_name, u.title, wm.role, wm.joined_at,
-		       COALESCE(proj.names, '')
+		       COALESCE(proj.names, ''), COALESCE(proj.first_id::text, '')
 		FROM workspace_members wm
 		JOIN users u ON u.id = wm.user_id
 		LEFT JOIN LATERAL (
-			SELECT string_agg(DISTINCT p.name, ', ' ORDER BY p.name) AS names
+			SELECT string_agg(DISTINCT p.name, ', ' ORDER BY p.name) AS names,
+			       (array_agg(p.id ORDER BY p.name))[1] AS first_id
 			FROM projects p
 			WHERE p.workspace_id = wm.workspace_id AND p.deleted_at IS NULL
 			  AND (p.pm_user_id = wm.user_id OR EXISTS (
@@ -205,7 +216,7 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.Role, &m.JoinedAt, &m.ProjectNames); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.Role, &m.JoinedAt, &m.ProjectNames, &m.ProjectID); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		members = append(members, m)

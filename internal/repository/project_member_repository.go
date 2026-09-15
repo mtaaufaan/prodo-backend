@@ -196,6 +196,31 @@ func (r *ProjectMemberRepository) RemoveMember(ctx context.Context, exec db.Exec
 	return nil
 }
 
+// NotifyMemberRemoved (susulan 2026-09-15, dikonfirmasi user "jangan lupa
+// mengeluarkan notifikasi sesuai standar sebelumnya") -- in-app
+// notification ke user yang dilepas dari SATU project (dipanggil
+// RBACService.RemoveMember, kasus member itu tertaut LEBIH dari satu
+// project -- lihat komentar di sana). RemoveMember sendiri SENGAJA tidak
+// diubah -- dipanggil juga dari AssignRole (move semantics, pindah
+// keterkaitan project LAMA) yang SUDAH mengirim notifikasi "Role Anda
+// diperbarui" sendiri; ikut menotifikasi di situ akan jadi notifikasi
+// ganda yang membingungkan untuk SATU aksi "Simpan Role".
+func (r *ProjectMemberRepository) NotifyMemberRemoved(ctx context.Context, exec db.Executor, projectID, userID, actorID string) error {
+	var name string
+	if err := exec.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`, projectID).Scan(&name); err != nil {
+		return fmt.Errorf("repository.NotifyMemberRemoved: %w", err)
+	}
+	title := "Dilepas dari Project"
+	body := fmt.Sprintf("Anda dilepas dari project %s.", name)
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+		VALUES ($1, $2, 'project_member_removed', 'project', $3, $4, $5)
+	`, userID, actorID, projectID, title, body); err != nil {
+		return fmt.Errorf("repository.NotifyMemberRemoved: %w", err)
+	}
+	return nil
+}
+
 // ListMembers mengembalikan seluruh project member (dipakai FE S3-24).
 // GetRole -- role project-scoped user (kalau ada baris project_members).
 // Task Management Core Phase 1: gate viewer read-only di TaskService/

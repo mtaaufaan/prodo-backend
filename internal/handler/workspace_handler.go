@@ -177,7 +177,10 @@ func (h *WorkspaceHandler) UpdateMemberRole(c *fiber.Ctx) error {
 
 // RemoveMember menangani DELETE /workspaces/:wsId/members/:userId (S3-15).
 // Otorisasi sama seperti UpdateMemberRole (middleware.RequireRole
-// admin_workspace di routing).
+// admin_workspace di routing). project_id (query param, opsional, susulan
+// 2026-09-14 dikonfirmasi user) -- keterkaitan project yang ditampilkan FE
+// saat ini (ManageMemberPanel) untuk role project-scoped; lihat komentar
+// RBACService.RemoveMember soal semantiknya.
 func (h *WorkspaceHandler) RemoveMember(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -191,8 +194,9 @@ func (h *WorkspaceHandler) RemoveMember(c *fiber.Ctx) error {
 	}
 	workspaceID := c.Params("wsId")
 	targetUserID := c.Params("userId")
+	projectID := c.Query("project_id")
 
-	if err := h.rbac.RemoveMember(c.Context(), exec, workspaceID, targetUserID, actorUserID, actorRole); err != nil {
+	if err := h.rbac.RemoveMember(c.Context(), exec, workspaceID, targetUserID, actorUserID, actorRole, projectID); err != nil {
 		return h.mapWorkspaceError(c, err, "Gagal mengeluarkan member")
 	}
 
@@ -629,6 +633,7 @@ func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 			"role":          m.Role,
 			"joined_at":     m.JoinedAt,
 			"project_names": m.ProjectNames,
+			"project_id":    m.ProjectID,
 		}
 	}
 

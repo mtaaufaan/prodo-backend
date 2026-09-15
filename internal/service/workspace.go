@@ -284,9 +284,9 @@ func (s *WorkspaceService) ReassignAdmin(ctx context.Context, exec db.Executor, 
 		return fmt.Errorf("service.ReassignAdmin: %w", err)
 	}
 	var oldAdminID string
-	for _, m := range members {
-		if m.Role == "admin_workspace" {
-			oldAdminID = m.UserID
+	for i := range members {
+		if members[i].Role == "admin_workspace" {
+			oldAdminID = members[i].UserID
 			break
 		}
 	}

@@ -37,6 +37,14 @@ type projectPMRepository interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 	ListPMProjectNames(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]repository.PMProjectRef, error)
 	SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	// RemovePM -- dipakai RemoveMember (susulan 2026-09-14, "Keluarkan"
+	// pada role project-scoped, dikonfirmasi user) untuk melepas PM dari
+	// SATU project saja saat member itu PM di LEBIH dari satu project.
+	RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
+	// NotifyPMRemoved -- in-app notification ke target (susulan
+	// 2026-09-15, dikonfirmasi user "jangan lupa mengeluarkan notifikasi
+	// sesuai standar sebelumnya") setelah RemovePM di atas berhasil.
+	NotifyPMRemoved(ctx context.Context, exec db.Executor, projectID, userID, actorID string) error
 }
 
 // projectMembershipRepository -- interface didefinisikan di consumer,
@@ -48,6 +56,14 @@ type projectMembershipRepository interface {
 	ListProjectIDsForUserInWorkspace(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]string, error)
 	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	AddMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error
+	// NotifyMemberRemoved -- in-app notification ke target (susulan
+	// 2026-09-15, dikonfirmasi user "jangan lupa mengeluarkan notifikasi
+	// sesuai standar sebelumnya"), dipakai HANYA oleh RemoveMember
+	// (RBACService) setelah RemoveMember di atas berhasil melepas SATU
+	// project -- TIDAK dipanggil dari move semantics AssignRole (lihat
+	// komentar NotifyMemberRemoved di repository, akan jadi notifikasi
+	// ganda dengan "Role Anda diperbarui").
+	NotifyMemberRemoved(ctx context.Context, exec db.Executor, projectID, userID, actorID string) error
 }
 
 // RBACService menangani assignment role per-workspace (S2-03/05/06, US-002).
@@ -250,7 +266,19 @@ func (s *RBACService) ListOrgCandidates(ctx context.Context, exec db.Executor, o
 // tanpa ini, request selanjutnya dari user yang baru dikeluarkan tetap
 // lolos RequireRole (S2-09) selama sisa TTL walau baris workspace_members-
 // nya sudah tidak ada.
-func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole string) error {
+//
+// projectID (susulan 2026-09-14, dikonfirmasi user setelah screenshot Fia/
+// IT-Eldwin: "jika pm dan editor approver viewer, hanya dikeluarkan dari
+// project") -- role project-scoped (PM/editor/approver/viewer) itu
+// keanggotaannya SEBENARNYA per-project. Kalau member ini kebetulan
+// terkait ke LEBIH dari satu project (jarang, mis. PM di 2 project),
+// "Keluarkan" cuma melepas keterkaitan project yang ditampilkan di panel
+// (projectID), member TETAP jadi member workspace ini lewat project
+// lainnya. Kalau cuma terkait SATU project (kasus umum) atau projectID
+// kosong (role workspace-scoped: admin_workspace/division_viewer, atau 8
+// pemanggil lama), hasilnya SAMA seperti sebelumnya -- dihapus total dari
+// workspace_members.
+func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole, projectID string) error {
 	// S4W-01: workspace tidak boleh ditinggalkan tanpa admin_workspace --
 	// cek role target LEBIH DULU (dalam transaksi request-scoped yang sama,
 	// jadi tidak ada celah race dengan DELETE yang menyusul).
@@ -268,6 +296,39 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 		}
 		if remaining == 0 {
 			return domain.ErrCannotRemoveLastWorkspaceAdmin
+		}
+	}
+
+	if projectID != "" {
+		switch targetRole {
+		case "project_manager":
+			pmProjects, err := s.projects.ListPMProjectNames(ctx, exec, workspaceID, userID)
+			if err != nil {
+				return fmt.Errorf("service.RemoveMember: cek project yang dipimpin: %w", err)
+			}
+			if len(pmProjects) > 1 {
+				if err := s.projects.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
+					return fmt.Errorf("service.RemoveMember: lepas PM dari project: %w", err)
+				}
+				if err := s.projects.NotifyPMRemoved(ctx, exec, projectID, userID, actorID); err != nil {
+					return fmt.Errorf("service.RemoveMember: notifikasi PM dilepas: %w", err)
+				}
+				return nil
+			}
+		case "editor", "approver", "viewer":
+			projectIDs, err := s.projectMembers.ListProjectIDsForUserInWorkspace(ctx, exec, workspaceID, userID)
+			if err != nil {
+				return fmt.Errorf("service.RemoveMember: cek keterkaitan project: %w", err)
+			}
+			if len(projectIDs) > 1 {
+				if err := s.projectMembers.RemoveMember(ctx, exec, projectID, userID, actorID, actorRole); err != nil {
+					return fmt.Errorf("service.RemoveMember: lepas dari project: %w", err)
+				}
+				if err := s.projectMembers.NotifyMemberRemoved(ctx, exec, projectID, userID, actorID); err != nil {
+					return fmt.Errorf("service.RemoveMember: notifikasi dilepas dari project: %w", err)
+				}
+				return nil
+			}
 		}
 	}
 
