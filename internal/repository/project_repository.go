@@ -56,6 +56,18 @@ type Project struct {
 	CreatedAt             time.Time
 	ArchivedAt            *time.Time
 	DeletedAt             *time.Time
+	// Status/EndDate (susulan 2026-10-18, diminta user langsung "tambahkan
+	// status project, dan tanggal berakhir project") -- AC awal US-012
+	// (backlog.md: "tanggal mulai, tanggal selesai, dan status awal") tidak
+	// pernah masuk desain final "AW Add Project.dc.html"/"AW Projects.dc.html"
+	// (dicek ulang lewat DesignSync sebelum implementasi) ataupun skema --
+	// gap yang baru ditutup sekarang. Status TERPISAH dari IsArchived (arsip
+	// murni soal akses baca-saja, bukan bagian siklus progres kerja).
+	// "Tanggal mulai" dari AC yang sama SENGAJA tidak ditambahkan (tidak
+	// diminta). Keduanya HANYA bisa diisi/diubah lewat Kelola Project --
+	// form Tambah Project TETAP sesuai desain asli (tidak ada field ini).
+	Status  string
+	EndDate *time.Time
 }
 
 // GetWorkspaceID mengembalikan workspace_id pemilik projectID -- dasar
@@ -151,8 +163,8 @@ func (r *ProjectRepository) Create(ctx context.Context, exec db.Executor, worksp
 	err := exec.QueryRow(ctx, `
 		INSERT INTO projects (workspace_id, name, code, pm_user_id, created_by)
 		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, created_at
-	`, workspaceID, name, code, pmParam, actorID).Scan(&p.ID, &p.CreatedAt)
+		RETURNING id, created_at, status
+	`, workspaceID, name, code, pmParam, actorID).Scan(&p.ID, &p.CreatedAt, &p.Status)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrProjectCodeTaken))
 	}
@@ -177,7 +189,8 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		       (SELECT COUNT(*) FROM sprints s WHERE s.project_id = p.id),
 		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL),
 		       COALESCE(creator.display_name, ''), COALESCE(creator.email, ''),
-		       COALESCE(pm_pending.email, ''), COALESCE(pm_pending.id::text, '')
+		       COALESCE(pm_pending.email, ''), COALESCE(pm_pending.id::text, ''),
+		       p.status, p.end_date
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.pm_user_id
 		LEFT JOIN users creator ON creator.id = p.created_by
@@ -200,7 +213,7 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code, &p.PMUserID,
 			&p.PMName, &p.PMEmail, &p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
 			&p.SprintCount, &p.TaskCount, &p.CreatedByName, &p.CreatedByEmail,
-			&p.PMPendingEmail, &p.PMPendingInvitationID); err != nil {
+			&p.PMPendingEmail, &p.PMPendingInvitationID, &p.Status, &p.EndDate); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		list = append(list, p)
@@ -366,14 +379,18 @@ func (r *ProjectRepository) GetPendingPMInvitationID(ctx context.Context, exec d
 	return id, nil
 }
 
-// Update mengubah nama dan/atau PM penanggung jawab (S4-02). pmUserID
-// kosong berarti PM tidak diubah (AW Projects.dc.html: reassignment cuma
-// terjadi kalau pengguna benar-benar memilih orang lain).
-func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projectID, name, pmUserID, actorID, actorRole string) error {
-	var oldName, oldPM string
+// Update mengubah nama, status/tanggal berakhir, dan/atau PM penanggung
+// jawab (S4-02). pmUserID kosong berarti PM tidak diubah (AW
+// Projects.dc.html: reassignment cuma terjadi kalau pengguna benar-benar
+// memilih orang lain). status/endDate (susulan 2026-10-18) SELALU dikirim
+// FE apa adanya (sama kontrak dengan name) -- beda dari pmUserID, tidak
+// ada bahaya "kepilih tanpa sadar" untuk keduanya.
+func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projectID, name, status, pmUserID, actorID, actorRole string, endDate *time.Time) error {
+	var oldName, oldPM, oldStatus string
+	var oldEndDate *time.Time
 	if err := exec.QueryRow(ctx, `
-		SELECT name, COALESCE(pm_user_id::text, '') FROM projects WHERE id = $1 AND deleted_at IS NULL
-	`, projectID).Scan(&oldName, &oldPM); err != nil {
+		SELECT name, COALESCE(pm_user_id::text, ''), status, end_date FROM projects WHERE id = $1 AND deleted_at IS NULL
+	`, projectID).Scan(&oldName, &oldPM, &oldStatus, &oldEndDate); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.Update: %w", domain.ErrProjectNotFound)
 		}
@@ -388,19 +405,19 @@ func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projec
 	// notice ManageProjectModal -- bug PRA-EXISTING, tidak terkait
 	// perubahan itu) -- newPM bisa TETAP kosong di titik ini kalau project
 	// belum punya PM sama sekali (pm_user_id NULL, oldPM juga "" lewat
-	// COALESCE di atas) DAN pmUserID request juga kosong (rename nama saja,
-	// jalur Simpan Perubahan biasa). pm_user_id kolom uuid -- kirim string
-	// kosong lewat exec.Exec bikin Postgres menolak dengan "invalid input
-	// syntax for type uuid" (22P02), bukan NULL. any(nil) supaya pgx
-	// mem-bind SQL NULL yang benar saat memang belum ada PM.
+	// COALESCE di atas) DAN pmUserID request juga kosong (rename/ubah
+	// status saja). pm_user_id kolom uuid -- kirim string kosong lewat
+	// exec.Exec bikin Postgres menolak dengan "invalid input syntax for
+	// type uuid" (22P02), bukan NULL. any(nil) supaya pgx mem-bind SQL
+	// NULL yang benar saat memang belum ada PM.
 	var newPMArg any = newPM
 	if newPM == "" {
 		newPMArg = nil
 	}
 	tag, err := exec.Exec(ctx, `
-		UPDATE projects SET name = $2, pm_user_id = $3, updated_at = NOW()
+		UPDATE projects SET name = $2, pm_user_id = $3, status = $4::project_lifecycle_status, end_date = $5, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
-	`, projectID, name, newPMArg)
+	`, projectID, name, newPMArg, status, endDate)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", classifyUniqueViolation(err, domain.ErrProjectCodeTaken))
 	}
@@ -412,8 +429,14 @@ func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projec
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
 	}
-	before := map[string]any{"name": oldName, "pm_user_id": oldPM}
-	after := map[string]any{"name": name, "pm_user_id": newPM}
+	dateStr := func(t *time.Time) string {
+		if t == nil {
+			return ""
+		}
+		return t.Format("2006-01-02")
+	}
+	before := map[string]any{"name": oldName, "pm_user_id": oldPM, "status": oldStatus, "end_date": dateStr(oldEndDate)}
+	after := map[string]any{"name": name, "pm_user_id": newPM, "status": status, "end_date": dateStr(endDate)}
 	if err := insertProjectAudit(ctx, exec, actorID, actorRole, "project.updated", projectID, workspaceID, before, after, nil); err != nil {
 		return fmt.Errorf("repository.Update: audit: %w", err)
 	}

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
@@ -43,6 +44,8 @@ func projectToMap(p *repository.Project) fiber.Map {
 		"pm_pending_invitation_id": p.PMPendingInvitationID,
 		"created_at":               p.CreatedAt,
 		"archived_at":              p.ArchivedAt,
+		"status":                   p.Status,
+		"end_date":                 p.EndDate,
 	}
 }
 
@@ -115,14 +118,28 @@ func (h *ProjectHandler) List(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
-type updateProjectRequest struct {
-	Name string `json:"name"`
+// validProjectStatuses (susulan 2026-10-18, "tambahkan status project")
+// -- enum project_lifecycle_status, sama pola validWorkspaceRoles.
+var validProjectStatuses = map[string]bool{
+	"not_started": true,
+	"in_progress": true,
+	"completed":   true,
+	"on_hold":     true,
 }
 
-// Update menangani PUT /projects/:id (S4-02) -- ubah NAMA saja sejak S4W
-// susulan (PM dipindah ke AssignPM/RemovePM, seksi terpisah panel Kelola).
-// TIDAK digerbangi middleware role (route ini tidak punya :wsId),
-// otorisasi penuh di ProjectService.authorize.
+type updateProjectRequest struct {
+	Name string `json:"name"`
+	// Status/EndDate (susulan 2026-10-18) -- SELALU dikirim FE apa adanya
+	// (whole-form save, sama kontrak dengan Name), bukan partial patch.
+	Status  string  `json:"status"`
+	EndDate *string `json:"end_date"`
+}
+
+// Update menangani PUT /projects/:id (S4-02, diperluas susulan 2026-10-18
+// -- status siklus hidup + tanggal berakhir). PM TIDAK diubah lewat sini
+// sejak S4W susulan (PM dipindah ke AssignPM/RemovePM, seksi terpisah
+// panel Kelola). TIDAK digerbangi middleware role (route ini tidak punya
+// :wsId), otorisasi penuh di ProjectService.authorize.
 func (h *ProjectHandler) Update(c *fiber.Ctx) error {
 	actorUserID, _, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -144,11 +161,19 @@ func (h *ProjectHandler) Update(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
+	if !validProjectStatuses[req.Status] {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "status tidak valid",
+			[]response.FieldError{{Field: "status", Message: "harus salah satu dari not_started, in_progress, completed, on_hold"}}))
+	}
+	endDate, err := parseDateOnly(req.EndDate)
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format end_date harus YYYY-MM-DD", nil))
+	}
 
-	if err := h.projects.Update(c.Context(), exec, projectID, req.Name, actorUserID, claims.PlatformRole); err != nil {
+	if err := h.projects.Update(c.Context(), exec, projectID, req.Name, req.Status, actorUserID, claims.PlatformRole, endDate); err != nil {
 		return h.mapProjectError(c, err, "Gagal mengubah project")
 	}
-	return c.JSON(response.Success(fiber.Map{"id": projectID, "name": req.Name}))
+	return c.JSON(response.Success(fiber.Map{"id": projectID, "name": req.Name, "status": req.Status, "end_date": endDate}))
 }
 
 type assignProjectPMRequest struct {
@@ -221,6 +246,47 @@ func (h *ProjectHandler) RemovePM(c *fiber.Ctx) error {
 		return h.mapProjectError(c, err, "Gagal menghapus PM")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": projectID}))
+}
+
+// LookupPM menangani GET /projects/:id/pm-lookup?email=... (susulan
+// 2026-10-18) -- preview NAMA untuk email yang diketik AW di form
+// "+ Tetapkan PM", supaya tidak perlu isi Nama manual kalau orangnya
+// sudah terdaftar. Baca-saja, otorisasi SAMA seperti AssignPM (lewat
+// ProjectService.authorize di dalam LookupPMByEmail).
+func (h *ProjectHandler) LookupPM(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectHandler.LookupPM dipanggil tanpa DBContextMiddleware -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectHandler.LookupPM dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+	email := strings.TrimSpace(c.Query("email"))
+	if email == "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "email wajib diisi", nil))
+	}
+
+	userID, err := h.projects.LookupPMByEmail(c.Context(), exec, projectID, email, actorUserID, claims.PlatformRole)
+	if err != nil {
+		return h.mapProjectError(c, err, "Gagal mencari user")
+	}
+	if userID == "" {
+		return c.JSON(response.Success(fiber.Map{"found": false}))
+	}
+	displayName, err := h.accounts.GetDisplayName(c.Context(), userID)
+	if err != nil {
+		h.logger.Error("gagal ambil nama user hasil lookup PM", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil nama user", nil))
+	}
+	return c.JSON(response.Success(fiber.Map{"found": true, "display_name": displayName}))
 }
 
 type updateProjectSettingsRequest struct {
