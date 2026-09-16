@@ -423,6 +423,14 @@ func run() error {
 	// kolom papan Kanban -- status sistem di-seed otomatis saat workspace
 	// dibuat (WorkspaceRepository.Create), sama gate ListMembers.
 	v1.Get("/workspaces/:wsId/statuses", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer", "division_viewer"), customStatusHandler.ListForWorkspace)
+	// S4W-05, US-020/021 ("AW Custom Status.dc.html"/"AW Add Status.dc.html")
+	// -- CRUD template status workspace, AW-only (ditegakkan di service,
+	// bukan cuma middleware, karena /statuses/:id tidak punya :wsId).
+	v1.Post("/workspaces/:wsId/statuses", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), customStatusHandler.Create)
+	v1.Put("/statuses/:id/appearance", jwtAuth, dbCtx, customStatusHandler.UpdateAppearance)
+	v1.Post("/statuses/:id/move", jwtAuth, dbCtx, customStatusHandler.Move)
+	v1.Post("/statuses/:id/undefine", jwtAuth, dbCtx, customStatusHandler.Undefine)
+	v1.Post("/statuses/:id/restore", jwtAuth, dbCtx, customStatusHandler.Restore)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	// S4W-01: rate-limit 3x/menit PER-ROUTE, sama pola storage-allocation/
