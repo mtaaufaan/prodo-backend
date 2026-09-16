@@ -271,6 +271,22 @@ func (r *ProjectRepository) AssignPendingPM(ctx context.Context, exec db.Executo
 	return nil
 }
 
+// GetPMUserID (susulan 2026-09-15) mengembalikan pm_user_id aktif project
+// ini, "" kalau belum/tidak punya PM aktif -- dipakai ProjectService.
+// RemovePM buat guard "cabut PM terakhir" sebelum benar-benar menghapus.
+func (r *ProjectRepository) GetPMUserID(ctx context.Context, exec db.Executor, projectID string) (string, error) {
+	var pmUserID string
+	if err := exec.QueryRow(ctx, `
+		SELECT COALESCE(pm_user_id::text, '') FROM projects WHERE id = $1 AND deleted_at IS NULL
+	`, projectID).Scan(&pmUserID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.GetPMUserID: %w", domain.ErrProjectNotFound)
+		}
+		return "", fmt.Errorf("repository.GetPMUserID: %w", err)
+	}
+	return pmUserID, nil
+}
+
 // RemovePM (S4W susulan) mengosongkan pm_user_id -- project masuk status
 // "menunggu PM" sampai PM baru ditetapkan/undangan baru diterima. BEDA dari
 // Update yang menganggap pmUserID kosong sebagai "tidak diubah" -- ini aksi

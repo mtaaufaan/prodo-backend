@@ -33,8 +33,9 @@ type fakeProjectRepo struct {
 	assignPendingPMErr   error
 	assignPendingPMCalls []recordedPMSet
 
-	removePMErr   error
-	removePMCalls int
+	activePMUserID string
+	removePMErr    error
+	removePMCalls  int
 
 	setPMErr   error
 	setPMCalls []recordedPMSet
@@ -103,6 +104,10 @@ func (f *fakeProjectRepo) AssignPendingPM(_ context.Context, _ db.Executor, proj
 	}
 	f.assignPendingPMCalls = append(f.assignPendingPMCalls, recordedPMSet{projectID, userID})
 	return nil
+}
+
+func (f *fakeProjectRepo) GetPMUserID(_ context.Context, _ db.Executor, _ string) (string, error) {
+	return f.activePMUserID, nil
 }
 
 func (f *fakeProjectRepo) RemovePM(_ context.Context, _ db.Executor, _, _, _ string) error {
@@ -440,9 +445,10 @@ func TestProjectService_AssignPM_CancelsExistingPendingInvitation(t *testing.T) 
 	}
 }
 
-// TestProjectService_RemovePM_ClearsAndCancelsPending -- "Hapus PM" tanpa
-// pengganti: pm_user_id dikosongkan DAN undangan pending (kalau ada)
-// dibatalkan supaya tidak ada undangan mengambang.
+// TestProjectService_RemovePM_ClearsAndCancelsPending -- project TANPA PM
+// aktif (cuma undangan pending mengambang, kasus jarang) tetap boleh
+// dibatalkan lewat jalur ini -- guard "cabut PM terakhir" cuma menyala
+// kalau ADA PM aktif.
 func TestProjectService_RemovePM_ClearsAndCancelsPending(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, pendingInvitationID: "inv-1"}
 	invites := &fakeProjectPMInviter{}
@@ -456,6 +462,25 @@ func TestProjectService_RemovePM_ClearsAndCancelsPending(t *testing.T) {
 	}
 	if len(invites.cancelCalls) != 1 || invites.cancelCalls[0].invitationID != "inv-1" {
 		t.Errorf("cancelCalls = %+v, want satu entri inv-1", invites.cancelCalls)
+	}
+}
+
+// TestProjectService_RemovePM_ActivePM_Rejected (susulan 2026-09-15,
+// ditemukan user: "kenapa pada project PM bisa dicabut sampai habis?
+// ... bertentangan dengan validasi wajib PM di Tambah Project") -- project
+// cuma punya SATU slot PM, jadi PM aktif = PM terakhir. "Cabut" ditolak,
+// AW harus pakai "+ Tetapkan PM" (ganti langsung) supaya project tidak
+// pernah kosong PM setelah pernah punya satu.
+func TestProjectService_RemovePM_ActivePM_Rejected(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, activePMUserID: "pm-1"}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
+
+	err := svc.RemovePM(context.Background(), nil, "proj-1", "aw-1", "member")
+	if !errors.Is(err, domain.ErrCannotRemoveLastProjectManager) {
+		t.Errorf("err = %v, want domain.ErrCannotRemoveLastProjectManager", err)
+	}
+	if repo.removePMCalls != 0 {
+		t.Errorf("removePMCalls = %d, want 0 (ditolak sebelum repo terpanggil)", repo.removePMCalls)
 	}
 }
 
