@@ -30,6 +30,7 @@ type projectRepository interface {
 	Restore(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool) error
 	AssignPendingPM(ctx context.Context, exec db.Executor, projectID, userID string) error
+	GetPMUserID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 	RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	GetPendingPMInvitationID(ctx context.Context, exec db.Executor, projectID string) (string, error)
@@ -378,6 +379,17 @@ func (s *ProjectService) RemovePM(ctx context.Context, exec db.Executor, project
 	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return err
+	}
+	// Guard "cabut PM terakhir" (susulan 2026-09-15, ditemukan user) --
+	// project cuma punya SATU slot PM, jadi PM aktif = PM terakhir. Tidak
+	// berlaku untuk project yang memang belum pernah punya PM aktif (cuma
+	// undangan pending) -- itu tetap boleh dibatalkan lewat jalur ini.
+	currentPM, err := s.repo.GetPMUserID(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("service.RemovePM: %w", err)
+	}
+	if currentPM != "" {
+		return fmt.Errorf("service.RemovePM: %w", domain.ErrCannotRemoveLastProjectManager)
 	}
 	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID); err != nil {
 		return fmt.Errorf("service.RemovePM: %w", err)

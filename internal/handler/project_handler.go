@@ -419,6 +419,9 @@ func (h *ProjectHandler) mapProjectError(c *fiber.Ctx, err error, fallbackMessag
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NAME_TAKEN", "Nama project sudah dipakai di workspace ini", nil))
 	case errors.Is(err, domain.ErrProjectNotDeleted):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NOT_DELETED", "Project ini tidak sedang dihapus", nil))
+	case errors.Is(err, domain.ErrCannotRemoveLastProjectManager):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("CANNOT_REMOVE_LAST_PM",
+			"Project harus punya Project Manager -- tetapkan PM pengganti dulu lewat \"+ Tetapkan PM\" sebelum mencabut PM ini", nil))
 	case errors.Is(err, domain.ErrInvitationAlreadyPending):
 		// S4W susulan (ditemukan user 2026-09-14): resolvePM/invitePM
 		// memanggil InvitationService.CreateInvitation langsung (bukan
