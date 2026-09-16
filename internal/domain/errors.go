@@ -380,6 +380,31 @@ var (
 	// ditemukan (Task Management Core Phase 1).
 	ErrCustomStatusNotFound = errors.New("custom status not found")
 
+	// ErrCustomStatusNameTaken (S4W-05, US-020) -- nama status (setelah
+	// di-uppercase) sudah dipakai status lain di template workspace yang sama.
+	ErrCustomStatusNameTaken = errors.New("custom status name already used in this workspace")
+
+	// ErrCustomStatusLimitReached (S4W-05) -- batas 12 status per workspace
+	// tercapai (AW Add Status.dc.html), sesuai desain.
+	ErrCustomStatusLimitReached = errors.New("workspace has reached the maximum number of custom statuses")
+
+	// ErrCustomStatusIsSystem (S4W-05, US-020) -- 5 status sistem
+	// (BACKLOG/IN PROGRESS/UNDER REVIEW/DONE/BLOCKED) wajib ada di setiap
+	// project dan tidak dapat di-undefine dari template.
+	ErrCustomStatusIsSystem = errors.New("system status cannot be undefined")
+
+	// ErrCustomStatusNotUndefined dikembalikan Restore saat status target
+	// sedang tidak dalam mode UNDEFINED (tidak ada yang perlu dipulihkan).
+	ErrCustomStatusNotUndefined = errors.New("custom status is not undefined")
+
+	// ErrCustomStatusNotTrackable (S4W-05, US-078 Flow Efficiency) --
+	// BACKLOG/DONE/BLOCKED bukan status kerja aktif (task di situ menunggu
+	// keputusan, bukan sedang dikerjakan), jadi konfirmasi "Mulai
+	// Pengerjaan" tidak berlaku untuk ketiganya -- lihat AW Custom
+	// Status.dc.html "TIDAK BERLAKU", sebelumnya cuma ditegakkan di UI
+	// prototype, sekarang juga di backend.
+	ErrCustomStatusNotTrackable = errors.New("this status does not support start confirmation")
+
 	// ErrSprintNotFound dikembalikan saat sprints.id tidak ditemukan.
 	ErrSprintNotFound = errors.New("sprint not found")
 
