@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -17,20 +18,21 @@ type fakeWorkspaceRepo struct {
 	created   *repository.Workspace
 	createErr error
 
-	orgID          map[string]string
-	getOrgIDErr    error
-	updateErr      error
-	archiveErr     error
-	unarchiveErr   error
-	deactivateErr  error
-	reactivateErr  error
-	deleteErr      error
-	restoreErr     error
-	moveErr        error
-	listResult     []repository.Workspace
-	listErr        error
-	listByGroup    []repository.WorkspaceListRow
-	listByGroupErr error
+	orgID                    map[string]string
+	getOrgIDErr              error
+	updateErr                error
+	updateMentionSettingsErr error
+	archiveErr               error
+	unarchiveErr             error
+	deactivateErr            error
+	reactivateErr            error
+	deleteErr                error
+	restoreErr               error
+	moveErr                  error
+	listResult               []repository.Workspace
+	listErr                  error
+	listByGroup              []repository.WorkspaceListRow
+	listByGroupErr           error
 }
 
 func (f *fakeWorkspaceRepo) Create(_ context.Context, _ db.Executor, orgID, name, _, _ string) (*repository.Workspace, error) {
@@ -62,6 +64,10 @@ func (f *fakeWorkspaceRepo) Get(_ context.Context, _ db.Executor, workspaceID st
 
 func (f *fakeWorkspaceRepo) Update(_ context.Context, _ db.Executor, _, _, _, _ string) error {
 	return f.updateErr
+}
+
+func (f *fakeWorkspaceRepo) UpdateMentionSettings(_ context.Context, _ db.Executor, _ string, _ int, _ bool, _, _ string) error {
+	return f.updateMentionSettingsErr
 }
 
 func (f *fakeWorkspaceRepo) Archive(_ context.Context, _ db.Executor, _, _, _ string) error {
@@ -264,6 +270,31 @@ func TestWorkspaceService_UpdateWorkspace_MissingFields(t *testing.T) {
 	err := svc.UpdateWorkspace(context.Background(), nil, "ws-1", "", "aw-1", "admin_workspace")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want wrapped domain.ErrInvalidInput", err)
+	}
+}
+
+// TestWorkspaceService_UpdateMentionSettings_Success (S4W-07, US-033).
+func TestWorkspaceService_UpdateMentionSettings_Success(t *testing.T) {
+	svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
+
+	if err := svc.UpdateMentionSettings(context.Background(), nil, "ws-1", 20, false, "aw-1", "admin_workspace"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestWorkspaceService_UpdateMentionSettings_InvalidCooldown -- hanya 4
+// nilai resmi (10/15/20/30, US-033 AC) yang diterima, bukan range bebas
+// walau kolomnya CHECK 10-30.
+func TestWorkspaceService_UpdateMentionSettings_InvalidCooldown(t *testing.T) {
+	for _, v := range []int{0, 5, 12, 25, 31} {
+		v := v
+		t.Run(fmt.Sprintf("%d", v), func(t *testing.T) {
+			svc := newTestWorkspaceService(&fakeWorkspaceRepo{}, &fakeOrgAuthorizer{}, &fakeRoleAssigner{})
+			err := svc.UpdateMentionSettings(context.Background(), nil, "ws-1", v, true, "aw-1", "admin_workspace")
+			if !errors.Is(err, domain.ErrInvalidInput) {
+				t.Errorf("cooldown=%d: err = %v, want domain.ErrInvalidInput", v, err)
+			}
+		})
 	}
 }
 
