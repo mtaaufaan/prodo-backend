@@ -38,6 +38,13 @@ type Workspace struct {
 	DeactivatedAt *time.Time
 	CreatedAt     time.Time
 	DeletedAt     *time.Time
+	// MentionCooldownMinutes/MentionDigestEnabled (S4W-07/08, US-033,
+	// "AW Cooldown Mention.dc.html") -- cooldown wajib terisi (NOT NULL
+	// DEFAULT 10), MentionDigestEnabled ditambah migrasi
+	// 20261019090000_workspace_mention_digest (kolom cooldown sendiri
+	// sudah ada sejak §5.9 awal, belum pernah dipakai kode apa pun).
+	MentionCooldownMinutes int
+	MentionDigestEnabled   bool
 }
 
 // Create menyimpan workspace baru + audit trail (S3-09). Assignment Admin
@@ -46,11 +53,15 @@ type Workspace struct {
 // duplikasi insert workspace_members di sini.
 func (r *WorkspaceRepository) Create(ctx context.Context, exec db.Executor, orgID, name, actorID, actorRole string) (*Workspace, error) {
 	ws := &Workspace{OrgID: orgID, Name: name}
+	// RETURNING mention_cooldown_minutes/mention_digest_enabled -- tanpa
+	// ini struct Go balik ke zero-value (0/false) alih-alih default kolom
+	// DB (10/true) di response POST langsung, sama bug class yang
+	// ditemukan di ProjectRepository.Create (status kosong).
 	err := exec.QueryRow(ctx, `
 		INSERT INTO workspaces (org_id, name)
 		VALUES ($1, $2)
-		RETURNING id, created_at
-	`, orgID, name).Scan(&ws.ID, &ws.CreatedAt)
+		RETURNING id, created_at, mention_cooldown_minutes, mention_digest_enabled
+	`, orgID, name).Scan(&ws.ID, &ws.CreatedAt, &ws.MentionCooldownMinutes, &ws.MentionDigestEnabled)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", err)
 	}
@@ -347,8 +358,9 @@ func (r *WorkspaceRepository) Restore(ctx context.Context, exec db.Executor, wor
 func (r *WorkspaceRepository) Get(ctx context.Context, exec db.Executor, workspaceID string) (*Workspace, error) {
 	var w Workspace
 	err := exec.QueryRow(ctx, `
-		SELECT id, org_id, name, archived_at, deactivated_at, created_at FROM workspaces WHERE id = $1 AND deleted_at IS NULL
-	`, workspaceID).Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.DeactivatedAt, &w.CreatedAt)
+		SELECT id, org_id, name, archived_at, deactivated_at, created_at, mention_cooldown_minutes, mention_digest_enabled
+		FROM workspaces WHERE id = $1 AND deleted_at IS NULL
+	`, workspaceID).Scan(&w.ID, &w.OrgID, &w.Name, &w.ArchivedAt, &w.DeactivatedAt, &w.CreatedAt, &w.MentionCooldownMinutes, &w.MentionDigestEnabled)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.Get: %w", domain.ErrWorkspaceNotFound)
@@ -356,6 +368,48 @@ func (r *WorkspaceRepository) Get(ctx context.Context, exec db.Executor, workspa
 		return nil, fmt.Errorf("repository.Get: %w", err)
 	}
 	return &w, nil
+}
+
+// UpdateMentionSettings -- PUT /workspaces/:wsId/mention-settings (S4W-07,
+// US-033, "AW Cooldown Mention.dc.html") -- cooldown+digest disimpan
+// bersama (whole-form save, tombol "SIMPAN PENGATURAN" tunggal di desain,
+// sama kontrak dengan pola field lain di codebase ini). Berlaku untuk
+// SELURUH project workspace ini kecuali yang punya override sendiri
+// (projects.mention_cooldown_minutes non-NULL, US-019/033 project-level,
+// scope terpisah -- belum ada UI PM untuk mengaturnya).
+func (r *WorkspaceRepository) UpdateMentionSettings(ctx context.Context, exec db.Executor, workspaceID string, cooldownMinutes int, digestEnabled bool, actorID, actorRole string) error {
+	var oldCooldown int
+	var oldDigest bool
+	if err := exec.QueryRow(ctx, `
+		SELECT mention_cooldown_minutes, mention_digest_enabled FROM workspaces WHERE id = $1 AND deleted_at IS NULL
+	`, workspaceID).Scan(&oldCooldown, &oldDigest); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpdateMentionSettings: %w", domain.ErrWorkspaceNotFound)
+		}
+		return fmt.Errorf("repository.UpdateMentionSettings: %w", err)
+	}
+
+	tag, err := exec.Exec(ctx, `
+		UPDATE workspaces SET mention_cooldown_minutes = $2, mention_digest_enabled = $3, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL
+	`, workspaceID, cooldownMinutes, digestEnabled)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateMentionSettings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.UpdateMentionSettings: %w", domain.ErrWorkspaceNotFound)
+	}
+
+	orgID, err := r.GetOrgID(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("repository.UpdateMentionSettings: %w", err)
+	}
+	before := map[string]any{"mention_cooldown_minutes": oldCooldown, "mention_digest_enabled": oldDigest}
+	after := map[string]any{"mention_cooldown_minutes": cooldownMinutes, "mention_digest_enabled": digestEnabled}
+	if err := insertWorkspaceAudit(ctx, exec, actorID, actorRole, "workspace.mention_settings_updated", workspaceID, orgID, before, after); err != nil {
+		return fmt.Errorf("repository.UpdateMentionSettings: audit: %w", err)
+	}
+	return nil
 }
 
 // List mengembalikan workspace dalam satu organisasi (S3-13 prasyarat).

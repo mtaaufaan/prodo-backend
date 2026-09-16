@@ -400,6 +400,9 @@ func run() error {
 	// workspace-nya sendiri, PA/GA-of-org bypass (konsisten RLS
 	// workspaces_update, S3-42).
 	v1.Put("/workspaces/:wsId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Update)
+	// S4W-07, US-033 ("AW Cooldown Mention.dc.html") -- pengaturan cooldown
+	// @mention berlaku seluruh project workspace ini, AW-only.
+	v1.Put("/workspaces/:wsId/mention-settings", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMentionSettings)
 	v1.Put("/workspaces/:wsId/deactivate", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Deactivate)
 	v1.Put("/workspaces/:wsId/reactivate", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.Reactivate)
 	// S4G-04, Track S4G, desain "GA Workspaces.dc.html": ARSIP (read-only,

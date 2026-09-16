@@ -46,6 +46,7 @@ func projectToMap(p *repository.Project) fiber.Map {
 		"archived_at":              p.ArchivedAt,
 		"status":                   p.Status,
 		"end_date":                 p.EndDate,
+		"mention_cooldown_minutes": p.MentionCooldownMinutes,
 	}
 }
 
