@@ -1,9 +1,11 @@
-// Package repository -- WebhookRepository (Webhook, Track S4G, desain
-// "GA Webhook.dc.html" + "GA Add Webhook.dc.html"). Tabel `webhook_configs`
-// + `webhook_deliveries` (migrasi 20260920090000) -- lihat komentar migrasi
-// untuk penyimpangan dari DATABASE_SCHEMA.md (org_id nullable, events
-// dibatasi 3 nilai). hmac_secret_encrypted dienkripsi via pgcrypto
-// (pgp_sym_encrypt), pola PERSIS MFARepository.totp_secret.
+// Package repository -- WebhookRepository (Webhook, Track S4G "GA Webhook.
+// dc.html"+"GA Add Webhook.dc.html", diperluas S4W-14 "AW Webhook.dc.html"+
+// "AW Add Webhook.dc.html"). Tabel `webhook_configs` + `webhook_deliveries`
+// (migrasi 20260920090000, diperluas 20261020090000 untuk cakupan
+// workspace/project) -- lihat komentar migrasi untuk penyimpangan dari
+// DATABASE_SCHEMA.md (org_id nullable, events dibatasi 3 nilai, group_id
+// jadi nullable berbarengan workspace_id). hmac_secret_encrypted dienkripsi
+// via pgcrypto (pgp_sym_encrypt), pola PERSIS MFARepository.totp_secret.
 package repository
 
 import (
@@ -19,11 +21,18 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 )
 
+// GroupID/WorkspaceID -- PERSIS SATU terisi (CHECK chk_webhook_configs_scope,
+// migrasi 20261020090000). WorkspaceID terisi -- webhook level workspace
+// (S4W-14); ProjectID (opsional) -- cakupan "Project X" LINGKUP desain "AW
+// Add Webhook.dc.html", NULL berarti "Seluruh workspace".
 type Webhook struct {
 	ID          string
-	GroupID     string
+	GroupID     *string
 	OrgID       *string
 	OrgName     *string
+	WorkspaceID *string
+	ProjectID   *string
+	ProjectName *string
 	Name        string
 	TargetURL   string
 	Events      []string
@@ -67,18 +76,35 @@ func NewWebhookRepository(encryptionKey string) (*WebhookRepository, error) {
 
 // Create menyimpan webhook baru + secret plaintext terenkripsi. secret
 // plaintext HANYA dikembalikan sekali oleh service (ditampilkan di modal),
-// tidak pernah disimpan di luar bentuk terenkripsi ini.
-func (r *WebhookRepository) Create(ctx context.Context, exec db.Executor, groupID string, orgID *string, name, targetURL, secret string, events []string, actorID, actorRole string) (string, error) {
+// tidak pernah disimpan di luar bentuk terenkripsi ini. groupID/workspaceID
+// -- PERSIS SATU non-kosong (caller/service yang menjamin), dikonversi ke
+// NULL di sini -- sama pola empty-string-to-NULL ProjectRepository/
+// CustomStatusRepository (pgx menolak "" untuk kolom uuid).
+func (r *WebhookRepository) Create(ctx context.Context, exec db.Executor, groupID, workspaceID string, orgID, projectID *string, name, targetURL, secret string, events []string, actorID, actorRole string) (string, error) {
+	var groupArg, workspaceArg any
+	if groupID != "" {
+		groupArg = groupID
+	}
+	if workspaceID != "" {
+		workspaceArg = workspaceID
+	}
 	var id string
 	err := exec.QueryRow(ctx, `
-		INSERT INTO webhook_configs (group_id, org_id, name, target_url, hmac_secret_encrypted, events, created_by)
-		VALUES ($1, $2, $3, $4, encode(pgp_sym_encrypt($5, $6), 'base64'), $7, $8)
+		INSERT INTO webhook_configs (group_id, org_id, workspace_id, project_id, name, target_url, hmac_secret_encrypted, events, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, encode(pgp_sym_encrypt($7, $8), 'base64'), $9, $10)
 		RETURNING id
-	`, groupID, orgID, name, targetURL, secret, r.encryptionKey, events, actorID).Scan(&id)
+	`, groupArg, orgID, workspaceArg, projectID, name, targetURL, secret, r.encryptionKey, events, actorID).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.created", id, orgID, groupID, nil, nil); err != nil {
+	var groupIDPtr, workspaceIDPtr *string
+	if groupID != "" {
+		groupIDPtr = &groupID
+	}
+	if workspaceID != "" {
+		workspaceIDPtr = &workspaceID
+	}
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.created", id, orgID, groupIDPtr, workspaceIDPtr, nil, nil); err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
 	return id, nil
@@ -86,15 +112,16 @@ func (r *WebhookRepository) Create(ctx context.Context, exec db.Executor, groupI
 
 // Get mengembalikan satu webhook TANPA statistik 30 hari (dipakai
 // Update/Delete/ToggleActive/RegenerateSecret/Test, cuma butuh baris
-// intinya) -- RLS yang menyaring kepemilikan grup, "tidak ada baris" berarti
-// ErrWebhookNotFound baik karena benar tidak ada atau karena bukan milik
-// grup actor (tidak membocorkan mana).
+// intinya) -- RLS yang menyaring kepemilikan grup/workspace, "tidak ada
+// baris" berarti ErrWebhookNotFound baik karena benar tidak ada atau karena
+// bukan milik actor (tidak membocorkan mana). WorkspaceID/ProjectID ikut
+// diambil -- WebhookService.authorizeScope butuh tahu cakupan baris ini.
 func (r *WebhookRepository) Get(ctx context.Context, exec db.Executor, webhookID string) (*Webhook, error) {
 	var w Webhook
 	err := exec.QueryRow(ctx, `
-		SELECT id, group_id, org_id, name, target_url, events, is_active, created_by, created_at, updated_at
+		SELECT id, group_id, org_id, workspace_id, project_id, name, target_url, events, is_active, created_by, created_at, updated_at
 		FROM webhook_configs WHERE id = $1
-	`, webhookID).Scan(&w.ID, &w.GroupID, &w.OrgID, &w.Name, &w.TargetURL, &w.Events, &w.IsActive, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt)
+	`, webhookID).Scan(&w.ID, &w.GroupID, &w.OrgID, &w.WorkspaceID, &w.ProjectID, &w.Name, &w.TargetURL, &w.Events, &w.IsActive, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.Get: %w", domain.ErrWebhookNotFound)
@@ -142,6 +169,43 @@ func (r *WebhookRepository) ListByGroup(ctx context.Context, exec db.Executor, g
 	return list, nil
 }
 
+// ListByWorkspace -- sejajar ListByGroup, stats bar & grid "AW Webhook.dc.html".
+// project_name di-JOIN untuk menampilkan LINGKUP baris ("Seluruh workspace"
+// kalau project_id NULL, sama pola org_name/"Seluruh grup" ListByGroup).
+func (r *WebhookRepository) ListByWorkspace(ctx context.Context, exec db.Executor, workspaceID string) ([]Webhook, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT wc.id, wc.workspace_id, wc.project_id, p.name, wc.name, wc.target_url, wc.events, wc.is_active,
+		       wc.created_by, wc.created_at, wc.updated_at,
+		       COUNT(*) FILTER (WHERE d.status = 'delivered' AND d.created_at > NOW() - INTERVAL '30 days'),
+		       COUNT(*) FILTER (WHERE d.status = 'failed' AND d.created_at > NOW() - INTERVAL '30 days'),
+		       MAX(d.created_at)
+		FROM webhook_configs wc
+		LEFT JOIN projects p ON p.id = wc.project_id
+		LEFT JOIN webhook_deliveries d ON d.webhook_id = wc.id
+		WHERE wc.workspace_id = $1
+		GROUP BY wc.id, p.name
+		ORDER BY wc.created_at DESC
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListByWorkspace: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Webhook, 0)
+	for rows.Next() {
+		var w Webhook
+		if err := rows.Scan(&w.ID, &w.WorkspaceID, &w.ProjectID, &w.ProjectName, &w.Name, &w.TargetURL, &w.Events, &w.IsActive,
+			&w.CreatedBy, &w.CreatedAt, &w.UpdatedAt, &w.Sent30d, &w.Failed30d, &w.LastEventAt); err != nil {
+			return nil, fmt.Errorf("repository.ListByWorkspace: scan: %w", err)
+		}
+		list = append(list, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListByWorkspace: %w", err)
+	}
+	return list, nil
+}
+
 // ListActiveForEvent -- webhook aktif grup yang berlangganan eventType,
 // dicocokkan cakupan (org_id NULL = seluruh grup, atau org_id = orgID
 // persis) -- dipanggil WebhookService.Dispatch tiap mutasi project.
@@ -167,6 +231,34 @@ func (r *WebhookRepository) ListActiveForEvent(ctx context.Context, exec db.Exec
 	return list, rows.Err()
 }
 
+// ListActiveForEventWorkspace -- S4W-14, sejajar ListActiveForEvent tapi
+// cakupan workspace (project_id NULL = seluruh workspace, atau project_id =
+// projectID persis -- LINGKUP "Project X" desain "AW Add Webhook.dc.html").
+// Dipanggil bersisian dengan ListActiveForEvent (dua-duanya bisa punya
+// hasil untuk satu event yang sama -- webhook grup DAN webhook workspace
+// boleh sama-sama aktif, tidak saling menggantikan).
+func (r *WebhookRepository) ListActiveForEventWorkspace(ctx context.Context, exec db.Executor, workspaceID, projectID, eventType string) ([]Webhook, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, workspace_id, project_id, name, target_url, events, is_active, created_by, created_at, updated_at
+		FROM webhook_configs
+		WHERE workspace_id = $1 AND is_active = TRUE AND (project_id IS NULL OR project_id = $2) AND $3 = ANY(events)
+	`, workspaceID, projectID, eventType)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListActiveForEventWorkspace: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Webhook, 0)
+	for rows.Next() {
+		var w Webhook
+		if err := rows.Scan(&w.ID, &w.WorkspaceID, &w.ProjectID, &w.Name, &w.TargetURL, &w.Events, &w.IsActive, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListActiveForEventWorkspace: scan: %w", err)
+		}
+		list = append(list, w)
+	}
+	return list, rows.Err()
+}
+
 // DecryptSecret -- HANYA dipanggil job pengiriman (worker) dan handler Test,
 // keduanya butuh plaintext untuk menandatangani payload HMAC-SHA256.
 func (r *WebhookRepository) DecryptSecret(ctx context.Context, exec db.Executor, webhookID string) (string, error) {
@@ -186,11 +278,14 @@ func (r *WebhookRepository) DecryptSecret(ctx context.Context, exec db.Executor,
 
 // Update menyimpan before/after (url + jumlah event) ke audit trail, sama
 // pola before/after di store.updateWebhook desain.
-func (r *WebhookRepository) Update(ctx context.Context, exec db.Executor, webhookID, name, targetURL string, orgID *string, events []string, actorID, actorRole string, before *Webhook) error {
+// Update -- orgID/projectID PERSIS SATU relevan tergantung cakupan baris
+// (orgID untuk group_id NOT NULL, projectID untuk workspace_id NOT NULL) --
+// caller (service) yang menjamin, sisi lain selalu dikirim nil di sini.
+func (r *WebhookRepository) Update(ctx context.Context, exec db.Executor, webhookID, name, targetURL string, orgID, projectID *string, events []string, actorID, actorRole string, before *Webhook) error {
 	tag, err := exec.Exec(ctx, `
-		UPDATE webhook_configs SET name = $2, target_url = $3, org_id = $4, events = $5, updated_at = NOW()
+		UPDATE webhook_configs SET name = $2, target_url = $3, org_id = $4, project_id = $5, events = $6, updated_at = NOW()
 		WHERE id = $1
-	`, webhookID, name, targetURL, orgID, events)
+	`, webhookID, name, targetURL, orgID, projectID, events)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
 	}
@@ -199,8 +294,7 @@ func (r *WebhookRepository) Update(ctx context.Context, exec db.Executor, webhoo
 	}
 	stateBefore := map[string]any{"target_url": before.TargetURL, "event_count": len(before.Events)}
 	stateAfter := map[string]any{"target_url": targetURL, "event_count": len(events)}
-	groupID := before.GroupID
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.updated", webhookID, orgID, groupID, stateBefore, stateAfter); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.updated", webhookID, orgID, before.GroupID, before.WorkspaceID, stateBefore, stateAfter); err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
 	}
 	return nil
@@ -218,7 +312,7 @@ func (r *WebhookRepository) SetActive(ctx context.Context, exec db.Executor, web
 	if !active {
 		action = "webhook.deactivated"
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, action, webhookID, before.OrgID, before.GroupID, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, action, webhookID, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
 		return fmt.Errorf("repository.SetActive: %w", err)
 	}
 	return nil
@@ -235,7 +329,7 @@ func (r *WebhookRepository) RegenerateSecret(ctx context.Context, exec db.Execut
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.RegenerateSecret: %w", domain.ErrWebhookNotFound)
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.secret_regenerated", webhookID, before.OrgID, before.GroupID, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.secret_regenerated", webhookID, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
 		return fmt.Errorf("repository.RegenerateSecret: %w", err)
 	}
 	return nil
@@ -249,7 +343,7 @@ func (r *WebhookRepository) Delete(ctx context.Context, exec db.Executor, webhoo
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Delete: %w", domain.ErrWebhookNotFound)
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.deleted", webhookID, before.OrgID, before.GroupID, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.deleted", webhookID, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
 		return fmt.Errorf("repository.Delete: %w", err)
 	}
 	return nil
@@ -259,13 +353,14 @@ func (r *WebhookRepository) Delete(ctx context.Context, exec db.Executor, webhoo
 // platform_audit_logs, account_repository.go) supaya actor_ip+request_path
 // ikut tercatat otomatis dari context. Selalu ke audit_logs (BUKAN
 // platform_audit_logs) walau actor platform_admin -- pola sama
-// insertOrgAudit/insertWorkspaceAudit, entitas ini milik grup/organisasi,
-// bukan domain khusus konsol Platform Admin. group_id disertakan di metadata
-// (bukan kolom audit_logs -- tabel itu tidak punya kolom group_id) supaya
-// webhook cakupan "seluruh grup" (org_id NULL) tetap bisa ditemukan nanti.
-func insertWebhookAudit(ctx context.Context, exec execer, actorID, actorRole, action, webhookID string, orgID *string, groupID string, stateBefore, stateAfter map[string]any) error {
+// insertOrgAudit/insertWorkspaceAudit, entitas ini milik grup/organisasi/
+// workspace, bukan domain khusus konsol Platform Admin. group_id/
+// workspace_id disertakan di metadata (bukan kolom audit_logs -- tabel itu
+// tidak punya kolom group_id/workspace_id) supaya webhook cakupan luas
+// (org_id/project_id NULL) tetap bisa ditemukan nanti.
+func insertWebhookAudit(ctx context.Context, exec execer, actorID, actorRole, action, webhookID string, orgID, groupID, workspaceID *string, stateBefore, stateAfter map[string]any) error {
 	return writeAuditLog(ctx, exec, "audit_logs", actorID, actorRole, action, "webhook", &webhookID,
-		map[string]any{"group_id": groupID, "org_id": orgID}, stateBefore, stateAfter)
+		map[string]any{"group_id": groupID, "org_id": orgID, "workspace_id": workspaceID}, stateBefore, stateAfter)
 }
 
 // CreateDelivery -- satu baris PER PERCOBAAN, lihat komentar migrasi.
@@ -312,6 +407,38 @@ func (r *WebhookRepository) ListDeliveries(ctx context.Context, exec db.Executor
 	return list, rows.Err()
 }
 
+// ListDeliveriesForWorkspace -- sejajar ListDeliveries, tab "Log Pengiriman"
+// "AW Webhook.dc.html".
+func (r *WebhookRepository) ListDeliveriesForWorkspace(ctx context.Context, exec db.Executor, workspaceID, statusFilter, webhookIDFilter string) ([]WebhookDelivery, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT d.id, d.webhook_id, wc.name, d.event_type, d.payload, d.attempt_number, d.status,
+		       d.http_status, d.response_body, d.error_message, d.duration_ms, d.created_at
+		FROM webhook_deliveries d
+		JOIN webhook_configs wc ON wc.id = d.webhook_id
+		WHERE wc.workspace_id = $1
+		  AND d.created_at > NOW() - INTERVAL '30 days'
+		  AND ($2 = '' OR d.status = $2)
+		  AND ($3 = '' OR d.webhook_id::text = $3)
+		ORDER BY d.created_at DESC
+		LIMIT 500
+	`, workspaceID, statusFilter, webhookIDFilter)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListDeliveriesForWorkspace: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]WebhookDelivery, 0)
+	for rows.Next() {
+		var d WebhookDelivery
+		if err := rows.Scan(&d.ID, &d.WebhookID, &d.WebhookName, &d.EventType, &d.Payload, &d.AttemptNumber, &d.Status,
+			&d.HTTPStatus, &d.ResponseBody, &d.ErrorMessage, &d.DurationMs, &d.CreatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListDeliveriesForWorkspace: scan: %w", err)
+		}
+		list = append(list, d)
+	}
+	return list, rows.Err()
+}
+
 // GroupAdminContact -- satu Group Admin pengelola grup (email+nama), dipakai
 // notifikasi kegagalan retry habis.
 type GroupAdminContact struct {
@@ -337,6 +464,32 @@ func (r *WebhookRepository) GroupAdminContacts(ctx context.Context, exec db.Exec
 		var a GroupAdminContact
 		if err := rows.Scan(&a.ID, &a.Email, &a.Name); err != nil {
 			return nil, fmt.Errorf("repository.GroupAdminContacts: scan: %w", err)
+		}
+		list = append(list, a)
+	}
+	return list, rows.Err()
+}
+
+// WorkspaceAdminContacts -- seluruh admin_workspace di workspace ini, pola
+// PERSIS GroupAdminContacts -- dipakai NotifyExhausted untuk webhook
+// cakupan workspace (S4W-14).
+func (r *WebhookRepository) WorkspaceAdminContacts(ctx context.Context, exec db.Executor, workspaceID string) ([]GroupAdminContact, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT u.id, u.email, u.display_name
+		FROM workspace_members wm
+		JOIN users u ON u.id = wm.user_id
+		WHERE wm.workspace_id = $1 AND wm.role = 'admin_workspace'
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.WorkspaceAdminContacts: %w", err)
+	}
+	defer rows.Close()
+
+	var list []GroupAdminContact
+	for rows.Next() {
+		var a GroupAdminContact
+		if err := rows.Scan(&a.ID, &a.Email, &a.Name); err != nil {
+			return nil, fmt.Errorf("repository.WorkspaceAdminContacts: scan: %w", err)
 		}
 		list = append(list, a)
 	}

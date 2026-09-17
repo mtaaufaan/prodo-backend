@@ -85,16 +85,17 @@ func run() error {
 	invitationSvc := service.NewInvitationService(invitationRepo, emailer, kcAdmin, accountRepo, rbacSvc, projectRepo, projectMemberRepo, logger, cfg.AppBaseURL)
 	csvImportHandlerDeps := worker.NewCSVImportHandler(pool, csvImportRepo, invitationSvc, logger)
 
-	// WebhookDeliveryJob (Track S4G) -- worker HANYA mengirim+mencatat
+	// WebhookDeliveryJob (Track S4G+S4W-14) -- worker HANYA mengirim+mencatat
 	// percobaan (DeliverAttempt) dan mengirim notifikasi exhausted, TIDAK
-	// pernah men-Dispatch/Create webhook baru -- enqueuer sengaja nil
-	// (tidak pernah dipanggil dari proses ini).
+	// pernah men-Dispatch/Create webhook baru -- enqueuer/rbac/projects
+	// sengaja nil (dipakai List/Create/authorizeWorkspace, tidak pernah
+	// dipanggil dari proses ini).
 	organizationRepo := repository.NewOrganizationRepository()
 	webhookRepo, err := repository.NewWebhookRepository(cfg.WebhookEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("setup webhook repository: %w", err)
 	}
-	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, nil, emailer, logger)
+	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, nil, nil, nil, emailer, logger)
 	webhookDeliveryHandlerDeps := worker.NewWebhookDeliveryHandler(pool, webhookSvc, logger)
 
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di

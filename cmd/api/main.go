@@ -225,7 +225,7 @@ func run() error {
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, invitationSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
 	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
-	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
+	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, rbacSvc, projectRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
 	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
 	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
 	groupLocaleSvc := service.NewGroupLocaleService(groupRepo, organizationRepo)
@@ -434,6 +434,29 @@ func run() error {
 	v1.Post("/statuses/:id/move", jwtAuth, dbCtx, customStatusHandler.Move)
 	v1.Post("/statuses/:id/undefine", jwtAuth, dbCtx, customStatusHandler.Undefine)
 	v1.Post("/statuses/:id/restore", jwtAuth, dbCtx, customStatusHandler.Restore)
+	// S4W-14, US-054 ("AW Webhook.dc.html"+"AW Add Webhook.dc.html") -- reuse
+	// WebhookService (Track S4G), AW-only (ditegakkan service, sama pola
+	// customStatusHandler.Create -- /webhooks/:webhookId/* tidak punya :wsId).
+	v1.Get("/workspaces/:wsId/webhooks", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.ListForWorkspace)
+	v1.Post("/workspaces/:wsId/webhooks", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.CreateForWorkspace)
+	v1.Put("/workspaces/:wsId/webhooks/:webhookId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.UpdateForWorkspace)
+	v1.Get("/workspaces/:wsId/webhooks/deliveries", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.DeliveriesForWorkspace)
+	v1.Patch("/workspaces/:wsId/webhooks/:webhookId/toggle-active", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.ToggleActive)
+	v1.Post("/workspaces/:wsId/webhooks/:webhookId/regenerate-secret", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.RegenerateSecret)
+	v1.Delete("/workspaces/:wsId/webhooks/:webhookId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), webhookHandler.Delete)
+	// Rate-limit 5x/menit -- sama pola /groups/:groupId/webhooks/:webhookId/test.
+	v1.Post("/workspaces/:wsId/webhooks/:webhookId/test", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"),
+		limiter.New(limiter.Config{
+			Max:        5,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Batas pengiriman tes webhook terlampaui (maks 5 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		webhookHandler.Test)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	// S4W-01: rate-limit 3x/menit PER-ROUTE, sama pola storage-allocation/
