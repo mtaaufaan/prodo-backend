@@ -13,9 +13,12 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
-// WebhookHandler -- Webhook (Track S4G, desain "GA Webhook.dc.html" +
-// "GA Add Webhook.dc.html"). Lihat komentar package service untuk 3 event
-// yang didukung.
+// WebhookHandler -- Webhook (Track S4G "GA Webhook.dc.html"+"GA Add
+// Webhook.dc.html", diperluas S4W-14 "AW Webhook.dc.html"+"AW Add Webhook.
+// dc.html"). Lihat komentar package service untuk 3 event yang didukung.
+// ToggleActive/RegenerateSecret/Delete/Test dipakai KEDUA cakupan (beroperasi
+// per webhookID, tidak butuh :groupId/:wsId) -- cuma List/Create/Deliveries
+// yang py handler terpisah karena parameter route beda.
 type WebhookHandler struct {
 	webhooks *service.WebhookService
 	logger   *zap.Logger
@@ -30,6 +33,15 @@ type webhookRequest struct {
 	Name   string   `json:"name"`
 	URL    string   `json:"url"`
 	Events []string `json:"events"`
+}
+
+// workspaceWebhookRequest -- LINGKUP "AW Add Webhook.dc.html" pakai
+// ProjectID (bukan OrgID), sisanya sama.
+type workspaceWebhookRequest struct {
+	ProjectID string   `json:"project_id"`
+	Name      string   `json:"name"`
+	URL       string   `json:"url"`
+	Events    []string `json:"events"`
 }
 
 // List menangani GET /groups/:groupId/webhooks.
@@ -82,6 +94,83 @@ func (h *WebhookHandler) Create(c *fiber.Ctx) error {
 		return h.mapError(c, err, "Gagal membuat webhook")
 	}
 	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": id, "secret": secret}))
+}
+
+// ListForWorkspace menangani GET /workspaces/:wsId/webhooks (S4W-14).
+func (h *WebhookHandler) ListForWorkspace(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.ListForWorkspace dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.ListForWorkspace dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	list, err := h.webhooks.ListForWorkspace(c.Context(), exec, workspaceID, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil daftar webhook")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		data[i] = webhookJSON(&list[i])
+	}
+	return c.JSON(response.Success(data))
+}
+
+// CreateForWorkspace menangani POST /workspaces/:wsId/webhooks (S4W-14).
+func (h *WebhookHandler) CreateForWorkspace(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.CreateForWorkspace dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.CreateForWorkspace dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	var body workspaceWebhookRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+
+	id, secret, err := h.webhooks.CreateForWorkspace(c.Context(), exec, workspaceID, body.ProjectID, body.Name, body.URL, body.Events, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal membuat webhook")
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": id, "secret": secret}))
+}
+
+// UpdateForWorkspace menangani PUT /workspaces/:wsId/webhooks/:webhookId
+// (S4W-14, "tambahkan kelola juga seperti GA").
+func (h *WebhookHandler) UpdateForWorkspace(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.UpdateForWorkspace dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.UpdateForWorkspace dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	webhookID := c.Params("webhookId")
+
+	var body workspaceWebhookRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+
+	if err := h.webhooks.UpdateForWorkspace(c.Context(), exec, webhookID, body.ProjectID, body.Name, body.URL, body.Events, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal memperbarui webhook")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": webhookID}))
 }
 
 // Update menangani PUT /groups/:groupId/webhooks/:webhookId.
@@ -227,9 +316,36 @@ func (h *WebhookHandler) Deliveries(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
+// DeliveriesForWorkspace menangani GET /workspaces/:wsId/webhooks/deliveries
+// ?status=&webhook_id= (S4W-14) -- tab Log Pengiriman "AW Webhook.dc.html".
+func (h *WebhookHandler) DeliveriesForWorkspace(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.DeliveriesForWorkspace dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WebhookHandler.DeliveriesForWorkspace dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	list, err := h.webhooks.ListDeliveriesForWorkspace(c.Context(), exec, workspaceID, c.Query("status"), c.Query("webhook_id"), actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil log pengiriman")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		data[i] = deliveryJSON(&list[i])
+	}
+	return c.JSON(response.Success(data))
+}
+
 func webhookJSON(w *repository.Webhook) fiber.Map {
 	return fiber.Map{
 		"id": w.ID, "org_id": w.OrgID, "org_name": w.OrgName, "name": w.Name, "url": w.TargetURL,
+		"workspace_id": w.WorkspaceID, "project_id": w.ProjectID, "project_name": w.ProjectName,
 		"events": w.Events, "is_active": w.IsActive, "created_at": w.CreatedAt,
 		"sent_30d": w.Sent30d, "failed_30d": w.Failed30d, "last_event_at": w.LastEventAt,
 	}
@@ -257,6 +373,8 @@ func (h *WebhookHandler) mapError(c *fiber.Ctx, err error, fallbackMessage strin
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Webhook tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrOrganizationNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Organisasi tidak ditemukan dalam grup ini", nil))
+	case errors.Is(err, domain.ErrProjectNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Project tidak ditemukan dalam workspace ini", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas grup ini.", nil))
 	default:
