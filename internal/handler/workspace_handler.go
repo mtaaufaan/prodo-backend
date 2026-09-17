@@ -240,6 +240,38 @@ func (h *WorkspaceHandler) Update(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "name": req.Name}))
 }
 
+type updateMentionSettingsRequest struct {
+	CooldownMinutes int  `json:"cooldown_minutes"`
+	DigestEnabled   bool `json:"digest_enabled"`
+}
+
+// UpdateMentionSettings menangani PUT /workspaces/:wsId/mention-settings
+// (S4W-07, US-033, "AW Cooldown Mention.dc.html" tombol "SIMPAN
+// PENGATURAN"). Otorisasi Admin Workspace ditegakkan middleware.RequireRole
+// di routing, sama pola Update di atas.
+func (h *WorkspaceHandler) UpdateMentionSettings(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.UpdateMentionSettings dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("WorkspaceHandler.UpdateMentionSettings dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	workspaceID := c.Params("wsId")
+
+	var req updateMentionSettingsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if err := h.workspaces.UpdateMentionSettings(c.Context(), exec, workspaceID, req.CooldownMinutes, req.DigestEnabled, actorUserID, actorRole); err != nil {
+		return h.mapWorkspaceError(c, err, "Gagal menyimpan pengaturan cooldown mention")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": workspaceID, "mention_cooldown_minutes": req.CooldownMinutes, "mention_digest_enabled": req.DigestEnabled}))
+}
+
 // Archive menangani PUT /workspaces/:wsId/archive (S4G-04, Track S4G,
 // DIRENAME dari Deactivate lama -- lihat komentar
 // WorkspaceRepository.Archive). ARSIP: read-only, beda dari Deactivate
@@ -564,12 +596,14 @@ func (h *WorkspaceHandler) Get(c *fiber.Ctx) error {
 		return h.mapWorkspaceError(c, err, "Gagal mengambil data workspace")
 	}
 	return c.JSON(response.Success(fiber.Map{
-		"id":             w.ID,
-		"org_id":         w.OrgID,
-		"name":           w.Name,
-		"archived_at":    w.ArchivedAt,
-		"deactivated_at": w.DeactivatedAt,
-		"created_at":     w.CreatedAt,
+		"id":                       w.ID,
+		"org_id":                   w.OrgID,
+		"name":                     w.Name,
+		"archived_at":              w.ArchivedAt,
+		"deactivated_at":           w.DeactivatedAt,
+		"created_at":               w.CreatedAt,
+		"mention_cooldown_minutes": w.MentionCooldownMinutes,
+		"mention_digest_enabled":   w.MentionDigestEnabled,
 	}))
 }
 

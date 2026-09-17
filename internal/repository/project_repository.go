@@ -68,6 +68,12 @@ type Project struct {
 	// form Tambah Project TETAP sesuai desain asli (tidak ada field ini).
 	Status  string
 	EndDate *time.Time
+	// MentionCooldownMinutes (S4W-07, US-033, "AW Cooldown Mention.dc.html"
+	// kartu "OVERRIDE LEVEL PROJECT") -- NULL berarti ikut nilai workspace,
+	// kolom sudah ada sejak §5.13 awal tapi belum pernah dibaca kode
+	// apa pun. Belum ada UI untuk PM mengisinya (US-033 AC project-level,
+	// scope terpisah) -- di sini baca-saja untuk preview AW.
+	MentionCooldownMinutes *int
 }
 
 // GetWorkspaceID mengembalikan workspace_id pemilik projectID -- dasar
@@ -190,7 +196,7 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL),
 		       COALESCE(creator.display_name, ''), COALESCE(creator.email, ''),
 		       COALESCE(pm_pending.email, ''), COALESCE(pm_pending.id::text, ''),
-		       p.status, p.end_date
+		       p.status, p.end_date, p.mention_cooldown_minutes
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.pm_user_id
 		LEFT JOIN users creator ON creator.id = p.created_by
@@ -213,7 +219,7 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code, &p.PMUserID,
 			&p.PMName, &p.PMEmail, &p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
 			&p.SprintCount, &p.TaskCount, &p.CreatedByName, &p.CreatedByEmail,
-			&p.PMPendingEmail, &p.PMPendingInvitationID, &p.Status, &p.EndDate); err != nil {
+			&p.PMPendingEmail, &p.PMPendingInvitationID, &p.Status, &p.EndDate, &p.MentionCooldownMinutes); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		list = append(list, p)

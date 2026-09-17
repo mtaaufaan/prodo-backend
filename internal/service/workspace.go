@@ -23,6 +23,7 @@ type workspaceRepository interface {
 	GetOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 	Get(ctx context.Context, exec db.Executor, workspaceID string) (*repository.Workspace, error)
 	Update(ctx context.Context, exec db.Executor, workspaceID, name, actorID, actorRole string) error
+	UpdateMentionSettings(ctx context.Context, exec db.Executor, workspaceID string, cooldownMinutes int, digestEnabled bool, actorID, actorRole string) error
 	Archive(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	Unarchive(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
 	Deactivate(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error
@@ -167,6 +168,27 @@ func (s *WorkspaceService) UpdateWorkspace(ctx context.Context, exec db.Executor
 	}
 	if err := s.repo.Update(ctx, exec, workspaceID, name, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.UpdateWorkspace: %w", err)
+	}
+	return nil
+}
+
+// mentionCooldownOptions -- 4 nilai resmi US-033 AC ("10 menit, 15 menit,
+// 20 menit, 30 menit"), bukan range bebas walau kolomnya CHECK 10-30.
+var mentionCooldownOptions = map[int]bool{10: true, 15: true, 20: true, 30: true}
+
+// UpdateMentionSettings -- PUT /workspaces/:wsId/mention-settings (S4W-07,
+// US-033, "AW Cooldown Mention.dc.html"). Otorisasi (Admin Workspace di
+// workspace ini, atau PA/GA pengelola org) sudah ditegakkan
+// middleware.RequireRole di routing, sama pola UpdateWorkspace.
+func (s *WorkspaceService) UpdateMentionSettings(ctx context.Context, exec db.Executor, workspaceID string, cooldownMinutes int, digestEnabled bool, actorID, actorRole string) error {
+	if workspaceID == "" {
+		return fmt.Errorf("service.UpdateMentionSettings: %w", domain.ErrInvalidInput)
+	}
+	if !mentionCooldownOptions[cooldownMinutes] {
+		return fmt.Errorf("service.UpdateMentionSettings: %w", domain.ErrInvalidInput)
+	}
+	if err := s.repo.UpdateMentionSettings(ctx, exec, workspaceID, cooldownMinutes, digestEnabled, actorID, actorRole); err != nil {
+		return fmt.Errorf("service.UpdateMentionSettings: %w", err)
 	}
 	return nil
 }
