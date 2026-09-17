@@ -122,7 +122,7 @@ func (f *fakeWebhookEnqueuer) Enqueue(_ context.Context, webhookID, eventType st
 	return nil
 }
 
-func newTestWebhookService(repo *fakeWebhookRepo, role string, projectWorkspaceID string) *WebhookService {
+func newTestWebhookService(repo *fakeWebhookRepo, role, projectWorkspaceID string) *WebhookService {
 	return NewWebhookService(repo, &fakeWebhookGroupAuthorizer{}, &fakeWebhookRoleChecker{role: role}, &fakeWebhookProjectResolver{workspaceID: projectWorkspaceID}, &fakeWebhookEnqueuer{}, nil, nil)
 }
 
