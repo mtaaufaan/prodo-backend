@@ -98,6 +98,21 @@ func run() error {
 	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, nil, nil, nil, emailer, logger)
 	webhookDeliveryHandlerDeps := worker.NewWebhookDeliveryHandler(pool, webhookSvc, logger)
 
+	// RuleDueDateCheckJob (S4W-11, Track S4W) -- butuh graf dependency
+	// TaskService PENUH (sama cmd/api) supaya action rule change_status/
+	// assign/create_subtask lewat SetTaskActions bisa jalan sungguhan dari
+	// job harian, bukan cuma trigger status_changed/task_created sinkron.
+	customStatusRepo := repository.NewCustomStatusRepository()
+	ruleRepo := repository.NewRuleRepository()
+	taskRepo := repository.NewTaskRepository()
+	taskPicRepo := repository.NewTaskPicRepository()
+	taskDependencyRepo := repository.NewTaskDependencyRepository()
+	taskStatusSessionRepo := repository.NewTaskStatusSessionRepository()
+	ruleSvc := service.NewRuleService(ruleRepo, rbacSvc, customStatusRepo, projectRepo, accountRepo, emailer, taskRepo)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc)
+	ruleSvc.SetTaskActions(taskSvc)
+	ruleDueDateCheckHandlerDeps := worker.NewRuleDueDateCheckHandler(pool, ruleSvc)
+
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di
 	// codebase ini, dijalankan tiap jam. Scheduler.Start() non-blocking
 	// (jalan di goroutine cron internal asynq) -- proses tetap blok di
@@ -110,6 +125,11 @@ func run() error {
 	// notifikasi H-60/H-80 (granularitas hari, bukan jam).
 	if _, err := scheduler.Register("@every 24h", asynq.NewTask(worker.TypeRetentionNotify, nil)); err != nil {
 		return fmt.Errorf("daftar jadwal RetentionNotify: %w", err)
+	}
+	// RuleDueDateCheckJob (S4W-11) -- harian, granularitas hari (kolom
+	// due_date DATE, bukan timestamp) cukup, sama pola RetentionNotify.
+	if _, err := scheduler.Register("@every 24h", asynq.NewTask(worker.TypeRuleDueDateCheck, nil)); err != nil {
+		return fmt.Errorf("daftar jadwal RuleDueDateCheck: %w", err)
 	}
 	if err := scheduler.Start(); err != nil {
 		return fmt.Errorf("start scheduler: %w", err)
@@ -135,7 +155,7 @@ func run() error {
 	})
 
 	log.Printf("PRODO Worker starting — env=%s concurrency=%d\n", cfg.AppEnv, cfg.AsynqConcurrency)
-	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, logger)); err != nil {
+	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, ruleDueDateCheckHandlerDeps, logger)); err != nil {
 		return fmt.Errorf("worker error: %w", err)
 	}
 	return nil
