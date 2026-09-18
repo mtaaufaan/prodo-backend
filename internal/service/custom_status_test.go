@@ -153,7 +153,7 @@ func TestCustomStatusService_Create_ValidationErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &fakeCustomStatusRepo{listResult: tc.list, nameExistsResult: tc.nameTaken}
-			svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+			svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 			_, err := svc.Create(context.Background(), nil, "ws-1", tc.statusName, tc.color, 0, "aw-1", "member")
 			if !errors.Is(err, domain.ErrInvalidInput) && !errors.Is(err, domain.ErrCustomStatusNameTaken) && !errors.Is(err, domain.ErrCustomStatusLimitReached) {
 				t.Errorf("err = %v, want validation error", err)
@@ -167,7 +167,7 @@ func TestCustomStatusService_Create_ValidationErrors(t *testing.T) {
 
 func TestCustomStatusService_Create_Success(t *testing.T) {
 	repo := &fakeCustomStatusRepo{listResult: []repository.CustomStatus{{ID: "s1"}, {ID: "s2"}}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	created, err := svc.Create(context.Background(), nil, "ws-1", "menunggu vendor", "signal", 1, "aw-1", "member")
 	if err != nil {
@@ -185,7 +185,7 @@ func TestCustomStatusService_Create_ForbiddenForNonAdmin(t *testing.T) {
 	for _, role := range []string{"project_manager", "editor"} {
 		t.Run(role, func(t *testing.T) {
 			repo := &fakeCustomStatusRepo{}
-			svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: role})
+			svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: role}, nil)
 			_, err := svc.Create(context.Background(), nil, "ws-1", "MENUNGGU VENDOR", "signal", 0, "user-1", "member")
 			if !errors.Is(err, domain.ErrForbidden) {
 				t.Errorf("err = %v, want domain.ErrForbidden (Create AW-only, %s tidak boleh)", err, role)
@@ -198,7 +198,7 @@ func TestCustomStatusService_UpdateNameColor_SystemNameLocked(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "BACKLOG", IsSystem: true},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	if err := svc.UpdateNameColor(context.Background(), nil, "s1", "NAMA BARU", "mint", "aw-1", "member"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -212,7 +212,7 @@ func TestCustomStatusService_UpdateNameColor_CustomValidatesName(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "LAMA", IsSystem: false},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	err := svc.UpdateNameColor(context.Background(), nil, "s1", "AB", "mint", "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
@@ -225,7 +225,7 @@ func TestCustomStatusService_UpdateNameColor_CustomValidatesName(t *testing.T) {
 
 func TestCustomStatusService_Move_InvalidDirection(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{"s1": {ID: "s1", ScopeID: "ws-1"}}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	if err := svc.Move(context.Background(), nil, "s1", 2, "aw-1", "member"); !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
@@ -236,7 +236,7 @@ func TestCustomStatusService_Undefine_SystemBlocked(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "DONE", IsSystem: true},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	if err := svc.Undefine(context.Background(), nil, "s1", "aw-1", "member"); !errors.Is(err, domain.ErrCustomStatusIsSystem) {
 		t.Errorf("err = %v, want domain.ErrCustomStatusIsSystem", err)
@@ -250,7 +250,7 @@ func TestCustomStatusService_Undefine_Success(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "MENUNGGU VENDOR", IsSystem: false},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	if err := svc.Undefine(context.Background(), nil, "s1", "aw-1", "member"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -260,11 +260,38 @@ func TestCustomStatusService_Undefine_Success(t *testing.T) {
 	}
 }
 
+type fakeCustomStatusRuleDeactivator struct {
+	calls []struct{ statusID, statusName string }
+}
+
+func (f *fakeCustomStatusRuleDeactivator) DeactivateForStatus(_ context.Context, _ db.Executor, statusID, statusName, _, _ string) error {
+	f.calls = append(f.calls, struct{ statusID, statusName string }{statusID, statusName})
+	return nil
+}
+
+// TestCustomStatusService_Undefine_DeactivatesRules (US-053) -- Undefine
+// harus meneruskan statusID+nama ke RuleService.DeactivateForStatus begitu
+// SetUndefined berhasil.
+func TestCustomStatusService_Undefine_DeactivatesRules(t *testing.T) {
+	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
+		"s1": {ID: "s1", ScopeID: "ws-1", Name: "MENUNGGU VENDOR", IsSystem: false},
+	}}
+	rules := &fakeCustomStatusRuleDeactivator{}
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, rules)
+
+	if err := svc.Undefine(context.Background(), nil, "s1", "aw-1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rules.calls) != 1 || rules.calls[0].statusID != "s1" || rules.calls[0].statusName != "MENUNGGU VENDOR" {
+		t.Errorf("calls = %+v, want satu panggilan DeactivateForStatus(s1, MENUNGGU VENDOR)", rules.calls)
+	}
+}
+
 func TestCustomStatusService_Restore_NotUndefinedBlocked(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", IsUndefined: false},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	if err := svc.Restore(context.Background(), nil, "s1", "aw-1", "member"); !errors.Is(err, domain.ErrCustomStatusNotUndefined) {
 		t.Errorf("err = %v, want domain.ErrCustomStatusNotUndefined", err)
@@ -275,7 +302,7 @@ func TestCustomStatusService_Restore_Success(t *testing.T) {
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", IsUndefined: true},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	if err := svc.Restore(context.Background(), nil, "s1", "aw-1", "member"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -292,7 +319,7 @@ func TestCustomStatusService_SetRequireStartConfirmation_UntrackedBlocked(t *tes
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "BACKLOG", IsSystem: true},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil)
 
 	err := svc.SetRequireStartConfirmation(context.Background(), nil, "s1", true, "aw-1", "member")
 	if !errors.Is(err, domain.ErrCustomStatusNotTrackable) {
@@ -310,7 +337,7 @@ func TestCustomStatusService_SetRequireStartConfirmation_AllowsPM(t *testing.T) 
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "IN PROGRESS", IsSystem: true},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "project_manager"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "project_manager"}, nil)
 
 	if err := svc.SetRequireStartConfirmation(context.Background(), nil, "s1", true, "pm-1", "member"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -324,7 +351,7 @@ func TestCustomStatusService_SetRequireStartConfirmation_ForbiddenForEditor(t *t
 	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
 		"s1": {ID: "s1", ScopeID: "ws-1", Name: "IN PROGRESS", IsSystem: true},
 	}}
-	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "editor"})
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "editor"}, nil)
 
 	if err := svc.SetRequireStartConfirmation(context.Background(), nil, "s1", true, "user-1", "member"); !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want domain.ErrForbidden", err)

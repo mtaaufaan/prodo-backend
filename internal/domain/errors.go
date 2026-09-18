@@ -489,6 +489,10 @@ var (
 	// https, SAML butuh idp_metadata_xml berupa XML well-formed (atau
 	// idp_metadata_url sebagai alternatif).
 	ErrInvalidSsoMetadata = errors.New("required metadata for the selected protocol is missing or invalid")
+
+	// ErrRuleNotFound dikembalikan saat automation_rules.id tidak ditemukan
+	// atau sudah soft-deleted (S4W-10).
+	ErrRuleNotFound = errors.New("automation rule not found")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
