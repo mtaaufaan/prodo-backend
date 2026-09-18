@@ -46,12 +46,12 @@ var blockedAttachmentExt = map[string]bool{"exe": true, "bat": true, "sh": true,
 // (macOS) -- ponytail: bukan daftar signature pihak ketiga yang lengkap,
 // upgrade kalau ada format berbahaya lain yang lolos di produksi.
 var executableMagicPrefixes = [][]byte{
-	{0x4D, 0x5A},                   // MZ -- PE/DOS
-	{0x7F, 'E', 'L', 'F'},          // ELF
-	{0xFE, 0xED, 0xFA, 0xCE},       // Mach-O 32-bit BE
-	{0xFE, 0xED, 0xFA, 0xCF},       // Mach-O 64-bit BE
-	{0xCE, 0xFA, 0xED, 0xFE},       // Mach-O 32-bit LE
-	{0xCF, 0xFA, 0xED, 0xFE},       // Mach-O 64-bit LE
+	{0x4D, 0x5A},             // MZ -- PE/DOS
+	{0x7F, 'E', 'L', 'F'},    // ELF
+	{0xFE, 0xED, 0xFA, 0xCE}, // Mach-O 32-bit BE
+	{0xFE, 0xED, 0xFA, 0xCF}, // Mach-O 64-bit BE
+	{0xCE, 0xFA, 0xED, 0xFE}, // Mach-O 32-bit LE
+	{0xCF, 0xFA, 0xED, 0xFE}, // Mach-O 64-bit LE
 }
 
 // validateAttachmentFile -- US-064 AC "validasi MIME type di sisi server,

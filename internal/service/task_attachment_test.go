@@ -116,7 +116,9 @@ func (f *fakeAttachmentWorkspaceInfo) Get(_ context.Context, _ db.Executor, _ st
 	return f.ws, nil
 }
 
-type fakeAttachmentOrgQuota struct{ info *repository.AttachmentQuotaInfo }
+type fakeAttachmentOrgQuota struct {
+	info *repository.AttachmentQuotaInfo
+}
 
 func (f *fakeAttachmentOrgQuota) GetAttachmentQuotaInfo(_ context.Context, _ db.Executor, _ string) (*repository.AttachmentQuotaInfo, error) {
 	return f.info, nil
@@ -282,7 +284,7 @@ func TestUpload_RejectsWhenLiveUsageOverQuota(t *testing.T) {
 // UsedBytes yang basi, upload bisa lolos padahal kuota organisasi
 // sebenarnya sudah penuh.
 func TestUpload_UsesLiveUsageNotStaleColumn(t *testing.T) {
-	repo := &fakeAttachmentRepo{orgUsageBytes: 99 * 1024 * 1024} // live: hampir penuh
+	repo := &fakeAttachmentRepo{orgUsageBytes: 99 * 1024 * 1024}                                                             // live: hampir penuh
 	quota := &repository.AttachmentQuotaInfo{OrgID: "org-1", QuotaBytes: 100 * 1024 * 1024, UsedBytes: 0, RetentionDays: 90} // kolom basi: masih 0
 	svc := newTestAttachmentService(repo, "editor", quota, nil, nil)
 
