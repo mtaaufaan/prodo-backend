@@ -42,13 +42,23 @@ type customStatusRepository interface {
 	SetRequireStartConfirmation(ctx context.Context, exec db.Executor, statusID string, require bool, actorID, actorRole string) error
 }
 
-type CustomStatusService struct {
-	repo customStatusRepository
-	rbac sprintWorkspaceRoleChecker
+// customStatusRuleDeactivator -- reuse RuleService.DeactivateForStatus
+// (S4W-10, US-053), dipanggil Undefine SETELAH status berhasil di-undefine.
+// nil diterima (rules belum ada saat CustomStatusService pertama dibangun
+// S4W-05, H11 belum selesai) -- Undefine skip pemanggilan kalau nil, sama
+// pola projectWebhookDispatcher yang boleh nil di ProjectService.
+type customStatusRuleDeactivator interface {
+	DeactivateForStatus(ctx context.Context, exec db.Executor, statusID, statusName, actorID, actorRole string) error
 }
 
-func NewCustomStatusService(repo customStatusRepository, rbac sprintWorkspaceRoleChecker) *CustomStatusService {
-	return &CustomStatusService{repo: repo, rbac: rbac}
+type CustomStatusService struct {
+	repo  customStatusRepository
+	rbac  sprintWorkspaceRoleChecker
+	rules customStatusRuleDeactivator
+}
+
+func NewCustomStatusService(repo customStatusRepository, rbac sprintWorkspaceRoleChecker, rules customStatusRuleDeactivator) *CustomStatusService {
+	return &CustomStatusService{repo: repo, rbac: rbac, rules: rules}
 }
 
 func (s *CustomStatusService) ListForWorkspace(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.CustomStatus, error) {
@@ -192,8 +202,10 @@ func (s *CustomStatusService) Move(ctx context.Context, exec db.Executor, status
 
 // Undefine -- POST /statuses/:id/undefine (S4W-05, US-021, "⊘ JADIKAN
 // UNDEFINED"). Status sistem TIDAK BISA di-undefine (wajib ada di setiap
-// project). Dampak ke rule automation SENGAJA belum ditangani -- lihat
-// komentar CustomStatusRepository.SetUndefined.
+// project). Dampak ke rule automation (US-053) ditutup S4W-10 -- best-
+// effort lewat s.rules, TIDAK PERNAH menggagalkan Undefine yang sudah
+// berhasil kalau notifikasi/deaktivasi rule gagal (mengikuti pola best-
+// effort dispatchWebhook).
 func (s *CustomStatusService) Undefine(ctx context.Context, exec db.Executor, statusID, actorID, actorRole string) error {
 	if statusID == "" {
 		return fmt.Errorf("service.Undefine: %w", domain.ErrInvalidInput)
@@ -210,6 +222,9 @@ func (s *CustomStatusService) Undefine(ctx context.Context, exec db.Executor, st
 	}
 	if err := s.repo.SetUndefined(ctx, exec, statusID, true, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.Undefine: %w", err)
+	}
+	if s.rules != nil {
+		_ = s.rules.DeactivateForStatus(ctx, exec, statusID, status.Name, actorID, actorRole)
 	}
 	return nil
 }

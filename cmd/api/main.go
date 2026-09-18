@@ -205,6 +205,7 @@ func run() error {
 	groupAuditRepo := repository.NewGroupAuditRepository()
 	groupPerformanceRepo := repository.NewGroupPerformanceRepository()
 	customStatusRepo := repository.NewCustomStatusRepository()
+	ruleRepo := repository.NewRuleRepository()
 	sprintRepo := repository.NewSprintRepository()
 	taskRepo := repository.NewTaskRepository()
 	taskPicRepo := repository.NewTaskPicRepository()
@@ -231,7 +232,8 @@ func run() error {
 	groupLocaleSvc := service.NewGroupLocaleService(groupRepo, organizationRepo)
 	groupSummarySvc := service.NewGroupSummaryService(organizationRepo, groupAuditRepo, retentionRepo, invitationRepo, organizationRepo)
 	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, accountRepo, invitationSvc, logger)
-	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc)
+	ruleSvc := service.NewRuleService(ruleRepo, rbacSvc, customStatusRepo, projectRepo, accountRepo, emailSvc)
+	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc, ruleSvc)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
@@ -289,6 +291,7 @@ func run() error {
 	groupLocaleHandler := handler.NewGroupLocaleHandler(groupLocaleSvc, logger)
 	groupSummaryHandler := handler.NewGroupSummaryHandler(groupSummarySvc, logger)
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
+	ruleHandler := handler.NewRuleHandler(ruleSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
 	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
@@ -457,6 +460,14 @@ func run() error {
 			},
 		}),
 		webhookHandler.Test)
+	// S4W-10/12, EPIC 7 ("AW Rule Automation.dc.html"+"AW Add Rule.dc.html")
+	// -- CRUD rule level workspace, AW-only (ditegakkan service, sama pola
+	// customStatusHandler.Create -- /rules/:id/* tidak punya :wsId).
+	v1.Get("/workspaces/:wsId/rules", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), ruleHandler.List)
+	v1.Post("/workspaces/:wsId/rules", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), ruleHandler.Create)
+	v1.Get("/workspaces/:wsId/rules/executions", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), ruleHandler.ListExecutions)
+	v1.Patch("/rules/:id/toggle-active", jwtAuth, dbCtx, ruleHandler.ToggleActive)
+	v1.Delete("/rules/:id", jwtAuth, dbCtx, ruleHandler.Delete)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	// S4W-01: rate-limit 3x/menit PER-ROUTE, sama pola storage-allocation/
