@@ -22,7 +22,7 @@ var validTaskPriority = map[string]bool{"critical": true, "high": true, "medium"
 
 // taskRepository -- interface didefinisikan di consumer, §3.9.
 type taskRepository interface {
-	Create(ctx context.Context, exec db.Executor, projectID string, sprintID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string) (*repository.Task, error)
+	Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string) (*repository.Task, error)
 	Get(ctx context.Context, exec db.Executor, taskID string) (*repository.Task, error)
 	List(ctx context.Context, exec db.Executor, projectID string, f repository.TaskFilter) ([]repository.Task, error)
 	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string) error
@@ -30,6 +30,19 @@ type taskRepository interface {
 	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness string) error
 	SoftDelete(ctx context.Context, exec db.Executor, taskID string) error
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
+	AssignUser(ctx context.Context, exec db.Executor, taskID, userID, assignedBy string) error
+}
+
+// taskRuleEvaluator -- reuse RuleService.Evaluate (S4W-11). Best-effort,
+// TIDAK PERNAH menggagalkan mutasi task yang sudah berhasil -- pola sama
+// projectWebhookDispatcher, cuma di-log kalau gagal. Diisi lewat setter
+// RuleService.SetTaskActions/main.go karena TaskService<->RuleService
+// saling butuh satu sama lain (RuleService butuh TaskService untuk
+// menjalankan action change_status/assign/create_subtask) -- dependency
+// melingkar dipecah lewat setter, bukan constructor param, keduanya tetap
+// di package `service` yang sama jadi tidak ada import cycle.
+type taskRuleEvaluator interface {
+	Evaluate(ctx context.Context, exec db.Executor, workspaceID, event string, task *repository.Task, actorID, actorRole string)
 }
 
 // taskPicRepository -- reuse TaskPicRepository (Phase 2). Interface
@@ -82,10 +95,20 @@ type TaskService struct {
 	statuses     taskCustomStatuses
 	rbac         sprintWorkspaceRoleChecker
 	projectRoles sprintProjectRoleChecker
+	rules        taskRuleEvaluator
 }
 
-func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, sessions taskStatusSessionRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskService {
-	return &TaskService{repo: repo, pics: pics, deps: deps, sessions: sessions, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
+func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, sessions taskStatusSessionRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker, rules taskRuleEvaluator) *TaskService {
+	return &TaskService{repo: repo, pics: pics, deps: deps, sessions: sessions, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles, rules: rules}
+}
+
+// fireRules -- best-effort, nil-safe (rules bisa nil di worker/test yang
+// tidak butuh execution engine).
+func (s *TaskService) fireRules(ctx context.Context, exec db.Executor, workspaceID, event string, task *repository.Task, actorID, actorRole string) {
+	if s.rules == nil {
+		return
+	}
+	s.rules.Evaluate(ctx, exec, workspaceID, event, task, actorID, actorRole)
 }
 
 // authorize -- identik SprintService.authorize (viewer/division_viewer
@@ -164,7 +187,9 @@ func equalIntPtr(a, b *int) bool {
 
 // Create -- desain "PM Add Task.dc.html": judul wajib, minimal satu
 // assignee, status default BACKLOG (S4-13). Story point Fibonacci-only
-// (opsional, NULL = belum diestimasi).
+// (opsional, NULL = belum diestimasi). Memicu rule trigger "task_created"
+// (S4W-11, US-049) setelah berhasil -- best-effort, tidak menggagalkan
+// pembuatan task.
 func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, assigneeUserIDs []string, actorID, actorRole string) (*repository.Task, error) {
 	title = strings.TrimSpace(title)
 	if projectID == "" || len(title) < 3 {
@@ -193,10 +218,11 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
 
-	task, err := s.repo.Create(ctx, exec, projectID, sprintID, backlog.ID, title, description, priority, dueDate, estimatedHours, storyPoints, actorID, assigneeUserIDs)
+	task, err := s.repo.Create(ctx, exec, projectID, sprintID, nil, backlog.ID, title, description, priority, dueDate, estimatedHours, storyPoints, actorID, assigneeUserIDs)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
+	s.fireRules(ctx, exec, workspaceID, "task_created", task, actorID, actorRole)
 	return task, nil
 }
 
@@ -283,6 +309,15 @@ func isFullPicMode(role string) bool {
 // KECUALI BACKLOG/BLOCKED. Setelah status berubah, successor LANGSUNG
 // task ini diberi tahu kalau task ini baru masuk/keluar DONE (S4-50).
 func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string) error {
+	return s.setStatusCore(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, true)
+}
+
+// setStatusCore -- isi asli SetStatus, sekarang dipakai BERSAMA
+// SetStatusForRule (S4W-11) lewat parameter fireRules -- satu-satunya
+// pembeda: rule-triggered TIDAK memicu evaluasi rule lagi (mencegah
+// infinite loop), guard/validasi bisnis (dependency, completeness, PIC
+// Group) TETAP SAMA PERSIS untuk kedua jalur.
+func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string, fireRules bool) error {
 	if taskID == "" || statusID == "" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrInvalidInput)
 	}
@@ -388,6 +423,80 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 		if err := s.deps.NotifySuccessorPics(ctx, exec, taskID, isDone); err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
 		}
+	}
+
+	// S4W-11 (US-049): trigger "status_changed" -- current diperbarui di
+	// memori (bukan query ulang) supaya rule condition project/priority/
+	// assignee dievaluasi terhadap task PASCA-perubahan. Best-effort, tidak
+	// menggagalkan SetStatus yang sudah berhasil. fireRules=false untuk
+	// panggilan dari SetStatusForRule sendiri (mencegah infinite loop).
+	if fireRules {
+		workspaceID, wsErr := s.projects.GetWorkspaceID(ctx, exec, projectID)
+		if wsErr == nil {
+			current.StatusID = statusID
+			current.StatusName = status.Name
+			s.fireRules(ctx, exec, workspaceID, "status_changed", current, actorID, actorRole)
+		}
+	}
+	return nil
+}
+
+// SetStatusForRule (S4W-11, action rule "Ubah status") -- dipanggil HANYA
+// dari RuleService.executeAction, TIDAK PERNAH dari HTTP handler. SENGAJA
+// tidak lewat SetStatus publik (yang mewajibkan picIDs manual + memicu
+// fireRules lagi -- akan infinite loop kalau rule lain mendengarkan status
+// yang sama). PIC baru default ke assignee task saat ini (fallback ke
+// pembuat rule kalau task tidak punya assignee sama sekali, seharusnya
+// tidak pernah terjadi karena assignee wajib saat Create) -- lolos guard
+// dependency/completeness/PIC-Group yang SAMA seperti perubahan manual,
+// supaya rule tidak bisa memaksa lompatan status yang sebetulnya diblokir
+// bisnis (kegagalan tercatat sebagai eksekusi GAGAL, bukan disembunyikan).
+func (s *TaskService) SetStatusForRule(ctx context.Context, exec db.Executor, taskID, statusID, actorID, actorRole string) error {
+	task, err := s.repo.Get(ctx, exec, taskID)
+	if err != nil {
+		return fmt.Errorf("service.SetStatusForRule: %w", err)
+	}
+	picIDs := make([]string, 0, len(task.Assignees))
+	for _, a := range task.Assignees {
+		picIDs = append(picIDs, a.UserID)
+	}
+	if len(picIDs) == 0 {
+		picIDs = []string{actorID}
+	}
+	return s.setStatusCore(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, false)
+}
+
+// AssignUserForRule (S4W-11, action rule "Assign ke user") -- idempotent
+// (ON CONFLICT DO NOTHING di repo). TIDAK memicu evaluasi rule lagi --
+// trigger "assignee_changed" (US-049 AC) karena itu TETAP DORMANT (tidak
+// ada jalur lain yang mengubah assignee di codebase ini selain Create),
+// sama nasib comment_added -- lihat komentar TaskRepository.AssignUser.
+func (s *TaskService) AssignUserForRule(ctx context.Context, exec db.Executor, taskID, userID, actorID, _ string) error {
+	if err := s.repo.AssignUser(ctx, exec, taskID, userID, actorID); err != nil {
+		return fmt.Errorf("service.AssignUserForRule: %w", err)
+	}
+	return nil
+}
+
+// CreateSubtaskForRule (S4W-11, action rule "Buat sub-task otomatis") --
+// minimal viable: judul diberi caller (RuleService, biasanya "Sub-task
+// otomatis: <nama rule>"), priority medium, tanpa assignee/due
+// date/sprint, status awal BACKLOG workspace (sama seperti Create manusia
+// biasa). TIDAK memicu trigger "task_created" lagi -- sub-task yang lahir
+// dari rule dianggap bagian dari aksi rule itu sendiri, bukan event baru
+// yang independen (konsisten prinsip "rule-triggered tidak pernah memicu
+// rule lain").
+func (s *TaskService) CreateSubtaskForRule(ctx context.Context, exec db.Executor, projectID, parentTaskID, title, actorID string) error {
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
+	}
+	backlog, err := s.statuses.GetBacklogStatus(ctx, exec, workspaceID)
+	if err != nil {
+		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
+	}
+	if _, err := s.repo.Create(ctx, exec, projectID, nil, &parentTaskID, backlog.ID, title, nil, "medium", nil, nil, nil, actorID, nil); err != nil {
+		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
 	return nil
 }

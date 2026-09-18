@@ -1,7 +1,11 @@
 package handler
 
 import (
+	"encoding/csv"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
@@ -160,7 +164,10 @@ func (h *RuleHandler) Delete(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": ruleID}))
 }
 
-// ListExecutions menangani GET /workspaces/:wsId/rules/executions?status=.
+// ListExecutions menangani GET /workspaces/:wsId/rules/executions?status=,
+// atau ?export=csv untuk unduh (kolom persis "AW Rule Automation.dc.html":
+// rule, trigger, task, action, hasil, timestamp, durasi -- durasi tidak
+// diukur di backend ini, selalu kosong, lihat komentar writeExecutionsCSV).
 func (h *RuleHandler) ListExecutions(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -178,11 +185,56 @@ func (h *RuleHandler) ListExecutions(c *fiber.Ctx) error {
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil log eksekusi")
 	}
+	if c.Query("export") == "csv" {
+		return h.writeExecutionsCSV(c, list)
+	}
 	data := make([]fiber.Map, len(list))
 	for i := range list {
 		data[i] = ruleExecutionJSON(&list[i])
 	}
 	return c.JSON(response.Success(data))
+}
+
+// writeExecutionsCSV -- pola PERSIS GroupAuditHandler.writeCSV. "durasi"
+// (kolom desain) selalu string kosong -- RuleService tidak mengukur waktu
+// eksekusi rule sama sekali (tidak ada requirement AC untuk itu), beda
+// dari desain yang punya field `ms` di data dummy prototipe.
+func (h *RuleHandler) writeExecutionsCSV(c *fiber.Ctx, list []repository.RuleExecution) error {
+	c.Set("Content-Type", "text/csv; charset=utf-8")
+	c.Set("Content-Disposition", `attachment; filename="rule-execution-log.csv"`)
+
+	w := csv.NewWriter(c.Response().BodyWriter())
+	if err := w.Write([]string{"rule", "trigger", "task", "action", "hasil", "timestamp", "durasi"}); err != nil {
+		return fmt.Errorf("handler.writeExecutionsCSV: header: %w", err)
+	}
+	for i := range list {
+		e := &list[i]
+		var trigger struct {
+			Event string `json:"event"`
+		}
+		_ = json.Unmarshal(e.TriggerEvent, &trigger)
+		var action struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(e.ActionTaken, &action)
+		task := stringOrEmpty(e.TaskCode)
+		if task == "" {
+			task = stringOrEmpty(e.TaskTitle)
+		}
+		if err := w.Write([]string{
+			e.RuleName,
+			trigger.Event,
+			task,
+			action.Type,
+			e.Status,
+			e.ExecutedAt.UTC().Format(time.RFC3339),
+			"",
+		}); err != nil {
+			return fmt.Errorf("handler.writeExecutionsCSV: row: %w", err)
+		}
+	}
+	w.Flush()
+	return w.Error()
 }
 
 func ruleJSON(rl *repository.Rule) fiber.Map {
@@ -198,6 +250,7 @@ func ruleExecutionJSON(e *repository.RuleExecution) fiber.Map {
 		"id": e.ID, "rule_id": e.RuleID, "rule_name": e.RuleName, "trigger_event": e.TriggerEvent,
 		"triggered_by": e.TriggeredBy, "executed_at": e.ExecutedAt, "status": e.Status,
 		"action_taken": e.ActionTaken, "error_message": e.ErrorMessage,
+		"task_code": e.TaskCode, "task_title": e.TaskTitle,
 	}
 }
 
