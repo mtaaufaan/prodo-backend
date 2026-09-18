@@ -54,6 +54,13 @@ type RuleExecution struct {
 	Status       string
 	ActionTaken  json.RawMessage
 	ErrorMessage *string
+	// TaskCode/TaskTitle -- reuse "task_id" di TriggerEvent (S4W-11 selalu
+	// task-based), LEFT JOIN supaya baris tetap muncul walau task sudah
+	// dihapus (soft-delete) atau id-nya tidak valid. Dipakai kolom "TASK"
+	// CSV export ("AW Rule Automation.dc.html") -- nil kalau task tidak
+	// ditemukan.
+	TaskCode  *string
+	TaskTitle *string
 }
 
 type RuleRepository struct{}
@@ -210,9 +217,11 @@ func (r *RuleRepository) DeactivateForStatus(ctx context.Context, exec db.Execut
 // tab-nya, bukan endpoint palsu yang menyusul.
 func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, workspaceID, statusFilter string) ([]RuleExecution, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT e.id, e.rule_id, ar.name, e.trigger_event, e.triggered_by, e.executed_at, e.status, e.action_taken, e.error_message
+		SELECT e.id, e.rule_id, ar.name, e.trigger_event, e.triggered_by, e.executed_at, e.status, e.action_taken, e.error_message,
+		       t.task_code, t.title
 		FROM automation_rule_executions e
 		JOIN automation_rules ar ON ar.id = e.rule_id
+		LEFT JOIN tasks t ON t.id = NULLIF(e.trigger_event->>'task_id', '')::uuid
 		WHERE ar.scope_type = 'workspace' AND ar.scope_id = $1
 		  AND ($2 = '' OR e.status = $2)
 		ORDER BY e.executed_at DESC
@@ -226,12 +235,100 @@ func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, w
 	list := make([]RuleExecution, 0)
 	for rows.Next() {
 		var e RuleExecution
-		if err := rows.Scan(&e.ID, &e.RuleID, &e.RuleName, &e.TriggerEvent, &e.TriggeredBy, &e.ExecutedAt, &e.Status, &e.ActionTaken, &e.ErrorMessage); err != nil {
+		if err := rows.Scan(&e.ID, &e.RuleID, &e.RuleName, &e.TriggerEvent, &e.TriggeredBy, &e.ExecutedAt, &e.Status, &e.ActionTaken, &e.ErrorMessage,
+			&e.TaskCode, &e.TaskTitle); err != nil {
 			return nil, fmt.Errorf("repository.ListExecutions: scan: %w", err)
 		}
 		list = append(list, e)
 	}
 	return list, rows.Err()
+}
+
+// ListActiveForEvent (S4W-11) -- rule aktif workspace ini yang trigger-nya
+// cocok event (+ statusID kalau event="status_changed", "" berarti tidak
+// difilter statusnya -- dipakai due-date/task_created yang tidak
+// mereferensi status tertentu di trigger).
+func (r *RuleRepository) ListActiveForEvent(ctx context.Context, exec db.Executor, workspaceID, event, statusID string) ([]Rule, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, scope_type, scope_id, name, trigger_config, condition_config, action_config,
+		       is_active, inactive_reason, is_template, created_by, created_at, updated_at
+		FROM automation_rules
+		WHERE scope_type = 'workspace' AND scope_id = $1 AND deleted_at IS NULL AND is_active = TRUE
+		  AND trigger_config->>'event' = $2
+		  AND ($3 = '' OR trigger_config->>'status_id' = $3)
+	`, workspaceID, event, statusID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListActiveForEvent: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Rule, 0)
+	for rows.Next() {
+		var rl Rule
+		if err := rows.Scan(&rl.ID, &rl.ScopeType, &rl.ScopeID, &rl.Name, &rl.TriggerConfig, &rl.ConditionConfig, &rl.ActionConfig,
+			&rl.IsActive, &rl.InactiveReason, &rl.IsTemplate, &rl.CreatedBy, &rl.CreatedAt, &rl.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListActiveForEvent: scan: %w", err)
+		}
+		list = append(list, rl)
+	}
+	return list, rows.Err()
+}
+
+// ListActiveDueDateRules (S4W-11) -- SEMUA rule workspace aktif dengan
+// trigger due_date_approaching, lintas workspace -- dipanggil job Asynq
+// harian (proses trusted background, bukan request per-workspace).
+func (r *RuleRepository) ListActiveDueDateRules(ctx context.Context, exec db.Executor) ([]Rule, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT id, scope_type, scope_id, name, trigger_config, condition_config, action_config,
+		       is_active, inactive_reason, is_template, created_by, created_at, updated_at
+		FROM automation_rules
+		WHERE scope_type = 'workspace' AND deleted_at IS NULL AND is_active = TRUE
+		  AND trigger_config->>'event' = 'due_date_approaching'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListActiveDueDateRules: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Rule, 0)
+	for rows.Next() {
+		var rl Rule
+		if err := rows.Scan(&rl.ID, &rl.ScopeType, &rl.ScopeID, &rl.Name, &rl.TriggerConfig, &rl.ConditionConfig, &rl.ActionConfig,
+			&rl.IsActive, &rl.InactiveReason, &rl.IsTemplate, &rl.CreatedBy, &rl.CreatedAt, &rl.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListActiveDueDateRules: scan: %w", err)
+		}
+		list = append(list, rl)
+	}
+	return list, rows.Err()
+}
+
+// CreateExecution (S4W-11) -- satu baris PER eksekusi rule, pola PERSIS
+// webhook_deliveries (tidak pernah diupdate, immutable log).
+func (r *RuleRepository) CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string) error {
+	_, err := exec.Exec(ctx, `
+		INSERT INTO automation_rule_executions (rule_id, trigger_event, triggered_by, status, action_taken, error_message)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, ruleID, triggerEvent, triggeredBy, status, actionTaken, errMessage)
+	if err != nil {
+		return fmt.Errorf("repository.CreateExecution: %w", err)
+	}
+	return nil
+}
+
+// HasExecutionForTask (S4W-11) -- dedup job due-date: satu rule+task cuma
+// boleh eksekusi sekali (tidak berulang tiap kali job harian jalan selama
+// task masih dalam jendela ambang hari) -- automation_rule_executions
+// sendiri jadi buku catat dedup (trigger_event->>'task_id'), pola sama
+// notifications dipakai StorageQuotaCheck/RetentionNotify.
+func (r *RuleRepository) HasExecutionForTask(ctx context.Context, exec db.Executor, ruleID, taskID string) (bool, error) {
+	var exists bool
+	err := exec.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM automation_rule_executions WHERE rule_id = $1 AND trigger_event->>'task_id' = $2)
+	`, ruleID, taskID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repository.HasExecutionForTask: %w", err)
+	}
+	return exists, nil
 }
 
 // insertRuleAudit -- reuse writeAuditLog (chokepoint audit_logs), pola

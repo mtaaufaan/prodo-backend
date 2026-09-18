@@ -98,6 +98,21 @@ type ruleRepository interface {
 	SoftDelete(ctx context.Context, exec db.Executor, ruleID, actorID, actorRole string, before *repository.Rule) error
 	DeactivateForStatus(ctx context.Context, exec db.Executor, statusID, reason, actorID, actorRole string) ([]repository.Rule, error)
 	ListExecutions(ctx context.Context, exec db.Executor, workspaceID, statusFilter string) ([]repository.RuleExecution, error)
+	ListActiveForEvent(ctx context.Context, exec db.Executor, workspaceID, event, statusID string) ([]repository.Rule, error)
+	ListActiveDueDateRules(ctx context.Context, exec db.Executor) ([]repository.Rule, error)
+	CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string) error
+	HasExecutionForTask(ctx context.Context, exec db.Executor, ruleID, taskID string) (bool, error)
+}
+
+// ruleTaskActions (S4W-11) -- reuse TaskService untuk menjalankan action
+// change_status/assign/create_subtask. Interface didefinisikan di
+// consumer, diisi lewat SetTaskActions (bukan constructor) karena
+// TaskService<->RuleService saling butuh satu sama lain -- lihat komentar
+// taskRuleEvaluator di task.go.
+type ruleTaskActions interface {
+	SetStatusForRule(ctx context.Context, exec db.Executor, taskID, statusID, actorID, actorRole string) error
+	AssignUserForRule(ctx context.Context, exec db.Executor, taskID, userID, actorID, actorRole string) error
+	CreateSubtaskForRule(ctx context.Context, exec db.Executor, projectID, parentTaskID, title, actorID string) error
 }
 
 // ruleStatusChecker -- reuse CustomStatusRepository.Get, dipakai validasi
@@ -119,17 +134,37 @@ type ruleUserContactFinder interface {
 	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
 }
 
-type RuleService struct {
-	repo     ruleRepository
-	rbac     sprintWorkspaceRoleChecker
-	statuses ruleStatusChecker
-	projects ruleProjectResolver
-	contacts ruleUserContactFinder
-	emailer  *EmailService
+// ruleDueTaskLister (S4W-11) -- reuse TaskRepository.ListDueForWorkspace
+// untuk RunDueDateCheck. Repository langsung (bukan lewat TaskService) --
+// tidak ada masalah dependency melingkar di level repository, cuma
+// TaskService<->RuleService yang saling butuh (lihat ruleTaskActions).
+type ruleDueTaskLister interface {
+	ListDueForWorkspace(ctx context.Context, exec db.Executor, workspaceID string, days int) ([]repository.Task, error)
 }
 
-func NewRuleService(repo ruleRepository, rbac sprintWorkspaceRoleChecker, statuses ruleStatusChecker, projects ruleProjectResolver, contacts ruleUserContactFinder, emailer *EmailService) *RuleService {
-	return &RuleService{repo: repo, rbac: rbac, statuses: statuses, projects: projects, contacts: contacts, emailer: emailer}
+type RuleService struct {
+	repo        ruleRepository
+	rbac        sprintWorkspaceRoleChecker
+	statuses    ruleStatusChecker
+	projects    ruleProjectResolver
+	contacts    ruleUserContactFinder
+	emailer     *EmailService
+	tasks       ruleDueTaskLister
+	taskActions ruleTaskActions
+}
+
+func NewRuleService(repo ruleRepository, rbac sprintWorkspaceRoleChecker, statuses ruleStatusChecker, projects ruleProjectResolver, contacts ruleUserContactFinder, emailer *EmailService, tasks ruleDueTaskLister) *RuleService {
+	return &RuleService{repo: repo, rbac: rbac, statuses: statuses, projects: projects, contacts: contacts, emailer: emailer, tasks: tasks}
+}
+
+// SetTaskActions (S4W-11) -- diisi main.go SETELAH TaskService dikonstruksi
+// (dependency melingkar TaskService<->RuleService, lihat komentar
+// taskRuleEvaluator di task.go). nil di test/worker yang tidak menjalankan
+// action rule (RunDueDateCheck dari job harian tetap butuh ini kalau rule
+// due-date pakai action change_status/assign/create_subtask, jadi worker
+// TETAP wajib mengisi ini, tidak boleh nil di sana).
+func (s *RuleService) SetTaskActions(a ruleTaskActions) {
+	s.taskActions = a
 }
 
 // authorizeWorkspace -- AW-only, PERSIS pola CustomStatusService.
@@ -360,6 +395,162 @@ func (s *RuleService) DeactivateForStatus(ctx context.Context, exec db.Executor,
 		}
 		if s.emailer != nil {
 			_ = s.emailer.SendRuleDeactivatedEmail(ctx, contact.Email, contact.DisplayName, rl.Name, statusName)
+		}
+	}
+	return nil
+}
+
+// conditionMatches -- condition_config kosong (NULL, "Tanpa kondisi")
+// selalu cocok. "sprint" ditangani di sini walau FE builder tidak
+// menawarkannya (lihat komentar package RuleRepository) -- defensif kalau
+// rule dibuat langsung lewat API.
+func conditionMatches(conditionConfig json.RawMessage, task *repository.Task) bool {
+	if len(conditionConfig) == 0 {
+		return true
+	}
+	var cc ruleConditionConfig
+	if err := json.Unmarshal(conditionConfig, &cc); err != nil {
+		return true
+	}
+	switch cc.Type {
+	case "project":
+		return task.ProjectID == cc.ProjectID
+	case "sprint":
+		return task.SprintID != nil && *task.SprintID == cc.SprintID
+	case "priority":
+		return task.Priority == cc.Priority
+	case "assignee":
+		for _, a := range task.Assignees {
+			if a.UserID == cc.UserID {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+// executeAction -- menjalankan SATU action rule terhadap task, dipanggil
+// SETELAH condition cocok. change_status/assign/create_subtask lewat
+// taskActions (setter S4W-11, lihat komentar ruleTaskActions); notify
+// langsung insert notifications, tidak butuh TaskService. actorID
+// eksekusi rule SELALU pembuat rule (rl.CreatedBy), BUKAN actor yang
+// memicu event -- rule bertindak dengan otoritas siapa yang membuatnya
+// (yang sudah tervalidasi admin_workspace/GA/PA saat Create), actorRole
+// "" supaya resolveRole TaskService fallback ke role workspace nyata
+// pembuat rule lewat RBACService.GetMemberRole.
+func (s *RuleService) executeAction(ctx context.Context, exec db.Executor, rl *repository.Rule, task *repository.Task) (json.RawMessage, error) {
+	var ac ruleActionConfig
+	if err := json.Unmarshal(rl.ActionConfig, &ac); err != nil {
+		return nil, fmt.Errorf("service.executeAction: %w", err)
+	}
+	if ac.Type != "notify" && s.taskActions == nil {
+		return nil, fmt.Errorf("service.executeAction: %w", domain.ErrInvalidInput)
+	}
+	switch ac.Type {
+	case "change_status":
+		if err := s.taskActions.SetStatusForRule(ctx, exec, task.ID, ac.StatusID, rl.CreatedBy, ""); err != nil {
+			return nil, err
+		}
+	case "assign":
+		if err := s.taskActions.AssignUserForRule(ctx, exec, task.ID, ac.TargetUserID, rl.CreatedBy, ""); err != nil {
+			return nil, err
+		}
+	case "create_subtask":
+		title := fmt.Sprintf("Sub-task otomatis: %s", rl.Name)
+		if err := s.taskActions.CreateSubtaskForRule(ctx, exec, task.ProjectID, task.ID, title, rl.CreatedBy); err != nil {
+			return nil, err
+		}
+	case "notify":
+		if _, err := exec.Exec(ctx, `
+			INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+			VALUES ($1, NULL, 'rule_action_notify', 'task', $2, $3, $4)
+		`, ac.TargetUserID, task.ID, fmt.Sprintf("Rule %q terpicu", rl.Name), fmt.Sprintf("Task %q", task.Title)); err != nil {
+			return nil, fmt.Errorf("service.executeAction: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("service.executeAction: %w", domain.ErrInvalidInput)
+	}
+	actionTaken, err := json.Marshal(ac)
+	if err != nil {
+		return nil, fmt.Errorf("service.executeAction: %w", err)
+	}
+	return actionTaken, nil
+}
+
+// runRule -- satu evaluasi rule terhadap satu task: condition tidak cocok
+// = tidak dicatat sama sekali (bukan "skip" entry, supaya tab Log
+// Eksekusi cuma berisi rule yang benar-benar jalan); condition cocok
+// SELALU dicatat satu baris (completed/failed) -- kegagalan action
+// (mis. guard dependency/completeness/PIC Group menolak change_status)
+// tetap harus terlihat, bukan silent-swallow.
+func (s *RuleService) runRule(ctx context.Context, exec db.Executor, rl *repository.Rule, task *repository.Task, event, triggeredBy string) {
+	if !conditionMatches(rl.ConditionConfig, task) {
+		return
+	}
+	triggerEvent, err := json.Marshal(map[string]string{"task_id": task.ID, "event": event})
+	if err != nil {
+		return
+	}
+	tb := triggeredBy
+	actionTaken, err := s.executeAction(ctx, exec, rl, task)
+	if err != nil {
+		msg := err.Error()
+		_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "failed", actionTaken, &msg)
+		return
+	}
+	_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "completed", actionTaken, nil)
+}
+
+// Evaluate (S4W-11) -- implementasi taskRuleEvaluator, dipanggil
+// TaskService.fireRules SETELAH task_created/status_changed berhasil
+// (best-effort, tidak pernah mengembalikan error ke caller). Cakupan
+// event nyata cuma status_changed & task_created -- assignee_changed &
+// comment_added TETAP DORMANT (tidak ada jalur firing nyata, lihat
+// komentar TaskService.AssignUserForRule), ListActiveForEvent untuk
+// keduanya akan selalu kosong.
+func (s *RuleService) Evaluate(ctx context.Context, exec db.Executor, workspaceID, event string, task *repository.Task, actorID, actorRole string) {
+	statusID := ""
+	if event == "status_changed" {
+		statusID = task.StatusID
+	}
+	rules, err := s.repo.ListActiveForEvent(ctx, exec, workspaceID, event, statusID)
+	if err != nil {
+		return
+	}
+	for i := range rules {
+		s.runRule(ctx, exec, &rules[i], task, event, actorID)
+	}
+}
+
+// RunDueDateCheck (S4W-11) -- dipanggil job Asynq harian
+// (worker.RuleDueDateCheckHandler), trusted background process (RLS
+// context "platform_admin" diset caller, bukan per-request). Dedup lewat
+// HasExecutionForTask -- satu rule+task cuma boleh eksekusi sekali
+// walau job jalan tiap hari selama task masih dalam jendela hari.
+func (s *RuleService) RunDueDateCheck(ctx context.Context, exec db.Executor) error {
+	rules, err := s.repo.ListActiveDueDateRules(ctx, exec)
+	if err != nil {
+		return fmt.Errorf("service.RunDueDateCheck: %w", err)
+	}
+	for i := range rules {
+		rl := &rules[i]
+		var tc ruleTriggerConfig
+		if err := json.Unmarshal(rl.TriggerConfig, &tc); err != nil {
+			continue
+		}
+		tasks, err := s.tasks.ListDueForWorkspace(ctx, exec, rl.ScopeID, tc.Days)
+		if err != nil {
+			continue
+		}
+		for j := range tasks {
+			task := &tasks[j]
+			done, err := s.repo.HasExecutionForTask(ctx, exec, rl.ID, task.ID)
+			if err != nil || done {
+				continue
+			}
+			s.runRule(ctx, exec, rl, task, "due_date_approaching", rl.CreatedBy)
 		}
 	}
 	return nil

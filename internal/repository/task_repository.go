@@ -85,7 +85,12 @@ func (r *TaskRepository) nextTaskCode(ctx context.Context, exec db.Executor, pro
 	return fmt.Sprintf("%s-%03d", prefix, count+1), nil
 }
 
-func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID string, sprintID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string) (*Task, error) {
+// parentTaskID (susulan S4W-11, action "Buat sub-task otomatis") -- kolom
+// `parent_task_id` sudah ada di struct `Task`/skema sejak awal tapi TIDAK
+// PERNAH diisi Create manapun sampai sekarang -- satu-satunya konsumen saat
+// ini adalah RuleService lewat TaskService.CreateSubtaskForRule, nil untuk
+// alur create task manusia biasa.
+func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string) (*Task, error) {
 	taskCode, err := r.nextTaskCode(ctx, exec, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", err)
@@ -94,10 +99,10 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 	var id string
 	var createdAt, updatedAt time.Time
 	err = exec.QueryRow(ctx, `
-		INSERT INTO tasks (project_id, sprint_id, status_id, title, description, priority, completeness, due_date, estimated_hours, story_points, task_code, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, 'incomplete', $7, $8, $9, $10, $11)
+		INSERT INTO tasks (project_id, sprint_id, parent_task_id, status_id, title, description, priority, completeness, due_date, estimated_hours, story_points, task_code, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'incomplete', $8, $9, $10, $11, $12)
 		RETURNING id, created_at, updated_at
-	`, projectID, sprintID, statusID, title, description, priority, dueDate, estimatedHours, storyPoints, taskCode, createdBy).Scan(&id, &createdAt, &updatedAt)
+	`, projectID, sprintID, parentTaskID, statusID, title, description, priority, dueDate, estimatedHours, storyPoints, taskCode, createdBy).Scan(&id, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", err)
 	}
@@ -372,6 +377,88 @@ func (r *TaskRepository) SoftDelete(ctx context.Context, exec db.Executor, taskI
 		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrTaskNotFound)
 	}
 	return nil
+}
+
+// AssignUser (S4W-11, action rule "Assign ke user") -- idempotent, sama
+// pola INSERT assignee di Create. Trigger "assignee_changed" (US-049 AC)
+// TETAP DORMANT -- ini satu-satunya jalur assign yang ada di codebase
+// (tidak ada fitur reassign task manual di luar rule), dan rule-triggered
+// action ini SENGAJA tidak balik memicu evaluasi rule (lihat komentar
+// TaskService.AssignUserForRule) -- jadi trigger itu tidak pernah benar-
+// benar terpicu sampai ada fitur reassign manusia. Sama nasib comment_added.
+func (r *TaskRepository) AssignUser(ctx context.Context, exec db.Executor, taskID, userID, assignedBy string) error {
+	_, err := exec.Exec(ctx, `
+		INSERT INTO task_assignees (task_id, user_id, assignee_role, assigned_by)
+		VALUES ($1, $2, 'contributor', $3)
+		ON CONFLICT (task_id, user_id) DO NOTHING
+	`, taskID, userID, assignedBy)
+	if err != nil {
+		return fmt.Errorf("repository.AssignUser: %w", err)
+	}
+	return nil
+}
+
+// ListDueForWorkspace (S4W-11, job harian due-date) -- task di seluruh
+// project workspace ini dengan due_date dalam N hari ke depan (belum lewat,
+// belum DONE). Assignee di-load agregat sama pola List (bukan N+1).
+func (r *TaskRepository) ListDueForWorkspace(ctx context.Context, exec db.Executor, workspaceID string, days int) ([]Task, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT `+taskSelectColumns+`
+		FROM tasks t
+		JOIN custom_statuses cs ON cs.id = t.status_id
+		LEFT JOIN sprints s ON s.id = t.sprint_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE p.workspace_id = $1 AND t.deleted_at IS NULL AND t.due_date IS NOT NULL
+		  AND t.due_date >= CURRENT_DATE AND t.due_date <= CURRENT_DATE + make_interval(days => $2)
+		  AND cs.name != 'DONE'
+	`, workspaceID, days)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListDueForWorkspace: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Task, 0)
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repository.ListDueForWorkspace: scan: %w", err)
+		}
+		list = append(list, *t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListDueForWorkspace: %w", err)
+	}
+
+	if len(list) > 0 {
+		ids := make([]string, len(list))
+		byID := make(map[string]*Task, len(list))
+		for i := range list {
+			ids[i] = list[i].ID
+			byID[list[i].ID] = &list[i]
+		}
+		aRows, err := exec.Query(ctx, `
+			SELECT ta.task_id, ta.user_id, u.display_name, u.email, ta.assignee_role
+			FROM task_assignees ta
+			JOIN users u ON u.id = ta.user_id
+			WHERE ta.task_id = ANY($1)
+			ORDER BY ta.assigned_at
+		`, ids)
+		if err != nil {
+			return nil, fmt.Errorf("repository.ListDueForWorkspace: assignees: %w", err)
+		}
+		defer aRows.Close()
+		for aRows.Next() {
+			var taskID string
+			var a TaskAssignee
+			if err := aRows.Scan(&taskID, &a.UserID, &a.DisplayName, &a.Email, &a.Role); err != nil {
+				return nil, fmt.Errorf("repository.ListDueForWorkspace: assignees scan: %w", err)
+			}
+			if t, ok := byID[taskID]; ok {
+				t.Assignees = append(t.Assignees, a)
+			}
+		}
+	}
+	return list, nil
 }
 
 func (r *TaskRepository) GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error) {
