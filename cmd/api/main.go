@@ -62,6 +62,22 @@ func (e *asynqWebhookEnqueuer) Enqueue(ctx context.Context, webhookID, eventType
 	return err
 }
 
+// asynqAttachmentQuotaRefresher -- adapter tipis *asynq.Client -> interface
+// attachmentQuotaRefresher (internal/service/task_attachment.go), pola
+// sama asynqWebhookEnqueuer -- lihat komentar worker/refresh_org_storage.go
+// kenapa refresh kolom organizations.storage_used_mb WAJIB lewat job
+// trusted, tidak bisa langsung dari transaksi request Admin Workspace.
+type asynqAttachmentQuotaRefresher struct{ client *asynq.Client }
+
+func (e *asynqAttachmentQuotaRefresher) Enqueue(ctx context.Context, orgID string) error {
+	task, err := worker.NewRefreshOrgStorageTask(orgID)
+	if err != nil {
+		return err
+	}
+	_, err = e.client.EnqueueContext(ctx, task)
+	return err
+}
+
 // main adalah entry point aplikasi PRODO backend.
 func main() {
 	if err := run(); err != nil {
@@ -143,7 +159,10 @@ func run() error {
 		defer sentry.Flush(2 * time.Second)
 	}
 
-	app := fiber.New()
+	// BodyLimit dinaikkan dari default Fiber (4 MB) -- H20-22 (EPIC 10
+	// Attachment Management, US-064 AC "maks 50 MB per file") butuh
+	// multipart upload sampai 50 MB + overhead boundary multipart.
+	app := fiber.New(fiber.Config{BodyLimit: 55 * 1024 * 1024})
 	app.Use(recover.New())
 	app.Use(sentryfiber.New(sentryfiber.Options{Repanic: true}))
 	app.Use(otelfiber.Middleware())
@@ -239,6 +258,8 @@ func run() error {
 	ruleSvc.SetTaskActions(taskSvc)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
+	attachmentRepo := repository.NewTaskAttachmentRepository()
+	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -295,6 +316,7 @@ func run() error {
 	ruleHandler := handler.NewRuleHandler(ruleSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
+	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
 	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
@@ -752,6 +774,22 @@ func run() error {
 	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
 	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
 	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, taskHandler.StatusSessions)
+
+	// Attachment Management (H20-22, S4W-19/20/21, EPIC 10) -- upload/list
+	// per task tanpa RequireRole tambahan (RLS + otorisasi role di service
+	// sudah cukup, pola sama endpoint task lain); grid "AW Documents" level
+	// workspace AW-only.
+	v1.Post("/tasks/:id/attachments", jwtAuth, dbCtx, attachmentHandler.Upload)
+	v1.Get("/tasks/:id/attachments", jwtAuth, dbCtx, attachmentHandler.ListForTask)
+	v1.Get("/attachments/:id/download", jwtAuth, dbCtx, attachmentHandler.Download)
+	v1.Put("/attachments/:id", jwtAuth, dbCtx, attachmentHandler.Rename)
+	v1.Delete("/attachments/:id", jwtAuth, dbCtx, attachmentHandler.Delete)
+	v1.Post("/attachments/:id/restore", jwtAuth, dbCtx, attachmentHandler.Restore)
+	v1.Get("/workspaces/:wsId/documents", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.ListForWorkspace)
+	v1.Get("/workspaces/:wsId/documents/quota", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.Quota)
+	v1.Delete("/workspaces/:wsId/documents/:id", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.DeleteForWorkspace)
+	v1.Post("/workspaces/:wsId/documents/bulk-delete", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.BulkDelete)
+	v1.Post("/workspaces/:wsId/documents/quota-request", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.RequestQuota)
 
 	serverErr := make(chan error, 1)
 	go func() {
