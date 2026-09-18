@@ -31,6 +31,13 @@ CREATE TABLE automation_rules (
   condition_config JSONB,
   action_config    JSONB NOT NULL,
   is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+  -- inactive_reason (susulan S4W-10, sebelum PR ini di-merge -- belum ada
+  -- konsumen lain yang bergantung ke skema awal) -- membedakan NONAKTIF
+  -- manual (AW toggle, kolom NULL) dari INACTIVE otomatis akibat status
+  -- UNDEFINED (US-053, diisi CustomStatusService.Undefine lewat
+  -- RuleService.DeactivateForStatus) -- desain "AW Rule Automation.dc.html"
+  -- butuh membedakan dua alasan ini untuk badge status & pesan banner.
+  inactive_reason  TEXT,
   is_template      BOOLEAN NOT NULL DEFAULT FALSE,
   created_by       UUID NOT NULL REFERENCES users(id),
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
