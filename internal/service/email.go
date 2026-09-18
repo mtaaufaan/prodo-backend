@@ -168,6 +168,18 @@ func (e *EmailService) SendWebhookFailureEmail(_ context.Context, to, displayNam
 	return nil
 }
 
+// SendRuleDeactivatedEmail (US-053) -- ke pembuat rule saat rule-nya
+// otomatis nonaktif karena status yang dipakainya di-undefine.
+func (e *EmailService) SendRuleDeactivatedEmail(_ context.Context, to, displayName, ruleName, statusName string) error {
+	msg := buildRuleDeactivatedEmailMessage(e.from, to, displayName, ruleName, statusName)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+	if err := smtp.SendMail(addr, e.auth, e.from, []string{to}, msg); err != nil {
+		return fmt.Errorf("service.SendRuleDeactivatedEmail: %w", err)
+	}
+	return nil
+}
+
 // buildStorageQuotaWarningEmailMessage -- dipisah dari
 // SendStorageQuotaWarningEmail supaya bisa di-unit-test tanpa koneksi SMTP
 // nyata (pola sama dengan buildActivationEmailMessage).
@@ -354,6 +366,24 @@ func buildWebhookFailureEmailMessage(from, to, displayName, webhookName, targetU
 			"Webhook di konsol Group Admin kalau sudah tidak dipakai.\r\n\r\n"+
 			"-- Tim PRODO\r\n",
 		displayName, eventType, webhookName, targetURL,
+	)
+
+	return []byte(fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n%s",
+		from, to, subject, body,
+	))
+}
+
+func buildRuleDeactivatedEmailMessage(from, to, displayName, ruleName, statusName string) []byte {
+	subject := fmt.Sprintf("Rule %q menjadi Inactive - PRODO", ruleName)
+	body := fmt.Sprintf(
+		"Halo %s,\r\n\r\n"+
+			"Rule automation \"%s\" milik Anda menjadi Inactive secara otomatis karena\r\n"+
+			"status \"%s\" yang dipakai sebagai trigger/action-nya sudah dihapus (UNDEFINED).\r\n\r\n"+
+			"Perbarui trigger/kondisi rule ke status yang valid dari menu Rule Automation\r\n"+
+			"untuk mengaktifkannya kembali.\r\n\r\n"+
+			"-- Tim PRODO\r\n",
+		displayName, ruleName, statusName,
 	)
 
 	return []byte(fmt.Sprintf(
