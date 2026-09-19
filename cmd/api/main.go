@@ -260,6 +260,8 @@ func run() error {
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
+	performanceRepo := repository.NewPerformanceRepository()
+	performanceSvc := service.NewPerformanceService(performanceRepo, projectRepo, projectRepo, rbacSvc)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -317,6 +319,7 @@ func run() error {
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
+	performanceHandler := handler.NewPerformanceHandler(performanceSvc, logger)
 	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
@@ -790,6 +793,12 @@ func run() error {
 	v1.Delete("/workspaces/:wsId/documents/:id", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.DeleteForWorkspace)
 	v1.Post("/workspaces/:wsId/documents/bulk-delete", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.BulkDelete)
 	v1.Post("/workspaces/:wsId/documents/quota-request", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), attachmentHandler.RequestQuota)
+	// Performance Dashboard (EPIC 12, US-075/076/077/078). /projects/:projectId
+	// TANPA RequireRole -- otorisasi PM-pemilik-project vs Full mode
+	// bergantung data project itu sendiri, ditegakkan di service
+	// (PerformanceService.authorizeProject), bukan role workspace generik.
+	v1.Get("/workspaces/:wsId/performance", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), performanceHandler.ForWorkspace)
+	v1.Get("/projects/:projectId/performance", jwtAuth, dbCtx, performanceHandler.ForProject)
 
 	serverErr := make(chan error, 1)
 	go func() {
