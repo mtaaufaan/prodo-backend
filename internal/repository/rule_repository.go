@@ -78,7 +78,7 @@ func (r *RuleRepository) Create(ctx context.Context, exec db.Executor, workspace
 	if err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
-	if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.created", id, workspaceID, nil); err != nil {
+	if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.created", id, workspaceID, name, nil); err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
 	return id, nil
@@ -147,7 +147,7 @@ func (r *RuleRepository) SetActive(ctx context.Context, exec db.Executor, ruleID
 	if !active {
 		action = "rule.deactivated"
 	}
-	if err := insertRuleAudit(ctx, exec, actorID, actorRole, action, ruleID, before.ScopeID, nil); err != nil {
+	if err := insertRuleAudit(ctx, exec, actorID, actorRole, action, ruleID, before.ScopeID, before.Name, nil); err != nil {
 		return fmt.Errorf("repository.SetActive: %w", err)
 	}
 	return nil
@@ -164,7 +164,7 @@ func (r *RuleRepository) SoftDelete(ctx context.Context, exec db.Executor, ruleI
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrRuleNotFound)
 	}
-	if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.deleted", ruleID, before.ScopeID, nil); err != nil {
+	if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.deleted", ruleID, before.ScopeID, before.Name, nil); err != nil {
 		return fmt.Errorf("repository.SoftDelete: %w", err)
 	}
 	return nil
@@ -203,7 +203,7 @@ func (r *RuleRepository) DeactivateForStatus(ctx context.Context, exec db.Execut
 		return nil, fmt.Errorf("repository.DeactivateForStatus: %w", err)
 	}
 	for i := range affected {
-		if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.auto_deactivated", affected[i].ID, affected[i].ScopeID,
+		if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.auto_deactivated", affected[i].ID, affected[i].ScopeID, affected[i].Name,
 			map[string]any{"reason": reason}); err != nil {
 			return nil, fmt.Errorf("repository.DeactivateForStatus: %w", err)
 		}
@@ -335,7 +335,12 @@ func (r *RuleRepository) HasExecutionForTask(ctx context.Context, exec db.Execut
 // PERSIS insertWebhookAudit/insertCustomStatusAudit. stateBefore selalu nil
 // -- rule tidak punya Update (builder create-only sesuai desain), semua
 // aksi di sini toggle/single-value, tidak ada diff before/after berarti.
-func insertRuleAudit(ctx context.Context, exec execer, actorID, actorRole, action, ruleID, workspaceID string, stateAfter map[string]any) error {
+// name disertakan sebagai snapshot immutable di metadata.rule_name --
+// automation_rules soft-delete (deleted_at) jadi live JOIN sebenarnya aman
+// di sini, TAPI snapshot tetap ditambah supaya Audit Trail Workspace tidak
+// perlu JOIN sama sekali untuk resolusi nama (satu sumber kebenaran yang
+// sama dipakai attachment/custom_status/project, bukan pengecualian).
+func insertRuleAudit(ctx context.Context, exec execer, actorID, actorRole, action, ruleID, workspaceID, name string, stateAfter map[string]any) error {
 	return writeAuditLog(ctx, exec, "audit_logs", actorID, actorRole, action, "automation_rule", &ruleID,
-		map[string]any{"workspace_id": workspaceID}, nil, stateAfter)
+		map[string]any{"workspace_id": workspaceID, "rule_name": name}, nil, stateAfter)
 }

@@ -262,6 +262,8 @@ func run() error {
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
 	performanceRepo := repository.NewPerformanceRepository()
 	performanceSvc := service.NewPerformanceService(performanceRepo, projectRepo, projectRepo, rbacSvc)
+	workspaceAuditRepo := repository.NewWorkspaceAuditRepository()
+	workspaceAuditSvc := service.NewWorkspaceAuditService(workspaceAuditRepo, ruleRepo, rbacSvc)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -320,6 +322,7 @@ func run() error {
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
 	performanceHandler := handler.NewPerformanceHandler(performanceSvc, logger)
+	workspaceAuditHandler := handler.NewWorkspaceAuditHandler(workspaceAuditSvc, logger)
 	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
@@ -799,6 +802,11 @@ func run() error {
 	// (PerformanceService.authorizeProject), bukan role workspace generik.
 	v1.Get("/workspaces/:wsId/performance", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), performanceHandler.ForWorkspace)
 	v1.Get("/projects/:projectId/performance", jwtAuth, dbCtx, performanceHandler.ForProject)
+	// Audit Trail Workspace (S4W-16/17, US-058, dikerjakan TERAKHIR di Track
+	// S4W atas instruksi user).
+	v1.Get("/workspaces/:wsId/audit-logs", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceAuditHandler.List)
+	v1.Get("/workspaces/:wsId/audit-logs/actors", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceAuditHandler.Actors)
+	v1.Get("/workspaces/:wsId/audit-logs/rule-executions", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceAuditHandler.Executions)
 
 	serverErr := make(chan error, 1)
 	go func() {
