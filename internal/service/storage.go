@@ -56,3 +56,13 @@ func (s *StorageService) Download(ctx context.Context, key string) ([]byte, erro
 	}
 	return data, nil
 }
+
+// Delete menghapus objek secara fisik -- dipakai attachment hapus PERMANEN
+// (H20-22, EPIC 10) yang tidak menunggu masa retensi. Hapus retensi biasa
+// TIDAK memanggil ini (objek dipertahankan supaya restore masih mungkin).
+func (s *StorageService) Delete(ctx context.Context, key string) error {
+	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("service.Delete: %w", err)
+	}
+	return nil
+}

@@ -703,6 +703,56 @@ func (r *OrganizationRepository) GetSummary(ctx context.Context, exec db.Executo
 	return &s, nil
 }
 
+// AttachmentQuotaInfo -- kuota+pemakaian dilihat dari sudut satu
+// organisasi (H20-22, EPIC 10) -- dipakai gate upload (US-066) dan gauge
+// kuota "AW Documents.dc.html".
+type AttachmentQuotaInfo struct {
+	OrgID         string
+	OrgName       string
+	GroupID       string
+	QuotaBytes    int64
+	UsedBytes     int64
+	RetentionDays int
+}
+
+// GetAttachmentQuotaInfo mengembalikan info kuota organisasi PEMILIK
+// workspace ini (lookup lewat w.org_id) -- dipanggil dari konteks
+// workspace (upload/list Documents), bukan dari konteks organisasi
+// langsung.
+func (r *OrganizationRepository) GetAttachmentQuotaInfo(ctx context.Context, exec db.Executor, workspaceID string) (*AttachmentQuotaInfo, error) {
+	var q AttachmentQuotaInfo
+	var usedMB int64
+	err := exec.QueryRow(ctx, `
+		SELECT o.id, o.name, o.group_id, o.storage_quota_bytes, o.storage_used_mb, o.retention_days
+		FROM organizations o
+		JOIN workspaces w ON w.org_id = o.id
+		WHERE w.id = $1 AND o.deleted_at IS NULL
+	`, workspaceID).Scan(&q.OrgID, &q.OrgName, &q.GroupID, &q.QuotaBytes, &usedMB, &q.RetentionDays)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("repository.GetAttachmentQuotaInfo: %w", domain.ErrOrganizationNotFound)
+		}
+		return nil, fmt.Errorf("repository.GetAttachmentQuotaInfo: %w", err)
+	}
+	q.UsedBytes = usedMB * 1024 * 1024
+	return &q, nil
+}
+
+// RefreshStorageUsedMB menulis ULANG (bukan increment/decrement)
+// `storage_used_mb` dari angka bytes yang SUDAH dihitung caller (biasanya
+// TaskAttachmentRepository.OrgUsageBytes, SUM real dari file yang benar-
+// benar ada) -- menutup implementation_gaps.md IG-19 ("storage_used_mb
+// SELALU statis, tidak pernah dihitung dari file sungguhan"). Recompute-
+// from-source dipilih alih-alih increment per event supaya TIDAK ada
+// akumulasi drift presisi dari pembulatan MB berulang kali.
+func (r *OrganizationRepository) RefreshStorageUsedMB(ctx context.Context, exec db.Executor, orgID string, usedBytes int64) error {
+	usedMB := (usedBytes + 1024*1024 - 1) / (1024 * 1024) // ceil ke MB terdekat, bukan floor -- kuota tidak boleh terlihat lebih longgar dari fakta
+	if _, err := exec.Exec(ctx, `UPDATE organizations SET storage_used_mb = $2 WHERE id = $1`, orgID, usedMB); err != nil {
+		return fmt.Errorf("repository.RefreshStorageUsedMB: %w", err)
+	}
+	return nil
+}
+
 // insertOrgAudit -- stateBefore/stateAfter (2026-09-12, ditemukan user: GA
 // Audit Trail tidak pernah menampilkan NILAI SEBELUM/SESUDAH untuk aksi
 // organisasi apa pun) mengikuti pola insertProjectAudit -- nil untuk aksi

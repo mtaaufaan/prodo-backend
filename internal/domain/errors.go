@@ -493,6 +493,41 @@ var (
 	// ErrRuleNotFound dikembalikan saat automation_rules.id tidak ditemukan
 	// atau sudah soft-deleted (S4W-10).
 	ErrRuleNotFound = errors.New("automation rule not found")
+
+	// ErrAttachmentNotFound dikembalikan saat task_attachments.id tidak
+	// ditemukan (H20-22, S4W-19/20/21, EPIC 10).
+	ErrAttachmentNotFound = errors.New("attachment not found")
+
+	// ErrAttachmentTooLarge dikembalikan saat file yang diunggah melebihi 50
+	// MB (US-064 AC) -- ditolak SEBELUM upload ke MinIO dimulai.
+	ErrAttachmentTooLarge = errors.New("attachment exceeds 50 MB limit")
+
+	// ErrAttachmentTypeNotAllowed dikembalikan saat MIME type hasil deteksi
+	// server (bukan cuma ekstensi nama file) di luar whitelist US-064 AC,
+	// atau cocok blacklist eksplisit (.exe/.bat/.sh/.cmd/.msi/.apk/.dmg).
+	ErrAttachmentTypeNotAllowed = errors.New("attachment file type is not allowed")
+
+	// ErrStorageQuotaFull dikembalikan saat kuota storage organisasi sudah
+	// penuh (US-066) -- dicek SEBELUM file mulai ditransfer ke MinIO supaya
+	// tidak membuang bandwidth (AC eksplisit US-066 notes).
+	ErrStorageQuotaFull = errors.New("organization storage quota is full")
+
+	// ErrAttachmentNotDeleted dikembalikan POST /attachments/:id/restore
+	// saat attachment target sedang tidak dalam status terhapus (retensi).
+	ErrAttachmentNotDeleted = errors.New("attachment is not soft-deleted")
+
+	// ErrAttachmentAlreadyPurged dikembalikan Restore saat attachment sudah
+	// dihapus PERMANEN (purge_scheduled_at sudah lewat/sama dengan
+	// deleted_at, objek fisik MinIO sudah tidak ada) -- beda dari
+	// ErrAttachmentNotDeleted, baris ini MEMANG sedang terhapus tapi jendela
+	// pulihnya sudah nol.
+	ErrAttachmentAlreadyPurged = errors.New("attachment has been permanently deleted and cannot be restored")
+
+	// ErrWorkspaceNameConfirmMismatch dikembalikan saat hapus permanen
+	// lampiran (AW-only, "AW Documents.dc.html") -- konfirmasi ketik ulang
+	// nama workspace tidak cocok, mencegah klik tidak sengaja untuk aksi
+	// tanpa masa retensi ini.
+	ErrWorkspaceNameConfirmMismatch = errors.New("typed workspace name does not match")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
