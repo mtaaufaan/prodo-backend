@@ -104,7 +104,7 @@ func (r *WebhookRepository) Create(ctx context.Context, exec db.Executor, groupI
 	if workspaceID != "" {
 		workspaceIDPtr = &workspaceID
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.created", id, orgID, groupIDPtr, workspaceIDPtr, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.created", id, name, orgID, groupIDPtr, workspaceIDPtr, nil, nil); err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
 	return id, nil
@@ -294,7 +294,7 @@ func (r *WebhookRepository) Update(ctx context.Context, exec db.Executor, webhoo
 	}
 	stateBefore := map[string]any{"target_url": before.TargetURL, "event_count": len(before.Events)}
 	stateAfter := map[string]any{"target_url": targetURL, "event_count": len(events)}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.updated", webhookID, orgID, before.GroupID, before.WorkspaceID, stateBefore, stateAfter); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.updated", webhookID, name, orgID, before.GroupID, before.WorkspaceID, stateBefore, stateAfter); err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
 	}
 	return nil
@@ -312,7 +312,7 @@ func (r *WebhookRepository) SetActive(ctx context.Context, exec db.Executor, web
 	if !active {
 		action = "webhook.deactivated"
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, action, webhookID, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, action, webhookID, before.Name, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
 		return fmt.Errorf("repository.SetActive: %w", err)
 	}
 	return nil
@@ -329,7 +329,7 @@ func (r *WebhookRepository) RegenerateSecret(ctx context.Context, exec db.Execut
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.RegenerateSecret: %w", domain.ErrWebhookNotFound)
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.secret_regenerated", webhookID, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.secret_regenerated", webhookID, before.Name, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
 		return fmt.Errorf("repository.RegenerateSecret: %w", err)
 	}
 	return nil
@@ -343,7 +343,7 @@ func (r *WebhookRepository) Delete(ctx context.Context, exec db.Executor, webhoo
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Delete: %w", domain.ErrWebhookNotFound)
 	}
-	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.deleted", webhookID, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
+	if err := insertWebhookAudit(ctx, exec, actorID, actorRole, "webhook.deleted", webhookID, before.Name, before.OrgID, before.GroupID, before.WorkspaceID, nil, nil); err != nil {
 		return fmt.Errorf("repository.Delete: %w", err)
 	}
 	return nil
@@ -358,9 +358,17 @@ func (r *WebhookRepository) Delete(ctx context.Context, exec db.Executor, webhoo
 // workspace_id disertakan di metadata (bukan kolom audit_logs -- tabel itu
 // tidak punya kolom group_id/workspace_id) supaya webhook cakupan luas
 // (org_id/project_id NULL) tetap bisa ditemukan nanti.
-func insertWebhookAudit(ctx context.Context, exec execer, actorID, actorRole, action, webhookID string, orgID, groupID, workspaceID *string, stateBefore, stateAfter map[string]any) error {
+//
+// name disertakan sebagai SNAPSHOT immutable di metadata.webhook_name --
+// webhook_configs di-HARD-DELETE (bukan soft-delete seperti tabel entitas
+// lain di codebase ini), jadi live JOIN untuk resolusi nama akan rusak
+// permanen begitu baris webhook dihapus, PERSIS gap yang sudah diketahui
+// dan diterima apa adanya di GroupAuditRepository (komentar TargetName di
+// sana) untuk baris LAMA yang ditulis sebelum konvensi ini ada -- baris
+// BARU (lewat fungsi ini) tidak boleh mewarisi gap yang sama.
+func insertWebhookAudit(ctx context.Context, exec execer, actorID, actorRole, action, webhookID, name string, orgID, groupID, workspaceID *string, stateBefore, stateAfter map[string]any) error {
 	return writeAuditLog(ctx, exec, "audit_logs", actorID, actorRole, action, "webhook", &webhookID,
-		map[string]any{"group_id": groupID, "org_id": orgID, "workspace_id": workspaceID}, stateBefore, stateAfter)
+		map[string]any{"group_id": groupID, "org_id": orgID, "workspace_id": workspaceID, "webhook_name": name}, stateBefore, stateAfter)
 }
 
 // CreateDelivery -- satu baris PER PERCOBAAN, lihat komentar migrasi.
