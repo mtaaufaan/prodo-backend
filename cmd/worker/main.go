@@ -113,6 +113,12 @@ func run() error {
 	ruleSvc.SetTaskActions(taskSvc)
 	ruleDueDateCheckHandlerDeps := worker.NewRuleDueDateCheckHandler(pool, ruleSvc)
 
+	// RefreshOrgStorageJob (H20-22, EPIC 10) -- lihat komentar package
+	// worker/refresh_org_storage.go kenapa ini WAJIB proses trusted
+	// terpisah (RLS organizations.orgs_update cuma platform_admin/group_admin).
+	attachmentRepo := repository.NewTaskAttachmentRepository()
+	refreshOrgStorageHandlerDeps := worker.NewRefreshOrgStorageHandler(pool, attachmentRepo, organizationRepo)
+
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di
 	// codebase ini, dijalankan tiap jam. Scheduler.Start() non-blocking
 	// (jalan di goroutine cron internal asynq) -- proses tetap blok di
@@ -155,7 +161,7 @@ func run() error {
 	})
 
 	log.Printf("PRODO Worker starting — env=%s concurrency=%d\n", cfg.AppEnv, cfg.AsynqConcurrency)
-	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, ruleDueDateCheckHandlerDeps, logger)); err != nil {
+	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, ruleDueDateCheckHandlerDeps, refreshOrgStorageHandlerDeps, logger)); err != nil {
 		return fmt.Errorf("worker error: %w", err)
 	}
 	return nil
