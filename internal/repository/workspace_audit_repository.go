@@ -23,8 +23,9 @@
 // Live JOIN fallback HANYA untuk tabel yang diverifikasi TIDAK PERNAH
 // hard-delete (soft-delete `deleted_at`, atau tidak pernah dihapus sama
 // sekali): `projects`, `workspaces`, `automation_rules`, `custom_statuses`,
-// `task_attachments`, `users` (entity_type 'workspace_member', entity_id =
-// user_id), `user_invitations` (status diturunkan accepted_at/
+// `task_attachments`, `users` (entity_type 'workspace_member'/
+// 'project_member', entity_id = user_id -- ditambah 'project_member'
+// 2026-09-21, IG-89), `user_invitations` (status diturunkan accepted_at/
 // cancelled_at, baris tidak pernah dihapus).
 package repository
 
@@ -134,7 +135,7 @@ func (r *WorkspaceAuditRepository) List(ctx context.Context, exec db.Executor, f
 		       al.state_before, al.state_after, al.metadata, al.logged_at
 		FROM audit_logs al
 		LEFT JOIN users u ON u.id = al.actor_id
-		LEFT JOIN users tu ON al.entity_type = 'workspace_member' AND tu.id = al.entity_id
+		LEFT JOIN users tu ON al.entity_type IN ('workspace_member', 'project_member') AND tu.id = al.entity_id
 		LEFT JOIN user_invitations tui ON al.entity_type = 'user_invitation' AND tui.id = al.entity_id
 		LEFT JOIN projects tp ON al.entity_type = 'project' AND tp.id = al.entity_id
 		LEFT JOIN workspaces tw ON al.entity_type = 'workspace' AND tw.id = al.entity_id
@@ -167,13 +168,31 @@ func (r *WorkspaceAuditRepository) List(ctx context.Context, exec db.Executor, f
 }
 
 // ListActors -- opsi dropdown "AKTOR", dari SELURUH histori workspace ini
-// (bukan cuma halaman aktif).
+// (bukan cuma halaman aktif). `al.actor_role NOT IN (...)` (2026-09-21,
+// IG-89, dikonfirmasi user "aktor GA dihilangkan dari pilihan aktor di
+// AW. AW hanya bisa melihat AW, DV, PM, editor, approver, viewer") --
+// BLOCKLIST, bukan allowlist `= 'member'`: query empiris ke data live
+// menemukan audit_logs.actor_role TIDAK konsisten -- sebagian jalur
+// insert menulis literal platform_role JWT ('member'), sebagian menulis
+// LANGSUNG workspace_role granular ('admin_workspace', dst -- kemungkinan
+// jalur lama sebelum konvensi claims.PlatformRole seragam), dan banyak
+// baris lama actor_role NULL (gap terpisah, tidak diperbaiki di sini, di
+// luar cakupan permintaan ini). Allowlist `= 'member'` SALAH dicoba lebih
+// dulu -- diam-diam menghilangkan aktor workspace asli yang actor_role-nya
+// bukan persis 'member'. Blocklist 3 role platform-level inilah yang
+// benar: group_admin/platform_admin/executive beraksi di workspace ini
+// lewat context-switch/bypass, bukan keanggotaan asli. `actor_role IS NULL
+// OR ... NOT IN (...)` WAJIB, bukan cuma `NOT IN` -- jebakan logika
+// tiga-nilai SQL, `NULL NOT IN (...)` selalu UNKNOWN (bukan TRUE) sehingga
+// baris actor_role NULL diam-diam ikut tersingkir kalau ditulis polos
+// (ditemukan lewat verifikasi live: 4 aktor workspace asli hilang dari
+// dropdown padahal seharusnya tetap muncul).
 func (r *WorkspaceAuditRepository) ListActors(ctx context.Context, exec db.Executor, workspaceID string) ([]WorkspaceAuditActor, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT DISTINCT u.id, u.display_name
 		FROM audit_logs al
 		JOIN users u ON u.id = al.actor_id
-		WHERE `+fmt.Sprintf(workspaceScopeClause, 1, 1)+`
+		WHERE `+fmt.Sprintf(workspaceScopeClause, 1, 1)+` AND (al.actor_role IS NULL OR al.actor_role NOT IN ('platform_admin', 'group_admin', 'executive'))
 		ORDER BY u.display_name
 	`, workspaceID)
 	if err != nil {
