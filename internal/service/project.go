@@ -49,8 +49,8 @@ type projectUserFinder interface {
 // sudah ada semua) -- dipakai resolvePM/AssignPM jalur "undang PM baru"
 // (email belum terdaftar sama sekali).
 type projectPMInviter interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID, displayName string) (*Invitation, error)
-	CancelInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, displayName string) (*Invitation, error)
+	CancelInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error
 	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 }
 
@@ -212,12 +212,12 @@ func (s *ProjectService) resolvePM(ctx context.Context, exec db.Executor, worksp
 // sebagai syarat validasi lalu dibuang begitu saja). Mengambil nama
 // workspace untuk isi email; kegagalan CreateInvitation PROPAGATE (bukan
 // best-effort) karena tanpa undangan project akan permanen tanpa PM.
-func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspaceID, projectID, email, actorID, inviterName, inviteeName string) error {
+func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspaceID, projectID, email, actorID, actorRole, inviterName, inviteeName string) error {
 	workspaceName, err := s.invites.GetWorkspaceName(ctx, exec, workspaceID)
 	if err != nil {
 		return fmt.Errorf("service.invitePM: %w", err)
 	}
-	if _, err := s.invites.CreateInvitation(ctx, exec, email, workspaceID, "project_manager", actorID, workspaceName, inviterName, projectID, inviteeName); err != nil {
+	if _, err := s.invites.CreateInvitation(ctx, exec, email, workspaceID, "project_manager", actorID, actorRole, workspaceName, inviterName, projectID, inviteeName); err != nil {
 		return fmt.Errorf("service.invitePM: %w", err)
 	}
 	return nil
@@ -227,7 +227,7 @@ func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspa
 // project ini kalau ada -- dipanggil sebelum menetapkan PM baru (resolved
 // ATAU undangan baru) supaya satu project tidak pernah punya lebih dari
 // satu undangan PM pending sekaligus.
-func (s *ProjectService) cancelExistingPMInvitation(ctx context.Context, exec db.Executor, workspaceID, projectID, actorID string) error {
+func (s *ProjectService) cancelExistingPMInvitation(ctx context.Context, exec db.Executor, workspaceID, projectID, actorID, actorRole string) error {
 	pendingID, err := s.repo.GetPendingPMInvitationID(ctx, exec, projectID)
 	if err != nil {
 		return fmt.Errorf("service.cancelExistingPMInvitation: %w", err)
@@ -235,7 +235,7 @@ func (s *ProjectService) cancelExistingPMInvitation(ctx context.Context, exec db
 	if pendingID == "" {
 		return nil
 	}
-	if err := s.invites.CancelInvitation(ctx, exec, workspaceID, pendingID, actorID); err != nil {
+	if err := s.invites.CancelInvitation(ctx, exec, workspaceID, pendingID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.cancelExistingPMInvitation: %w", err)
 	}
 	return nil
@@ -275,7 +275,7 @@ func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspace
 	}
 
 	if pm.InviteEmail != "" {
-		if err := s.invitePM(ctx, exec, workspaceID, p.ID, pm.InviteEmail, actorID, inviterName, pm.InviteName); err != nil {
+		if err := s.invitePM(ctx, exec, workspaceID, p.ID, pm.InviteEmail, actorID, actorRole, inviterName, pm.InviteName); err != nil {
 			return nil, fmt.Errorf("service.Create: %w", err)
 		}
 	}
@@ -347,7 +347,7 @@ func (s *ProjectService) AssignPM(ctx context.Context, exec db.Executor, project
 	if err != nil {
 		return fmt.Errorf("service.AssignPM: %w", err)
 	}
-	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID); err != nil {
+	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.AssignPM: %w", err)
 	}
 	if pm.ResolvedUserID != "" {
@@ -363,7 +363,7 @@ func (s *ProjectService) AssignPM(ctx context.Context, exec db.Executor, project
 	if err := s.repo.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.AssignPM: %w", err)
 	}
-	if err := s.invitePM(ctx, exec, workspaceID, projectID, pm.InviteEmail, actorID, inviterName, pm.InviteName); err != nil {
+	if err := s.invitePM(ctx, exec, workspaceID, projectID, pm.InviteEmail, actorID, actorRole, inviterName, pm.InviteName); err != nil {
 		return fmt.Errorf("service.AssignPM: %w", err)
 	}
 	return nil
@@ -392,7 +392,7 @@ func (s *ProjectService) RemovePM(ctx context.Context, exec db.Executor, project
 	if currentPM != "" {
 		return fmt.Errorf("service.RemovePM: %w", domain.ErrCannotRemoveLastProjectManager)
 	}
-	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID); err != nil {
+	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.RemovePM: %w", err)
 	}
 	if err := s.repo.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {

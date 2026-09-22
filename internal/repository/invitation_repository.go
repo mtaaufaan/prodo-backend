@@ -56,7 +56,7 @@ func NewInvitationRepository() *InvitationRepository {
 func (r *InvitationRepository) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName string,
+	email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName string,
 	expiresAt time.Time,
 ) (string, error) {
 	var id string
@@ -73,7 +73,7 @@ func (r *InvitationRepository) CreateInvitation(
 		return "", fmt.Errorf("repository.CreateInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
 
-	if err := insertInvitationAudit(ctx, exec, invitedByUserID, "invitation.created", id, workspaceID, email); err != nil {
+	if err := insertInvitationAudit(ctx, exec, invitedByUserID, actorRole, "invitation.created", id, workspaceID, email); err != nil {
 		return "", fmt.Errorf("repository.CreateInvitation: %w", err)
 	}
 	return id, nil
@@ -232,7 +232,11 @@ func (r *InvitationRepository) AcceptInvitation(
 		return "", fmt.Errorf("repository.AcceptInvitation: update accepted_at: %w", err)
 	}
 
-	if err = insertInvitationAudit(ctx, exec, userID, "invitation.accepted", invitationID, workspaceID, email); err != nil {
+	// actorRole "member" literal (bukan parameter) -- userID di atas baru
+	// saja dibuat dengan platform_role='member' beberapa baris sebelumnya
+	// dalam transaksi yang sama, jadi nilainya deterministik, tidak perlu
+	// di-thread dari pemanggil.
+	if err = insertInvitationAudit(ctx, exec, userID, "member", "invitation.accepted", invitationID, workspaceID, email); err != nil {
 		return "", fmt.Errorf("repository.AcceptInvitation: %w", err)
 	}
 	return userID, nil
@@ -292,7 +296,7 @@ func (r *InvitationRepository) AcceptExecutiveInvitation(
 // lain tidak bisa membatalkan pakai tebak ID). 0 baris ter-update (tidak
 // ditemukan/sudah accepted/sudah cancelled) -> domain.ErrInvitationNotFound,
 // konsisten dengan Resend/FindPendingByTokenHash.
-func (r *InvitationRepository) Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error {
+func (r *InvitationRepository) Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error {
 	var email string
 	err := exec.QueryRow(ctx, `
 		UPDATE user_invitations SET cancelled_at = NOW()
@@ -305,7 +309,7 @@ func (r *InvitationRepository) Cancel(ctx context.Context, exec db.Executor, wor
 		}
 		return fmt.Errorf("repository.Cancel: %w", err)
 	}
-	if err := insertInvitationAudit(ctx, exec, actorID, "invitation.cancelled", invitationID, workspaceID, email); err != nil {
+	if err := insertInvitationAudit(ctx, exec, actorID, actorRole, "invitation.cancelled", invitationID, workspaceID, email); err != nil {
 		return fmt.Errorf("repository.Cancel: %w", err)
 	}
 	return nil
@@ -559,7 +563,20 @@ func (r *InvitationRepository) GetWorkspaceName(ctx context.Context, exec db.Exe
 // -- satu-satunya cara mengidentifikasi UNDANGAN MANA, entity_id
 // (invitation id) tidak resolve ke nama apa pun lewat JOIN manapun (beda
 // dari workspace/webhook yang punya tabel target bernama).
-func insertInvitationAudit(ctx context.Context, exec db.Executor, actorID, action, invitationID, workspaceID, email string) error {
+//
+// actorRole (2026-09-22, IG-89 lanjutan): SEBELUM ini parameter tidak ada
+// sama sekali -- actor_role selalu NULL untuk invitation.created/
+// cancelled/accepted, ditemukan user lewat pengujian live di workspace
+// produksi (bukan data uji): dropdown Aktor Audit Trail Workspace
+// menampilkan Group Admin ("Admin RDS") yang seharusnya sudah di-blocklist
+// (WorkspaceAuditRepository.ListActors) -- blocklist itu SENGAJA lolos
+// baris actor_role NULL (supaya aktor workspace asli yang actor_role-nya
+// kosong tidak ikut hilang), jadi GA/PA yang HANYA pernah membuat/
+// membatalkan/menerima undangan di suatu workspace lolos filter lewat
+// celah ini. actor_role di sini SELALU platform_role JWT si aktor
+// (claims.PlatformRole), BUKAN workspace_role granular -- sama konvensi
+// insertProjectAudit dkk.
+func insertInvitationAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, invitationID, workspaceID, email string) error {
 	ip, path := requestMetaFromContext(ctx)
 	metadata := map[string]any{"email": email}
 	if path != "" {
@@ -570,8 +587,8 @@ func insertInvitationAudit(ctx context.Context, exec db.Executor, actorID, actio
 		return fmt.Errorf("insertInvitationAudit: encode metadata: %w", err)
 	}
 	_, err = exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, org_id, workspace_id, actor_ip, metadata)
-		VALUES ($1, $2, 'user_invitation', $3, (SELECT org_id FROM workspaces WHERE id = $4), $4, $5::inet, $6)
-	`, actorID, action, invitationID, workspaceID, ip, metaJSON)
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, org_id, workspace_id, actor_ip, metadata)
+		VALUES ($1, $2, $3, 'user_invitation', $4, (SELECT org_id FROM workspaces WHERE id = $5), $5, $6::inet, $7)
+	`, actorID, actorRole, action, invitationID, workspaceID, ip, metaJSON)
 	return err
 }

@@ -28,12 +28,12 @@ const invitationTTL = 72 * time.Hour
 // terautentikasi biasa), untuk AcceptInvitation dari konteks khusus rute
 // publik (lihat komentar AcceptInvitation).
 type invitationRepository interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName string, expiresAt time.Time) (string, error)
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName string, expiresAt time.Time) (string, error)
 	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*repository.InvitationTarget, error)
 	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, workspaceID, role string) (string, error)
 	AcceptExecutiveInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, groupID string) (string, error)
-	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error
+	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error
 	Resend(ctx context.Context, exec db.Executor, workspaceID, invitationID, newTokenHash string, newExpiresAt time.Time) (*repository.ResendTarget, error)
 	CancelExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error
 	ResendExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, newTokenHash string, newExpiresAt time.Time) (string, error)
@@ -140,7 +140,7 @@ type Invitation struct {
 func (s *InvitationService) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
-	email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID, displayName string,
+	email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, displayName string,
 ) (*Invitation, error) {
 	rawToken, tokenHash, err := generateActivationToken()
 	if err != nil {
@@ -148,7 +148,7 @@ func (s *InvitationService) CreateInvitation(
 	}
 	expiresAt := time.Now().Add(invitationTTL)
 
-	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, tokenHash, projectID, displayName, expiresAt)
+	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateInvitation: %w", err)
 	}
@@ -280,7 +280,7 @@ func (s *InvitationService) CreateBulkInvitations(
 			var inv *Invitation
 			err := withSavepoint(ctx, exec, savepoint, func() error {
 				var err error
-				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID, "")
+				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, "")
 				return err
 			})
 			if err != nil {
@@ -447,8 +447,8 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 // CancelInvitation (S2-21) membatalkan undangan pending -- baris tidak
 // dihapus (audit trail tetap ada). domain.ErrInvitationNotFound kalau
 // sudah accepted/cancelled/tidak ada di workspace ini.
-func (s *InvitationService) CancelInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID string) error {
-	if err := s.repo.Cancel(ctx, exec, workspaceID, invitationID, actorID); err != nil {
+func (s *InvitationService) CancelInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error {
+	if err := s.repo.Cancel(ctx, exec, workspaceID, invitationID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.CancelInvitation: %w", err)
 	}
 	return nil

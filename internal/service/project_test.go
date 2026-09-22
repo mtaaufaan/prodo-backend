@@ -141,7 +141,7 @@ type fakeProjectPMInviter struct {
 	workspaceErr error
 }
 
-func (f *fakeProjectPMInviter) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, projectID, displayName string) (*Invitation, error) {
+func (f *fakeProjectPMInviter) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, _, projectID, displayName string) (*Invitation, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -149,7 +149,7 @@ func (f *fakeProjectPMInviter) CreateInvitation(_ context.Context, _ db.Executor
 	return &Invitation{Email: email, WorkspaceID: workspaceID, Role: role}, nil
 }
 
-func (f *fakeProjectPMInviter) CancelInvitation(_ context.Context, _ db.Executor, workspaceID, invitationID, _ string) error {
+func (f *fakeProjectPMInviter) CancelInvitation(_ context.Context, _ db.Executor, workspaceID, invitationID, _, _ string) error {
 	if f.cancelErr != nil {
 		return f.cancelErr
 	}
