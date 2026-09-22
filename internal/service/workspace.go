@@ -78,7 +78,7 @@ type contactLookup interface {
 // terdaftar sebagai user, reuse penuh mekanisme undangan 72 jam yang sudah
 // ada (POST /workspaces/:wsId/invitations) alih-alih membangun jalur baru.
 type invitationCreator interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, workspaceName, inviterName, projectID, displayName string) (*Invitation, error)
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, displayName string) (*Invitation, error)
 }
 
 // adminChangeNotifier -- interface didefinisikan di consumer, §3.9.
@@ -148,7 +148,7 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, exec db.Executor
 		if adminName == "" {
 			return nil, fmt.Errorf("service.CreateWorkspace: %w", domain.ErrInvalidInput)
 		}
-		if _, err := s.invites.CreateInvitation(ctx, exec, adminEmail, ws.ID, "admin_workspace", actorID, name, inviterName, "", adminName); err != nil {
+		if _, err := s.invites.CreateInvitation(ctx, exec, adminEmail, ws.ID, "admin_workspace", actorID, actorRole, name, inviterName, "", adminName); err != nil {
 			return nil, fmt.Errorf("service.CreateWorkspace: undang admin_workspace: %w", err)
 		}
 	default:
