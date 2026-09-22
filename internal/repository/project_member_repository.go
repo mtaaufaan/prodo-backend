@@ -325,8 +325,13 @@ func (r *ProjectMemberRepository) RevokeAllScopedForUser(ctx context.Context, ex
 
 // insertProjectMemberAudit -- entity_id = target userID (siapa yang
 // dimutasi), sama pola insertWorkspaceAudit's AssignRole. project_id
-// disimpan di metadata JSONB, bukan kolom entity_id/workspace_id/org_id
-// dedicated -- audit_logs tidak punya kolom project_id (§5.27).
+// disimpan di metadata JSONB, bukan kolom entity_id/org_id dedicated --
+// audit_logs tidak punya kolom project_id (§5.27). workspace_id KOLOM ASLI
+// (bukan metadata, kolomnya memang ada) diresolve via subquery ke
+// projects.workspace_id -- SEBELUM ini tidak pernah diisi sama sekali,
+// membuat project_member.added/role_changed/removed TIDAK PERNAH terlihat
+// di Audit Trail Admin Workspace manapun (ditemukan 2026-09-21, IG-89,
+// sesi audit "cek yang lainnya juga di AW apakah ada yang belum tercatat").
 // stateBefore/stateAfter + actor_ip/metadata.request_path
 // (implementation_gaps.md IG-64) -- sebelumnya tidak pernah diisi sama
 // sekali, mengikuti pola persis insertOrgAudit/insertWorkspaceAudit yang
@@ -350,8 +355,8 @@ func insertProjectMemberAudit(ctx context.Context, exec db.Executor, actorID, ac
 		return fmt.Errorf("insertProjectMemberAudit: encode state_after: %w", err)
 	}
 	_, err = exec.Exec(ctx, `
-		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, actor_ip, state_before, state_after, metadata)
-		VALUES ($1, $2, $3, 'project_member', $4, $5::inet, $6, $7, $8)
-	`, actorID, actorRole, action, targetUserID, ip, beforeJSON, afterJSON, metaJSON)
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, 'project_member', $4, (SELECT workspace_id FROM projects WHERE id = $5), $6::inet, $7, $8, $9)
+	`, actorID, actorRole, action, targetUserID, projectID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }

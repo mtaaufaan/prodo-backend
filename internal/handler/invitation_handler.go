@@ -279,7 +279,7 @@ func (h *InvitationHandler) ListPendingInvitations(c *fiber.Ctx) error {
 
 // CancelInvitation menangani DELETE /workspaces/:wsId/invitations/:invId (S2-21).
 func (h *InvitationHandler) CancelInvitation(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		h.logger.Error("CancelInvitation dipanggil tanpa RequireRole -- actor belum diresolve")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
@@ -292,7 +292,7 @@ func (h *InvitationHandler) CancelInvitation(c *fiber.Ctx) error {
 	workspaceID := c.Params("wsId")
 	invitationID := c.Params("invId")
 
-	if err := h.invitations.CancelInvitation(c.Context(), exec, workspaceID, invitationID, actorUserID); err != nil {
+	if err := h.invitations.CancelInvitation(c.Context(), exec, workspaceID, invitationID, actorUserID, actorRole); err != nil {
 		if errors.Is(err, domain.ErrInvitationNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("INVITATION_NOT_FOUND",
 				"Undangan tidak ditemukan atau sudah diterima/dibatalkan.", nil))

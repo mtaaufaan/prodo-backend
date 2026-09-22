@@ -1245,6 +1245,27 @@ func (r *AccountRepository) RecordLogin(ctx context.Context, userID, platformRol
 				}
 			}
 		}
+
+		// workspaceIDs (2026-09-21, IG-89): baris grup di atas membuat login
+		// terlihat di Audit Trail Group Admin, TAPI TIDAK PERNAH terlihat di
+		// Audit Trail Admin Workspace manapun -- audit_logs.workspace_id
+		// (atau metadata->>'workspace_id') tidak pernah diisi untuk
+		// user.login/user.backup_code_used sebelum ini. Ditemukan user lewat
+		// pengujian live ("login saya cek juga belum tercatat diaudit").
+		workspaceIDs, err := resolveAuditWorkspaceIDs(ctx, tx, userID, platformRole)
+		if err != nil {
+			return fmt.Errorf("repository.RecordLogin: %w", err)
+		}
+		for _, workspaceID := range workspaceIDs {
+			if err := insertUserAuditForWorkspace(ctx, tx, userID, platformRole, "user.login", workspaceID); err != nil {
+				return fmt.Errorf("repository.RecordLogin: %w", err)
+			}
+			if usedBackupCode {
+				if err := insertUserAuditForWorkspace(ctx, tx, userID, platformRole, "user.backup_code_used", workspaceID); err != nil {
+					return fmt.Errorf("repository.RecordLogin: %w", err)
+				}
+			}
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1320,6 +1341,56 @@ func insertUserAuditForGroup(ctx context.Context, tx pgx.Tx, userID, platformRol
 	return err
 }
 
+// resolveAuditWorkspaceIDs -- pasangan resolveAuditGroupIDs (2026-09-21,
+// IG-89), untuk workspace bukan grup. HANYA role "member" yang punya baris
+// workspace_members langsung (group_admin/executive/platform_admin masuk
+// workspace lewat context-switch/bypass, bukan keanggotaan -- aksi mereka
+// DI DALAM workspace sudah tercatat scoped lewat jalur masing-masing,
+// login mereka sendiri TIDAK perlu muncul di Audit Trail workspace manapun).
+func resolveAuditWorkspaceIDs(ctx context.Context, tx pgx.Tx, userID, platformRole string) ([]string, error) {
+	if platformRole != "member" {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT * FROM prodo_member_workspace_ids($1)`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolveAuditWorkspaceIDs: %w", err)
+	}
+	defer rows.Close()
+
+	workspaceIDs := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("resolveAuditWorkspaceIDs: scan: %w", err)
+		}
+		workspaceIDs = append(workspaceIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolveAuditWorkspaceIDs: %w", err)
+	}
+	return workspaceIDs, nil
+}
+
+// insertUserAuditForWorkspace -- pasangan insertUserAuditForGroup, TAPI
+// pakai kolom audit_logs.workspace_id asli (bukan metadata) -- kolomnya
+// memang ada, beda dari group_id yang tidak punya kolom dedicated.
+func insertUserAuditForWorkspace(ctx context.Context, tx pgx.Tx, userID, platformRole, action, workspaceID string) error {
+	ip, path := requestMetaFromContext(ctx)
+	var metaJSON []byte
+	if path != "" {
+		encoded, err := json.Marshal(map[string]any{"request_path": path})
+		if err != nil {
+			return fmt.Errorf("insertUserAuditForWorkspace: encode metadata: %w", err)
+		}
+		metaJSON = encoded
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, actor_ip, metadata)
+		VALUES ($1, $2, $3, 'user', $1, $4, $5::inet, $6)
+	`, userID, platformRole, action, workspaceID, ip, metaJSON)
+	return err
+}
+
 // logSelfAccountAudit menulis audit_logs untuk aksi self-service di GA
 // Pengaturan Akun (Track S4G, desain "GA Pengaturan Akun.dc.html") -- pola
 // scoping PERSIS RecordLogin (IG-57): platform_admin 1 baris lewat logAudit,
@@ -1338,6 +1409,21 @@ func logSelfAccountAudit(ctx context.Context, tx pgx.Tx, userID, platformRole, a
 	}
 	for _, groupID := range groupIDs {
 		if err := insertUserAuditForGroup(ctx, tx, userID, platformRole, action, groupID); err != nil {
+			return fmt.Errorf("logSelfAccountAudit: %w", err)
+		}
+	}
+
+	// workspaceIDs (2026-09-21, IG-89): sama root cause dengan RecordLogin --
+	// sebelum ini profil/password/MFA/preferensi notifikasi (Pengaturan Akun)
+	// tidak pernah terlihat di Audit Trail workspace manapun, cuma di grup.
+	// Baru relevan sejak IG-87 membuka akses Pengaturan Akun untuk role
+	// selain GA/PA.
+	workspaceIDs, err := resolveAuditWorkspaceIDs(ctx, tx, userID, platformRole)
+	if err != nil {
+		return fmt.Errorf("logSelfAccountAudit: %w", err)
+	}
+	for _, workspaceID := range workspaceIDs {
+		if err := insertUserAuditForWorkspace(ctx, tx, userID, platformRole, action, workspaceID); err != nil {
 			return fmt.Errorf("logSelfAccountAudit: %w", err)
 		}
 	}

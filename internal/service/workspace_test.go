@@ -173,7 +173,7 @@ type fakeInvitationCreator struct {
 	createCalls []struct{ email, displayName string }
 }
 
-func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, _, displayName string) (*Invitation, error) {
+func (f *fakeInvitationCreator) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, _, _, _, _, _, displayName string) (*Invitation, error) {
 	if f.err != nil {
 		return nil, f.err
 	}

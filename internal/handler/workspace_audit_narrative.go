@@ -115,6 +115,26 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Undangan workspace %q dibatalkan`, workspaceAuditMetaString(meta, "email", target))
 	case "invitation.accepted":
 		return fmt.Sprintf(`Undangan workspace %q diterima -- akun aktif`, workspaceAuditMetaString(meta, "email", target))
+	case "project_member.added":
+		return fmt.Sprintf(`Member %q ditambahkan ke project`, target)
+	case "project_member.role_changed":
+		return fmt.Sprintf(`Role member project %q diubah`, target)
+	case "project_member.removed":
+		return fmt.Sprintf(`Member %q dikeluarkan dari project`, target)
+	case "user.login":
+		return "Login berhasil"
+	case "user.backup_code_used":
+		return "Login menggunakan kode cadangan MFA"
+	case "account.profile_updated":
+		return "Profil akun sendiri diperbarui"
+	case "account.password_changed":
+		return "Password akun sendiri diganti"
+	case "account.mfa_device_reset":
+		return "MFA dipindahkan ke perangkat baru"
+	case "account.mfa_backup_codes_regenerated":
+		return "Kode pemulihan MFA dibuat ulang"
+	case "account.notification_preferences_updated":
+		return "Preferensi notifikasi akun sendiri diperbarui"
 	default:
 		return fmt.Sprintf("%s pada %s", e.Action, e.EntityType)
 	}
