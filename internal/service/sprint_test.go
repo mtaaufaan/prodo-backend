@@ -96,7 +96,7 @@ func (f *fakeSprintRepo) UnassignIncompleteTasks(_ context.Context, _ db.Executo
 	f.unassigned = append(f.unassigned, sprintID)
 	return nil
 }
-func (f *fakeSprintRepo) Summary(_ context.Context, _ db.Executor, _ string) (int, int, int, int, error) {
+func (f *fakeSprintRepo) Summary(_ context.Context, _ db.Executor, _ string) (totalSP, doneSP, unestimatedCount, taskCount int, err error) {
 	return 10, 4, 1, 5, nil
 }
 func (f *fakeSprintRepo) AssignTasks(_ context.Context, _ db.Executor, sprintID, _, _, _, _ string, taskIDs []string) error {
@@ -130,7 +130,7 @@ type fakeSprintProjectRoles struct {
 	found bool
 }
 
-func (f *fakeSprintProjectRoles) GetRole(_ context.Context, _ db.Executor, _, _ string) (string, bool, error) {
+func (f *fakeSprintProjectRoles) GetRole(_ context.Context, _ db.Executor, _, _ string) (role string, found bool, err error) {
 	return f.role, f.found, nil
 }
 
