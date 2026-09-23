@@ -88,7 +88,7 @@ const workspaceScopeClause = `((al.workspace_id IS NOT NULL AND al.workspace_id 
 const targetNameExpr = `COALESCE(
 	al.metadata->>'name', al.metadata->>'webhook_name', al.metadata->>'rule_name', al.metadata->>'email',
 	al.state_after->>'name', al.state_before->>'name',
-	tp.name, tw.name, tar.name, tcs.name, tta.display_name,
+	tp.name, tw.name, tar.name, tcs.name, tta.display_name, tsp.name,
 	tu.display_name, tui.email
 )`
 
@@ -142,6 +142,7 @@ func (r *WorkspaceAuditRepository) List(ctx context.Context, exec db.Executor, f
 		LEFT JOIN automation_rules tar ON al.entity_type = 'automation_rule' AND tar.id = al.entity_id
 		LEFT JOIN custom_statuses tcs ON al.entity_type = 'custom_status' AND tcs.id = al.entity_id
 		LEFT JOIN task_attachments tta ON al.entity_type = 'task_attachment' AND tta.id = al.entity_id
+		LEFT JOIN sprints tsp ON al.entity_type = 'sprint' AND tsp.id = al.entity_id
 		WHERE %s
 		ORDER BY al.logged_at DESC
 		LIMIT $%d OFFSET $%d

@@ -408,6 +408,16 @@ var (
 	// ErrSprintNotFound dikembalikan saat sprints.id tidak ditemukan.
 	ErrSprintNotFound = errors.New("sprint not found")
 
+	// ErrSprintNameTaken dikembalikan POST/PUT sprint saat nama (case-
+	// insensitive) sudah dipakai sprint lain di project yang sama (IG-92,
+	// pola sama PM Add Sprint.dc.html save()).
+	ErrSprintNameTaken = errors.New("sprint name already used in this project")
+
+	// ErrSprintNotDone dikembalikan POST /sprints/:id/reopen saat sprint
+	// belum berstatus 'done' -- reopen cuma berlaku dari SELESAI kembali
+	// ke BACKLOG (IG-92).
+	ErrSprintNotDone = errors.New("sprint is not done, cannot reopen")
+
 	// ErrTaskNotFound dikembalikan saat tasks.id tidak ditemukan atau
 	// sudah soft-deleted.
 	ErrTaskNotFound = errors.New("task not found")

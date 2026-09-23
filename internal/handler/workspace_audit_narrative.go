@@ -121,6 +121,20 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Role member project %q diubah`, target)
 	case "project_member.removed":
 		return fmt.Sprintf(`Member %q dikeluarkan dari project`, target)
+	case "sprint.created":
+		return fmt.Sprintf(`Sprint %q dibuat`, target)
+	case "sprint.updated":
+		return fmt.Sprintf(`Sprint %q diperbarui`, target)
+	case "sprint.started":
+		return fmt.Sprintf(`Sprint %q dimulai`, target)
+	case "sprint.completed":
+		return fmt.Sprintf(`Sprint %q ditutup`, target)
+	case "sprint.reopened":
+		return fmt.Sprintf(`Sprint %q dibuka kembali`, target)
+	case "sprint.tasks_assigned":
+		return fmt.Sprintf(`Task ditarik ke sprint %q`, target)
+	case "sprint.deleted":
+		return fmt.Sprintf(`Sprint %q dihapus`, target)
 	case "user.login":
 		return "Login berhasil"
 	case "user.backup_code_used":
