@@ -753,6 +753,8 @@ func run() error {
 	v1.Put("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Update)
 	v1.Post("/sprints/:id/start", jwtAuth, dbCtx, sprintHandler.Start)
 	v1.Post("/sprints/:id/complete", jwtAuth, dbCtx, sprintHandler.Complete)
+	v1.Post("/sprints/:id/reopen", jwtAuth, dbCtx, sprintHandler.Reopen)
+	v1.Post("/sprints/:id/assign-tasks", jwtAuth, dbCtx, sprintHandler.AssignTasks)
 	v1.Delete("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Delete)
 
 	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.Create)
