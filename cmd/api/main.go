@@ -762,6 +762,8 @@ func run() error {
 	v1.Get("/tasks/:id", jwtAuth, dbCtx, taskHandler.Get)
 	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
 	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
+	v1.Put("/tasks/:id/reorder", jwtAuth, dbCtx, taskHandler.Reorder)
+	v1.Post("/projects/:id/tasks/bulk-status", jwtAuth, dbCtx, taskHandler.BulkSetStatus)
 	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
 
 	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).

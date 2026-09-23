@@ -179,6 +179,74 @@ func (h *TaskHandler) SetStatus(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": taskID, "status_id": body.StatusID}))
 }
 
+type taskReorderRequest struct {
+	TargetTaskID string `json:"target_task_id"`
+	PlaceBefore  bool   `json:"place_before"`
+}
+
+// Reorder menangani PUT /tasks/:id/reorder -- drag-geser kartu Kanban
+// dalam satu kolom status (Track S5, "PM Board.dc.html"). BUKAN untuk
+// pindah kolom (pakai SetStatus di atas).
+func (h *TaskHandler) Reorder(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	taskID := c.Params("id")
+
+	var body taskReorderRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	if err := h.tasks.Reorder(c.Context(), exec, taskID, body.TargetTaskID, body.PlaceBefore, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal mengurutkan ulang task")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID}))
+}
+
+type taskBulkStatusRequest struct {
+	TaskIDs  []string `json:"task_ids"`
+	StatusID string   `json:"status_id"`
+	PicIDs   []string `json:"pic_ids"`
+}
+
+// BulkSetStatus menangani POST /projects/:id/tasks/bulk-status --
+// "PINDAHKAN & TETAPKAN PIC" saat banyak kartu dipilih sekaligus (Track
+// S5, "PM Board.dc.html"). Per-task hasil dikembalikan (bukan all-or-
+// nothing) -- satu task gagal (mis. DEPENDENCY_HARD_BLOCK) tidak
+// menggagalkan task lain dalam batch yang sama.
+func (h *TaskHandler) BulkSetStatus(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	var body taskBulkStatusRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	results := h.tasks.BulkSetStatus(c.Context(), exec, body.TaskIDs, body.StatusID, body.PicIDs, actorUserID, actorRole)
+	data := make([]fiber.Map, len(results))
+	successCount := 0
+	for i, r := range results {
+		item := fiber.Map{"task_id": r.TaskID, "ok": r.Err == nil}
+		if r.Err != nil {
+			item["error"] = r.Err.Error()
+		} else {
+			successCount++
+		}
+		data[i] = item
+	}
+	return c.JSON(response.Success(fiber.Map{"results": data, "success_count": successCount, "total": len(results)}))
+}
+
 // Acknowledge menangani POST /tasks/:id/pic/acknowledge (S4-33).
 func (h *TaskHandler) Acknowledge(c *fiber.Ctx) error {
 	actorUserID, _, ok := middleware.ActorFromContext(c)
@@ -378,7 +446,7 @@ func taskJSON(t *repository.Task) fiber.Map {
 		"title": t.Title, "description": t.Description, "priority": t.Priority, "completeness": t.Completeness,
 		"due_date": t.DueDate, "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
 		"task_code": t.TaskCode, "created_by": t.CreatedBy, "created_at": t.CreatedAt, "updated_at": t.UpdatedAt,
-		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "regression_count": t.RegressionCount, "assignees": assignees,
+		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "regression_count": t.RegressionCount, "position": t.Position, "assignees": assignees,
 	}
 }
 
