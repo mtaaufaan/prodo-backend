@@ -14,7 +14,8 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
-// SprintHandler -- Task Management Core Phase 1, US-013.
+// SprintHandler -- Task Management Core Phase 1, US-013; status 3-state +
+// kapasitas SP + audit trail, Track S5 IG-92.
 type SprintHandler struct {
 	sprints *service.SprintService
 	logger  *zap.Logger
@@ -28,6 +29,7 @@ type sprintRequest struct {
 	Name      string  `json:"name"`
 	StartDate *string `json:"start_date"`
 	EndDate   *string `json:"end_date"`
+	Goal      *string `json:"goal"`
 }
 
 func parseSprintDate(raw *string) (*time.Time, error) {
@@ -63,7 +65,7 @@ func (h *SprintHandler) Create(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format tanggal harus YYYY-MM-DD", nil))
 	}
 
-	sprint, err := h.sprints.Create(c.Context(), exec, projectID, body.Name, startDate, endDate, actorUserID, actorRole)
+	sprint, err := h.sprints.Create(c.Context(), exec, projectID, body.Name, startDate, endDate, body.Goal, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal membuat sprint")
 	}
@@ -111,7 +113,7 @@ func (h *SprintHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format tanggal harus YYYY-MM-DD", nil))
 	}
 
-	if err := h.sprints.Update(c.Context(), exec, sprintID, body.Name, startDate, endDate, actorUserID, actorRole); err != nil {
+	if err := h.sprints.Update(c.Context(), exec, sprintID, body.Name, startDate, endDate, body.Goal, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal memperbarui sprint")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": sprintID}))
@@ -130,7 +132,7 @@ func (h *SprintHandler) Start(c *fiber.Ctx) error {
 	if err := h.sprints.StartSprint(c.Context(), exec, c.Params("id"), actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal memulai sprint")
 	}
-	return c.JSON(response.Success(fiber.Map{"id": c.Params("id"), "is_active": true}))
+	return c.JSON(response.Success(fiber.Map{"id": c.Params("id"), "status": "active"}))
 }
 
 // Complete menangani POST /sprints/:id/complete.
@@ -146,7 +148,49 @@ func (h *SprintHandler) Complete(c *fiber.Ctx) error {
 	if err := h.sprints.CompleteSprint(c.Context(), exec, c.Params("id"), actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal menyelesaikan sprint")
 	}
-	return c.JSON(response.Success(fiber.Map{"id": c.Params("id"), "is_active": false}))
+	return c.JSON(response.Success(fiber.Map{"id": c.Params("id"), "status": "done"}))
+}
+
+// Reopen menangani POST /sprints/:id/reopen ("↺ BUKA KEMBALI", IG-92 --
+// baru, tidak ada di S4 original).
+func (h *SprintHandler) Reopen(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	if err := h.sprints.ReopenSprint(c.Context(), exec, c.Params("id"), actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal membuka kembali sprint")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": c.Params("id"), "status": "backlog"}))
+}
+
+type assignTasksRequest struct {
+	TaskIDs []string `json:"task_ids"`
+}
+
+// AssignTasks menangani POST /sprints/:id/assign-tasks ("Tarik Task dari
+// Backlog" saat buat sprint baru, IG-92).
+func (h *SprintHandler) AssignTasks(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	var body assignTasksRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	if err := h.sprints.AssignTasks(c.Context(), exec, c.Params("id"), body.TaskIDs, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menambahkan task ke sprint")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": c.Params("id"), "assigned_count": len(body.TaskIDs)}))
 }
 
 // Delete menangani DELETE /sprints/:id.
@@ -165,23 +209,30 @@ func (h *SprintHandler) Delete(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": c.Params("id")}))
 }
 
-// Summary menangani GET /sprints/:id/summary (Phase 4, US-018a/S4-59).
+// Summary menangani GET /sprints/:id/summary (Phase 4, US-018a/S4-59;
+// diperluas IG-92 kapasitas SP US-081: total/selesai/tersisa).
 func (h *SprintHandler) Summary(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
-	totalSP, unestimated, err := h.sprints.Summary(c.Context(), exec, c.Params("id"))
+	totalSP, doneSP, unestimated, taskCount, err := h.sprints.Summary(c.Context(), exec, c.Params("id"))
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil ringkasan sprint")
 	}
-	return c.JSON(response.Success(fiber.Map{"total_story_points": totalSP, "unestimated_count": unestimated}))
+	return c.JSON(response.Success(fiber.Map{
+		"total_story_points": totalSP,
+		"done_story_points":  doneSP,
+		"left_story_points":  totalSP - doneSP,
+		"unestimated_count":  unestimated,
+		"task_count":         taskCount,
+	}))
 }
 
 func sprintJSON(s *repository.Sprint) fiber.Map {
 	return fiber.Map{
 		"id": s.ID, "project_id": s.ProjectID, "name": s.Name,
-		"start_date": s.StartDate, "end_date": s.EndDate, "is_active": s.IsActive, "created_at": s.CreatedAt,
+		"start_date": s.StartDate, "end_date": s.EndDate, "goal": s.Goal, "status": s.Status, "created_at": s.CreatedAt,
 	}
 }
 
@@ -189,6 +240,10 @@ func (h *SprintHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- nama sprint wajib diisi", nil))
+	case errors.Is(err, domain.ErrSprintNameTaken):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("SPRINT_NAME_TAKEN", "Nama sprint sudah dipakai di project ini", nil))
+	case errors.Is(err, domain.ErrSprintNotDone):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("SPRINT_NOT_DONE", "Sprint belum berstatus Selesai, tidak bisa dibuka kembali", nil))
 	case errors.Is(err, domain.ErrSprintNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Sprint tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrForbidden):
