@@ -131,7 +131,7 @@ func (r *TaskDependencyRepository) WouldCreateCycle(ctx context.Context, exec db
 
 // Create -- tambah dependency (US-018, S4-51). Pemanggil (service) WAJIB
 // sudah lolos cek self-reference dan WouldCreateCycle sebelum ini.
-func (r *TaskDependencyRepository) Create(ctx context.Context, exec db.Executor, predecessorID, successorID string, createdBy *string) error {
+func (r *TaskDependencyRepository) Create(ctx context.Context, exec db.Executor, predecessorID, successorID string, createdBy *string, actorRole, workspaceID string) error {
 	_, err := exec.Exec(ctx, `
 		INSERT INTO task_dependencies (predecessor_id, successor_id, created_by)
 		VALUES ($1, $2, $3)
@@ -139,16 +139,28 @@ func (r *TaskDependencyRepository) Create(ctx context.Context, exec db.Executor,
 	if err != nil {
 		return fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrDependencyAlreadyExists))
 	}
+	actorID := ""
+	if createdBy != nil {
+		actorID = *createdBy
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.dependency_added", successorID, workspaceID, nil,
+		map[string]any{"predecessor_task_id": predecessorID}); err != nil {
+		return fmt.Errorf("repository.Create: audit: %w", err)
+	}
 	return nil
 }
 
-func (r *TaskDependencyRepository) Delete(ctx context.Context, exec db.Executor, predecessorID, successorID string) error {
+func (r *TaskDependencyRepository) Delete(ctx context.Context, exec db.Executor, predecessorID, successorID, actorID, actorRole, workspaceID string) error {
 	tag, err := exec.Exec(ctx, `DELETE FROM task_dependencies WHERE predecessor_id = $1 AND successor_id = $2`, predecessorID, successorID)
 	if err != nil {
 		return fmt.Errorf("repository.Delete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Delete: %w", domain.ErrDependencyNotFound)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.dependency_removed", successorID, workspaceID, nil,
+		map[string]any{"predecessor_task_id": predecessorID}); err != nil {
+		return fmt.Errorf("repository.Delete: audit: %w", err)
 	}
 	return nil
 }

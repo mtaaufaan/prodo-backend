@@ -161,7 +161,21 @@ func (r *TaskPicRepository) Acknowledge(ctx context.Context, exec db.Executor, t
 	if err != nil {
 		return false, fmt.Errorf("repository.Acknowledge: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	ok := tag.RowsAffected() > 0
+	if ok {
+		// workspaceID via subquery langsung (IG-94) -- Acknowledge tidak py
+		// akses projectID/workspaceID Go-level (cuma taskID/userID), lebih
+		// murah 1 query SQL daripada nambah dependency taskProjectResolver
+		// ke TaskPicService cuma untuk audit satu aksi kecil ini.
+		var workspaceID string
+		if err := exec.QueryRow(ctx, `SELECT p.workspace_id FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1`, taskID).Scan(&workspaceID); err != nil {
+			return false, fmt.Errorf("repository.Acknowledge: workspace: %w", err)
+		}
+		if err := insertTaskAudit(ctx, exec, userID, "", "task.pic_acknowledged", taskID, workspaceID, nil, nil); err != nil {
+			return false, fmt.Errorf("repository.Acknowledge: audit: %w", err)
+		}
+	}
+	return ok, nil
 }
 
 // ListGroupForStatus -- PIC Group (project_id, status_id) tertentu --

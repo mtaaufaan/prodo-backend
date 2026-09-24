@@ -230,6 +230,7 @@ func run() error {
 	taskPicRepo := repository.NewTaskPicRepository()
 	taskDependencyRepo := repository.NewTaskDependencyRepository()
 	taskStatusSessionRepo := repository.NewTaskStatusSessionRepository()
+	timeEntryRepo := repository.NewTimeEntryRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -258,6 +259,7 @@ func run() error {
 	ruleSvc.SetTaskActions(taskSvc)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
+	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc)
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
 	performanceRepo := repository.NewPerformanceRepository()
@@ -319,7 +321,8 @@ func run() error {
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
 	ruleHandler := handler.NewRuleHandler(ruleSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
-	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, logger)
+	timeEntryHandler := handler.NewTimeEntryHandler(timeEntrySvc, logger)
+	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, timeEntrySvc, logger)
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
 	performanceHandler := handler.NewPerformanceHandler(performanceSvc, logger)
 	workspaceAuditHandler := handler.NewWorkspaceAuditHandler(workspaceAuditSvc, logger)
@@ -784,6 +787,18 @@ func run() error {
 	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
 	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
 	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, taskHandler.StatusSessions)
+	v1.Get("/tasks/:id/versions", jwtAuth, dbCtx, taskHandler.Versions)
+	v1.Get("/tasks/:id/activity", jwtAuth, dbCtx, taskHandler.Activity)
+
+	// Timesheet (IG-97/US-036/037, API_CONTRACT.md §15).
+	v1.Post("/tasks/:id/time-entries/start", jwtAuth, dbCtx, timeEntryHandler.StartTimer)
+	v1.Post("/tasks/:id/time-entries/stop", jwtAuth, dbCtx, timeEntryHandler.StopTimer)
+	v1.Get("/tasks/:id/time-entries/active", jwtAuth, dbCtx, timeEntryHandler.GetActive)
+	v1.Post("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.CreateManual)
+	v1.Get("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.List)
+	v1.Patch("/time-entries/:entryId", jwtAuth, dbCtx, timeEntryHandler.UpdateManual)
+	v1.Post("/time-entries/:entryId/approve", jwtAuth, dbCtx, timeEntryHandler.Approve)
+	v1.Post("/time-entries/:entryId/reject", jwtAuth, dbCtx, timeEntryHandler.Reject)
 
 	// Attachment Management (H20-22, S4W-19/20/21, EPIC 10) -- upload/list
 	// per task tanpa RequireRole tambahan (RLS + otorisasi role di service
