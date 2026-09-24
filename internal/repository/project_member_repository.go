@@ -32,6 +32,7 @@ type ProjectMember struct {
 	Role      string
 	IsScoped  bool
 	AddedAt   time.Time
+	IsPM      bool
 }
 
 // CrossOrgMembership -- satu baris hasil ListCrossOrgMemberships (S3-25).
@@ -264,6 +265,61 @@ func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Execu
 		return nil, fmt.Errorf("repository.ListMembers: %w", err)
 	}
 	return members, nil
+}
+
+// ListAssignableMembers -- susulan (S5, "bukankah role PM termasuk dari
+// member project"): sama seperti ListMembers, TAPI ditambah PM
+// penanggung jawab project (projects.pm_user_id) sebagai entri sintetis
+// (IsPM=true, Role="project_manager") kalau PM belum juga tercatat di
+// project_members (kasus umum -- PM adalah workspace_role, BUKAN
+// project_scoped_role, lihat DATABASE_SCHEMA.md §5.12 catatan pm_user_id,
+// jadi normalnya PM tidak akan pernah muncul lewat ListMembers biasa).
+// Dipakai KHUSUS oleh consumer yang butuh daftar kandidat assignee/PIC
+// (AddTaskModal, TaskDetailModal, KanbanBoard) -- TIDAK dipakai halaman
+// kelola member (ProjectMembersPage/WorkspaceMembersPage) karena entri PM
+// sintetis ini tidak punya role project_scoped_role asli yang bisa
+// diedit/dihapus lewat endpoint member biasa.
+func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
+	members, err := r.ListMembers(ctx, exec, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	var pmUserID, pmEmail, pmName *string
+	err = exec.QueryRow(ctx, `
+		SELECT p.pm_user_id, u.email, u.display_name
+		FROM projects p
+		LEFT JOIN users u ON u.id = p.pm_user_id
+		WHERE p.id = $1
+	`, projectID).Scan(&pmUserID, &pmEmail, &pmName)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListAssignableMembers: pm: %w", err)
+	}
+
+	if pmUserID == nil {
+		return members, nil
+	}
+	for _, m := range members {
+		if m.UserID == *pmUserID {
+			return members, nil
+		}
+	}
+	name := ""
+	if pmName != nil {
+		name = *pmName
+	}
+	email := ""
+	if pmEmail != nil {
+		email = *pmEmail
+	}
+	return append(members, ProjectMember{
+		ProjectID: projectID,
+		UserID:    *pmUserID,
+		Email:     email,
+		Name:      name,
+		Role:      "project_manager",
+		IsPM:      true,
+	}), nil
 }
 
 // ListCrossOrgMemberships mengembalikan project-scoped member (is_scoped =

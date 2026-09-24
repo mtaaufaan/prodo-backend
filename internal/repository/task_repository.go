@@ -91,7 +91,7 @@ func (r *TaskRepository) nextTaskCode(ctx context.Context, exec db.Executor, pro
 // PERNAH diisi Create manapun sampai sekarang -- satu-satunya konsumen saat
 // ini adalah RuleService lewat TaskService.CreateSubtaskForRule, nil untuk
 // alur create task manusia biasa.
-func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string) (*Task, error) {
+func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string, actorRole, workspaceID string) (*Task, error) {
 	taskCode, err := r.nextTaskCode(ctx, exec, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", err)
@@ -136,6 +136,11 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 		VALUES ($1, $2, 1, $3)
 	`, id, statusID, createdBy); err != nil {
 		return nil, fmt.Errorf("repository.Create: sesi status awal: %w", err)
+	}
+
+	if err := insertTaskAudit(ctx, exec, createdBy, actorRole, "task.created", id, workspaceID, nil,
+		map[string]any{"title": title, "task_code": taskCode}); err != nil {
+		return nil, fmt.Errorf("repository.Create: audit: %w", err)
 	}
 
 	return r.Get(ctx, exec, id)
@@ -317,7 +322,7 @@ func (r *TaskRepository) List(ctx context.Context, exec db.Executor, projectID s
 	return list, nil
 }
 
-func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string) error {
+func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE tasks SET title = $2, description = $3, priority = $4, due_date = $5,
 		       estimated_hours = $6, story_points = $7, sprint_id = $8, updated_at = NOW()
@@ -329,13 +334,17 @@ func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, t
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Update: %w", domain.ErrTaskNotFound)
 	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.updated", taskID, workspaceID, nil,
+		map[string]any{"title": title, "priority": priority}); err != nil {
+		return fmt.Errorf("repository.Update: audit: %w", err)
+	}
 	return nil
 }
 
 // SetStatus -- ganti status DASAR (Phase 1, tanpa PIC Handoff/dependency
 // hard-block -- lihat komentar package). completed_at diisi/dikosongkan
 // otomatis berdasarkan apakah status tujuan bernama DONE.
-func (r *TaskRepository) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool) error {
+func (r *TaskRepository) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool, actorID, actorRole, workspaceID, statusBefore, statusAfter string) error {
 	var completedAt any
 	if isDone {
 		completedAt = time.Now()
@@ -349,6 +358,10 @@ func (r *TaskRepository) SetStatus(ctx context.Context, exec db.Executor, taskID
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SetStatus: %w", domain.ErrTaskNotFound)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.status_changed", taskID, workspaceID,
+		map[string]any{"status": statusBefore}, map[string]any{"status": statusAfter}); err != nil {
+		return fmt.Errorf("repository.SetStatus: audit: %w", err)
 	}
 	return nil
 }
@@ -371,7 +384,7 @@ func (r *TaskRepository) SetPosition(ctx context.Context, exec db.Executor, task
 // SetCompleteness -- Phase 3 (US-017c, S4-44): toggle "Lengkap/Belum
 // Lengkap", dipanggil setelah service memverifikasi actor = pembuat task
 // atau PIC aktif.
-func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness string) error {
+func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole, workspaceID string) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE tasks SET completeness = $2, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
@@ -382,16 +395,23 @@ func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, 
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SetCompleteness: %w", domain.ErrTaskNotFound)
 	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.completeness_changed", taskID, workspaceID, nil,
+		map[string]any{"completeness": completeness}); err != nil {
+		return fmt.Errorf("repository.SetCompleteness: audit: %w", err)
+	}
 	return nil
 }
 
-func (r *TaskRepository) SoftDelete(ctx context.Context, exec db.Executor, taskID string) error {
+func (r *TaskRepository) SoftDelete(ctx context.Context, exec db.Executor, taskID, actorID, actorRole, workspaceID string) error {
 	tag, err := exec.Exec(ctx, `UPDATE tasks SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, taskID)
 	if err != nil {
 		return fmt.Errorf("repository.SoftDelete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrTaskNotFound)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.deleted", taskID, workspaceID, nil, nil); err != nil {
+		return fmt.Errorf("repository.SoftDelete: audit: %w", err)
 	}
 	return nil
 }
@@ -413,6 +433,176 @@ func (r *TaskRepository) AssignUser(ctx context.Context, exec db.Executor, taskI
 		return fmt.Errorf("repository.AssignUser: %w", err)
 	}
 	return nil
+}
+
+// insertTaskAudit -- IG-94/IG-97, pola SAMA PERSIS insertSprintAudit
+// (sprint_repository.go): satu chokepoint INSERT ke audit_logs per entity
+// (entity_type='task'), actor_ip+request_path dari requestMetaFromContext
+// (middleware.RequestMeta, TIDAK perlu parameter tambahan), workspace_id
+// kolom asli (task selalu tahu workspace-nya lewat project). actorRole DI
+// SINI HARUS role hasil resolve dari service (TaskService.authorize/
+// resolveRole), BUKAN parameter actorRole mentah dari handler -- rute task
+// sengaja tanpa middleware RequireRole (route berbasis :projectId), jadi
+// actorRole mentah SELALU string kosong (bug yang sama seperti IG-92 kalau
+// tidak diperbaiki di titik ini).
+func insertTaskAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, taskID, workspaceID string, stateBefore, stateAfter map[string]any) error {
+	ip, path := requestMetaFromContext(ctx)
+	metadata := map[string]any{}
+	if path != "" {
+		metadata["request_path"] = path
+	}
+	beforeJSON, err := marshalIfNotEmpty(stateBefore)
+	if err != nil {
+		return fmt.Errorf("insertTaskAudit: encode state_before: %w", err)
+	}
+	afterJSON, err := marshalIfNotEmpty(stateAfter)
+	if err != nil {
+		return fmt.Errorf("insertTaskAudit: encode state_after: %w", err)
+	}
+	metaJSON, err := marshalIfNotEmpty(metadata)
+	if err != nil {
+		return fmt.Errorf("insertTaskAudit: encode metadata: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_role, action, entity_type, entity_id, workspace_id, actor_ip, state_before, state_after, metadata)
+		VALUES ($1, $2, $3, 'task', $4, $5, $6::inet, $7, $8, $9)
+	`, actorID, actorRole, action, taskID, workspaceID, ip, beforeJSON, afterJSON, metaJSON)
+	return err
+}
+
+// AuditEntry -- satu baris feed AKTIVITAS (IG-97 tab AKTIVITAS), dibaca
+// balik dari audit_logs entity_type='task'. Resolusi nama actor dilakukan
+// di layer service/handler (JOIN users di query ListAudit langsung, sama
+// pola ringan seperti WorkspaceAuditRepository -- task TIDAK py masalah
+// hard-delete seperti webhook_configs, jadi live JOIN aman dipakai apa
+// adanya tanpa snapshot immutable tambahan).
+type AuditEntry struct {
+	ID           string
+	Action       string
+	ActorID      *string
+	ActorName    string
+	ActorEmail   string
+	ActorRole    string
+	StateBefore  json.RawMessage
+	StateAfter   json.RawMessage
+	Metadata     json.RawMessage
+	LoggedAt     time.Time
+}
+
+// ListAudit -- GET /tasks/:id/activity (IG-97), terurut TERBARU dulu,
+// paginasi offset sederhana (feed task tunggal, volume kecil per task --
+// beda dari audit trail workspace/grup yang butuh cursor/filter kompleks).
+// UNION dengan entity_type='task_attachment' (S4W-20/EPIC 10, audit
+// lampiran SUDAH ada sejak awal lewat insertAttachmentAudit) -- audit
+// lampiran tidak menyimpan task_id di metadata-nya, jadi dicocokkan lewat
+// JOIN task_attachments di sini, bukan menambah kolom baru ke audit_logs.
+// Konsisten dengan teks kosong desain "PM Task Detail.dc.html": "Perubahan
+// status, role, lampiran, dan dependency akan muncul di sini".
+func (r *TaskRepository) ListAudit(ctx context.Context, exec db.Executor, taskID string, limit, offset int) ([]AuditEntry, int, error) {
+	const unionSQL = `
+		SELECT al.id, al.action, al.actor_id, al.actor_role, al.state_before, al.state_after, al.metadata, al.logged_at
+		FROM audit_logs al
+		WHERE al.entity_type = 'task' AND al.entity_id = $1
+		UNION ALL
+		SELECT al.id, al.action, al.actor_id, al.actor_role, al.state_before, al.state_after, al.metadata, al.logged_at
+		FROM audit_logs al
+		JOIN task_attachments ta ON ta.id = al.entity_id
+		WHERE al.entity_type = 'task_attachment' AND ta.task_id = $1
+	`
+	var total int
+	if err := exec.QueryRow(ctx, `SELECT COUNT(*) FROM (`+unionSQL+`) x`, taskID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("repository.ListAudit: count: %w", err)
+	}
+	rows, err := exec.Query(ctx, `
+		SELECT x.id, x.action, x.actor_id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
+		       x.actor_role, x.state_before, x.state_after, x.metadata, x.logged_at
+		FROM (`+unionSQL+`) x
+		LEFT JOIN users u ON u.id = x.actor_id
+		ORDER BY x.logged_at DESC
+		LIMIT $2 OFFSET $3
+	`, taskID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("repository.ListAudit: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.Action, &e.ActorID, &e.ActorName, &e.ActorEmail, &e.ActorRole, &e.StateBefore, &e.StateAfter, &e.Metadata, &e.LoggedAt); err != nil {
+			return nil, 0, fmt.Errorf("repository.ListAudit: scan: %w", err)
+		}
+		list = append(list, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("repository.ListAudit: %w", err)
+	}
+	return list, total, nil
+}
+
+// TaskVersionSnapshot -- satu baris RIWAYAT VERSI (IG-97), tabel
+// `task_version_snapshots` (DATABASE_SCHEMA.md §5.19 -- sebelumnya
+// terdokumentasi tapi TIDAK PERNAH dimigrasikan/dipakai kode apa pun,
+// "tabel hantu"). `Trigger` kolom TAMBAHAN (tidak ada di dokumentasi §5.19
+// asli) -- desain "PM Task Detail.dc.html" minta alasan singkat per versi
+// ("Deskripsi diubah"/"Judul diubah"); field `files`/`hasFiles` di desain
+// SENGAJA tidak diikutkan -- itu cuma duplikat daftar lampiran task yang
+// sudah ada di tab LAMPIRAN sendiri, snapshot per-versi tidak py makna
+// tambahan untuk file (lampiran tidak versioned, cuma deskripsi/judul).
+type TaskVersionSnapshot struct {
+	ID          string
+	TaskID      string
+	Title       string
+	Description json.RawMessage
+	ChangedBy   *string
+	ChangedName string
+	ChangedEmail string
+	Trigger     string
+	SnapshotAt  time.Time
+}
+
+// CreateVersionSnapshot -- dipanggil SEBELUM tasks.title/description
+// disimpan (TaskService.Update), sama urutan yang didokumentasikan
+// DATABASE_SCHEMA.md §5.19: "Snapshot diambil SEBELUM perubahan disimpan".
+func (r *TaskRepository) CreateVersionSnapshot(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, changedBy, trigger string) error {
+	_, err := exec.Exec(ctx, `
+		INSERT INTO task_version_snapshots (task_id, title, description, changed_by, trigger)
+		VALUES ($1, $2, $3, $4, $5)
+	`, taskID, title, description, changedBy, trigger)
+	if err != nil {
+		return fmt.Errorf("repository.CreateVersionSnapshot: %w", err)
+	}
+	return nil
+}
+
+// ListVersionSnapshots -- terurut TERBARU dulu (v1 = read-only history,
+// tanpa restore/diff -- sesuai catatan §5.19 "dipertimbangkan untuk v2").
+func (r *TaskRepository) ListVersionSnapshots(ctx context.Context, exec db.Executor, taskID string) ([]TaskVersionSnapshot, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT tvs.id, tvs.task_id, tvs.title, tvs.description, tvs.changed_by,
+		       COALESCE(u.display_name, ''), COALESCE(u.email, ''), tvs.trigger, tvs.snapshot_at
+		FROM task_version_snapshots tvs
+		LEFT JOIN users u ON u.id = tvs.changed_by
+		WHERE tvs.task_id = $1
+		ORDER BY tvs.snapshot_at DESC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListVersionSnapshots: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]TaskVersionSnapshot, 0)
+	for rows.Next() {
+		var v TaskVersionSnapshot
+		if err := rows.Scan(&v.ID, &v.TaskID, &v.Title, &v.Description, &v.ChangedBy, &v.ChangedName, &v.ChangedEmail, &v.Trigger, &v.SnapshotAt); err != nil {
+			return nil, fmt.Errorf("repository.ListVersionSnapshots: scan: %w", err)
+		}
+		list = append(list, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListVersionSnapshots: %w", err)
+	}
+	return list, nil
 }
 
 // ListDueForWorkspace (S4W-11, job harian due-date) -- task di seluruh

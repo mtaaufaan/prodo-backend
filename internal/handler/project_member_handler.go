@@ -10,6 +10,7 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
@@ -132,6 +133,11 @@ func (h *ProjectMemberHandler) RemoveMember(c *fiber.Ctx) error {
 }
 
 // ListMembers menangani GET /projects/:id/members (S3-24 prasyarat FE).
+// Query param ?assignable=true (susulan S5) mengembalikan daftar kandidat
+// assignee/PIC -- ikut sertakan PM penanggung jawab project (yang normalnya
+// tidak muncul di project_members, lihat ProjectMemberRepository.
+// ListAssignableMembers) -- dipakai AddTaskModal/TaskDetailModal/KanbanBoard,
+// BUKAN halaman kelola member (butuh role project_scoped_role asli).
 func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
@@ -140,7 +146,13 @@ func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 	}
 	projectID := c.Params("id")
 
-	members, err := h.projects.ListMembers(c.Context(), exec, projectID)
+	var members []repository.ProjectMember
+	var err error
+	if c.Query("assignable") == "true" {
+		members, err = h.projects.ListAssignableMembers(c.Context(), exec, projectID)
+	} else {
+		members, err = h.projects.ListMembers(c.Context(), exec, projectID)
+	}
 	if err != nil {
 		return h.mapProjectMemberError(c, err, "Gagal mengambil daftar project member")
 	}
@@ -155,6 +167,7 @@ func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 			"role":         m.Role,
 			"is_scoped":    m.IsScoped,
 			"added_at":     m.AddedAt,
+			"is_pm":        m.IsPM,
 		}
 	}
 	return c.JSON(response.Success(data))

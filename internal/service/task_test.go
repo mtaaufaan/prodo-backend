@@ -13,12 +13,13 @@ import (
 )
 
 type fakeTaskRepo struct {
-	byID          map[string]*repository.Task
-	setPositions  map[string]float64
-	setStatusCall []struct{ id, statusID string }
+	byID              map[string]*repository.Task
+	setPositions      map[string]float64
+	setStatusCall     []struct{ id, statusID string }
+	setStatusAuditRole string
 }
 
-func (f *fakeTaskRepo) Create(_ context.Context, _ db.Executor, _ string, _, _ *string, _, _ string, _ json.RawMessage, _ string, _ *time.Time, _ *float64, _ *int, _ string, _ []string) (*repository.Task, error) {
+func (f *fakeTaskRepo) Create(_ context.Context, _ db.Executor, _ string, _, _ *string, _, _ string, _ json.RawMessage, _ string, _ *time.Time, _ *float64, _ *int, _ string, _ []string, _, _ string) (*repository.Task, error) {
 	return nil, nil
 }
 func (f *fakeTaskRepo) Get(_ context.Context, _ db.Executor, taskID string) (*repository.Task, error) {
@@ -49,11 +50,12 @@ func (f *fakeTaskRepo) List(_ context.Context, _ db.Executor, projectID string, 
 	}
 	return out, nil
 }
-func (f *fakeTaskRepo) Update(_ context.Context, _ db.Executor, _, _ string, _ json.RawMessage, _ string, _ *time.Time, _ *float64, _ *int, _ *string) error {
+func (f *fakeTaskRepo) Update(_ context.Context, _ db.Executor, _, _ string, _ json.RawMessage, _ string, _ *time.Time, _ *float64, _ *int, _ *string, _, _, _ string) error {
 	return nil
 }
-func (f *fakeTaskRepo) SetStatus(_ context.Context, _ db.Executor, taskID, statusID string, _ bool) error {
+func (f *fakeTaskRepo) SetStatus(_ context.Context, _ db.Executor, taskID, statusID string, _ bool, _, actorRole, _, _, _ string) error {
 	f.setStatusCall = append(f.setStatusCall, struct{ id, statusID string }{taskID, statusID})
+	f.setStatusAuditRole = actorRole
 	if t, ok := f.byID[taskID]; ok {
 		t.StatusID = statusID
 	}
@@ -66,10 +68,10 @@ func (f *fakeTaskRepo) SetPosition(_ context.Context, _ db.Executor, taskID stri
 	f.setPositions[taskID] = position
 	return nil
 }
-func (f *fakeTaskRepo) SetCompleteness(_ context.Context, _ db.Executor, _, _ string) error {
+func (f *fakeTaskRepo) SetCompleteness(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
 	return nil
 }
-func (f *fakeTaskRepo) SoftDelete(_ context.Context, _ db.Executor, _ string) error { return nil }
+func (f *fakeTaskRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _, _ string) error { return nil }
 func (f *fakeTaskRepo) GetProjectID(_ context.Context, _ db.Executor, taskID string) (string, error) {
 	t, ok := f.byID[taskID]
 	if !ok {
@@ -78,6 +80,15 @@ func (f *fakeTaskRepo) GetProjectID(_ context.Context, _ db.Executor, taskID str
 	return t.ProjectID, nil
 }
 func (f *fakeTaskRepo) AssignUser(_ context.Context, _ db.Executor, _, _, _ string) error { return nil }
+func (f *fakeTaskRepo) CreateVersionSnapshot(_ context.Context, _ db.Executor, _, _ string, _ json.RawMessage, _, _ string) error {
+	return nil
+}
+func (f *fakeTaskRepo) ListVersionSnapshots(_ context.Context, _ db.Executor, _ string) ([]repository.TaskVersionSnapshot, error) {
+	return nil, nil
+}
+func (f *fakeTaskRepo) ListAudit(_ context.Context, _ db.Executor, _ string, _, _ int) ([]repository.AuditEntry, int, error) {
+	return nil, 0, nil
+}
 
 type fakeTaskPics struct{ group []repository.PicGroupMember }
 
@@ -211,5 +222,32 @@ func TestTaskService_BulkSetStatus_PartialFailure(t *testing.T) {
 	}
 	if successCount != 2 || failCount != 1 {
 		t.Fatalf("expected 2 success + 1 failure, got %d success + %d failure", successCount, failCount)
+	}
+}
+
+// TestTaskService_AuditUsesResolvedWorkspaceRole -- IG-94/IG-97, sama pola
+// regresi TestSprintService_AuditUsesResolvedWorkspaceRole (IG-92): rute
+// task sengaja TIDAK dipasangi middleware RequireRole (route berbasis
+// :projectId), jadi parameter actorRole yang diteruskan handler SELALU
+// string kosong. authorize()/resolveRole() sendiri sudah resolve role asli
+// -- audit trail (insertTaskAudit) HARUS pakai role hasil resolve itu,
+// BUKAN parameter actorRole kosong mentah.
+func TestTaskService_AuditUsesResolvedWorkspaceRole(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"done-status":    {ID: "done-status", Name: "DONE"},
+		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
+	}
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status"},
+	}}
+	svc := newTaskServiceForTest(repo, statuses)
+	// actorRole="" meniru parameter kosong yang benar-benar dikirim handler
+	// (lihat komentar authorize) -- audit HARUS tetap terisi "project_manager"
+	// (resolusi fallback fakeSprintRBAC di newTaskServiceForTest).
+	if err := svc.SetStatus(context.Background(), nil, "t1", "done-status", []string{"pic1"}, "user1", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.setStatusAuditRole != "project_manager" {
+		t.Fatalf("expected audit actorRole 'project_manager' (resolved), got %q", repo.setStatusAuditRole)
 	}
 }

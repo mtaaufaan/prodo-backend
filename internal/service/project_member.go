@@ -17,6 +17,7 @@ type projectMemberRepository interface {
 	UpdateRole(ctx context.Context, exec db.Executor, projectID, userID, role, actorID, actorRole string) error
 	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
+	ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
 	ListCrossOrgMemberships(ctx context.Context, exec db.Executor, groupID, orgIDFilter string) ([]repository.CrossOrgMembership, error)
 	RevokeAllScopedForUser(ctx context.Context, exec db.Executor, userID string) (int64, error)
 }
@@ -147,6 +148,19 @@ func (s *ProjectMemberService) ListMembers(ctx context.Context, exec db.Executor
 	members, err := s.repo.ListMembers(ctx, exec, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListMembers: %w", err)
+	}
+	return members, nil
+}
+
+// ListAssignableMembers -- lihat ProjectMemberRepository.ListAssignableMembers.
+// TIDAK ada pengecekan otorisasi tambahan, sama pola ListMembers (RLS pm_select).
+func (s *ProjectMemberService) ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListAssignableMembers: %w", domain.ErrInvalidInput)
+	}
+	members, err := s.repo.ListAssignableMembers(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListAssignableMembers: %w", err)
 	}
 	return members, nil
 }
