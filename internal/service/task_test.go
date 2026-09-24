@@ -13,9 +13,9 @@ import (
 )
 
 type fakeTaskRepo struct {
-	byID              map[string]*repository.Task
-	setPositions      map[string]float64
-	setStatusCall     []struct{ id, statusID string }
+	byID               map[string]*repository.Task
+	setPositions       map[string]float64
+	setStatusCall      []struct{ id, statusID string }
 	setStatusAuditRole string
 }
 
@@ -71,7 +71,9 @@ func (f *fakeTaskRepo) SetPosition(_ context.Context, _ db.Executor, taskID stri
 func (f *fakeTaskRepo) SetCompleteness(_ context.Context, _ db.Executor, _, _, _, _, _ string) error {
 	return nil
 }
-func (f *fakeTaskRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _, _ string) error { return nil }
+func (f *fakeTaskRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _, _ string) error {
+	return nil
+}
 func (f *fakeTaskRepo) GetProjectID(_ context.Context, _ db.Executor, taskID string) (string, error) {
 	t, ok := f.byID[taskID]
 	if !ok {

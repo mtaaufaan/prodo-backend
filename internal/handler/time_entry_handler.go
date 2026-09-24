@@ -37,16 +37,16 @@ func timeEntryJSON(e *repository.TimeEntry) fiber.Map {
 	}
 	return fiber.Map{
 		"id": e.ID, "task_id": e.TaskID,
-		"user": fiber.Map{"user_id": e.UserID, "display_name": e.UserName, "email": e.UserEmail},
-		"entry_type":        e.EntryType,
-		"started_at":        e.StartedAt,
-		"ended_at":          e.EndedAt,
-		"duration_minutes":  e.DurationMinutes,
-		"note":              e.Note,
-		"approval_status":   status,
-		"rejection_note":    e.RejectionNote,
-		"created_at":        e.CreatedAt,
-		"updated_at":        e.UpdatedAt,
+		"user":             fiber.Map{"user_id": e.UserID, "display_name": e.UserName, "email": e.UserEmail},
+		"entry_type":       e.EntryType,
+		"started_at":       e.StartedAt,
+		"ended_at":         e.EndedAt,
+		"duration_minutes": e.DurationMinutes,
+		"note":             e.Note,
+		"approval_status":  status,
+		"rejection_note":   e.RejectionNote,
+		"created_at":       e.CreatedAt,
+		"updated_at":       e.UpdatedAt,
 	}
 }
 

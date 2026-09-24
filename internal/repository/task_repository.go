@@ -477,16 +477,16 @@ func insertTaskAudit(ctx context.Context, exec db.Executor, actorID, actorRole, 
 // hard-delete seperti webhook_configs, jadi live JOIN aman dipakai apa
 // adanya tanpa snapshot immutable tambahan).
 type AuditEntry struct {
-	ID           string
-	Action       string
-	ActorID      *string
-	ActorName    string
-	ActorEmail   string
-	ActorRole    string
-	StateBefore  json.RawMessage
-	StateAfter   json.RawMessage
-	Metadata     json.RawMessage
-	LoggedAt     time.Time
+	ID          string
+	Action      string
+	ActorID     *string
+	ActorName   string
+	ActorEmail  string
+	ActorRole   string
+	StateBefore json.RawMessage
+	StateAfter  json.RawMessage
+	Metadata    json.RawMessage
+	LoggedAt    time.Time
 }
 
 // ListAudit -- GET /tasks/:id/activity (IG-97), terurut TERBARU dulu,
@@ -550,15 +550,15 @@ func (r *TaskRepository) ListAudit(ctx context.Context, exec db.Executor, taskID
 // sudah ada di tab LAMPIRAN sendiri, snapshot per-versi tidak py makna
 // tambahan untuk file (lampiran tidak versioned, cuma deskripsi/judul).
 type TaskVersionSnapshot struct {
-	ID          string
-	TaskID      string
-	Title       string
-	Description json.RawMessage
-	ChangedBy   *string
-	ChangedName string
+	ID           string
+	TaskID       string
+	Title        string
+	Description  json.RawMessage
+	ChangedBy    *string
+	ChangedName  string
 	ChangedEmail string
-	Trigger     string
-	SnapshotAt  time.Time
+	Trigger      string
+	SnapshotAt   time.Time
 }
 
 // CreateVersionSnapshot -- dipanggil SEBELUM tasks.title/description
