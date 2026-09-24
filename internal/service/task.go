@@ -27,6 +27,7 @@ type taskRepository interface {
 	List(ctx context.Context, exec db.Executor, projectID string, f repository.TaskFilter) ([]repository.Task, error)
 	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string) error
 	SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool) error
+	SetPosition(ctx context.Context, exec db.Executor, taskID string, position float64) error
 	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness string) error
 	SoftDelete(ctx context.Context, exec db.Executor, taskID string) error
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
@@ -464,6 +465,90 @@ func (s *TaskService) SetStatusForRule(ctx context.Context, exec db.Executor, ta
 		picIDs = []string{actorID}
 	}
 	return s.setStatusCore(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, false)
+}
+
+// Reorder -- drag-geser kartu Kanban DALAM satu kolom status (Track S5,
+// desain "PM Board.dc.html" moveTaskOrder). Pindah KOLOM tetap lewat
+// SetStatus (guard PIC/dependency/completeness tidak berlaku untuk sekadar
+// urut ulang). Posisi baru = titik tengah dua tetangga (fractional
+// indexing, hindari re-index seluruh kolom) -- diambil dari List() yang
+// sudah terurut `position` per status.
+func (s *TaskService) Reorder(ctx context.Context, exec db.Executor, taskID, targetTaskID string, placeBefore bool, actorID, actorRole string) error {
+	if taskID == "" || targetTaskID == "" || taskID == targetTaskID {
+		return fmt.Errorf("service.Reorder: %w", domain.ErrInvalidInput)
+	}
+	src, err := s.repo.Get(ctx, exec, taskID)
+	if err != nil {
+		return err
+	}
+	target, err := s.repo.Get(ctx, exec, targetTaskID)
+	if err != nil {
+		return err
+	}
+	if src.StatusID != target.StatusID {
+		return fmt.Errorf("service.Reorder: %w", domain.ErrInvalidInput)
+	}
+	if err := s.authorize(ctx, exec, src.ProjectID, actorID, actorRole); err != nil {
+		return err
+	}
+	siblings, err := s.repo.List(ctx, exec, src.ProjectID, repository.TaskFilter{StatusID: src.StatusID})
+	if err != nil {
+		return fmt.Errorf("service.Reorder: %w", err)
+	}
+	var targetIdx = -1
+	for i := range siblings {
+		if siblings[i].ID == targetTaskID {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx == -1 {
+		return fmt.Errorf("service.Reorder: %w", domain.ErrTaskNotFound)
+	}
+	var neighborIdx int
+	if placeBefore {
+		neighborIdx = targetIdx - 1
+	} else {
+		neighborIdx = targetIdx + 1
+	}
+	newPos := target.Position + boolToSign(placeBefore)
+	if neighborIdx >= 0 && neighborIdx < len(siblings) && siblings[neighborIdx].ID != taskID {
+		newPos = (target.Position + siblings[neighborIdx].Position) / 2
+	}
+	if err := s.repo.SetPosition(ctx, exec, taskID, newPos); err != nil {
+		return fmt.Errorf("service.Reorder: %w", err)
+	}
+	return nil
+}
+
+func boolToSign(placeBefore bool) float64 {
+	if placeBefore {
+		return -1
+	}
+	return 1
+}
+
+// BulkStatusResult -- hasil per-task dari BulkSetStatus (kartu terpilih di
+// Kanban/Daftar bisa berbeda project? TIDAK -- Board selalu satu project,
+// tapi task individual tetap bisa gagal beda-beda alasan: dependency,
+// completeness, PIC Group).
+type BulkStatusResult struct {
+	TaskID string
+	Err    error
+}
+
+// BulkSetStatus -- bulk action Kanban/Daftar (desain "PINDAHKAN & TETAPKAN
+// PIC" saat banyak kartu dipilih sekaligus). REUSE SetStatus APA ADANYA per
+// task (guard dependency/completeness/PIC-Group SAMA PERSIS, tidak ada
+// jalur pintas) -- satu task gagal tidak menggagalkan task lain dalam
+// batch yang sama.
+func (s *TaskService) BulkSetStatus(ctx context.Context, exec db.Executor, taskIDs []string, statusID string, picIDs []string, actorID, actorRole string) []BulkStatusResult {
+	results := make([]BulkStatusResult, 0, len(taskIDs))
+	for _, id := range taskIDs {
+		err := s.SetStatus(ctx, exec, id, statusID, picIDs, actorID, actorRole)
+		results = append(results, BulkStatusResult{TaskID: id, Err: err})
+	}
+	return results
 }
 
 // AssignUserForRule (S4W-11, action rule "Assign ke user") -- idempotent
