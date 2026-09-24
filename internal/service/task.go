@@ -6,6 +6,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,16 +23,19 @@ var validTaskPriority = map[string]bool{"critical": true, "high": true, "medium"
 
 // taskRepository -- interface didefinisikan di consumer, §3.9.
 type taskRepository interface {
-	Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string) (*repository.Task, error)
+	Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string, actorRole, workspaceID string) (*repository.Task, error)
 	Get(ctx context.Context, exec db.Executor, taskID string) (*repository.Task, error)
 	List(ctx context.Context, exec db.Executor, projectID string, f repository.TaskFilter) ([]repository.Task, error)
-	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string) error
-	SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool) error
+	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error
+	SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool, actorID, actorRole, workspaceID, statusBefore, statusAfter string) error
 	SetPosition(ctx context.Context, exec db.Executor, taskID string, position float64) error
-	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness string) error
-	SoftDelete(ctx context.Context, exec db.Executor, taskID string) error
+	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole, workspaceID string) error
+	SoftDelete(ctx context.Context, exec db.Executor, taskID, actorID, actorRole, workspaceID string) error
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
 	AssignUser(ctx context.Context, exec db.Executor, taskID, userID, assignedBy string) error
+	CreateVersionSnapshot(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, changedBy, trigger string) error
+	ListVersionSnapshots(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskVersionSnapshot, error)
+	ListAudit(ctx context.Context, exec db.Executor, taskID string, limit, offset int) ([]repository.AuditEntry, int, error)
 }
 
 // taskRuleEvaluator -- reuse RuleService.Evaluate (S4W-11). Best-effort,
@@ -116,9 +120,15 @@ func (s *TaskService) fireRules(ctx context.Context, exec db.Executor, workspace
 // ditolak) -- duplikasi kecil disengaja, pola sama ProjectService/
 // ProjectMemberService yang masing-masing punya authorize sendiri, bukan
 // satu helper lintas-service untuk satu pengecekan sederhana.
-func (s *TaskService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error {
-	_, err := s.resolveRole(ctx, exec, projectID, actorID, actorRole)
-	return err
+//
+// MENGEMBALIKAN role hasil resolve (IG-94/IG-97, sama fix IG-92 untuk
+// Sprint) -- rute task SENGAJA tanpa middleware RequireRole (route
+// berbasis :projectId, bukan :wsId), jadi parameter actorRole mentah dari
+// handler SELALU string kosong. Audit trail task HARUS pakai role hasil
+// resolve ini, bukan actorRole mentah, supaya tidak mengulang bug
+// actor_role kosong yang sama seperti ditemukan di Sprint (IG-92).
+func (s *TaskService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (string, error) {
+	return s.resolveRole(ctx, exec, projectID, actorID, actorRole)
 }
 
 // resolveRole -- role project_scoped_role/workspace_role aktor di project
@@ -206,7 +216,8 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 	if err := validateStoryPoints(storyPoints); err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return nil, err
 	}
 
@@ -219,7 +230,7 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
 
-	task, err := s.repo.Create(ctx, exec, projectID, sprintID, nil, backlog.ID, title, description, priority, dueDate, estimatedHours, storyPoints, actorID, assigneeUserIDs)
+	task, err := s.repo.Create(ctx, exec, projectID, sprintID, nil, backlog.ID, title, description, priority, dueDate, estimatedHours, storyPoints, actorID, assigneeUserIDs, auditRole, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
@@ -283,7 +294,26 @@ func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, titl
 			return fmt.Errorf("service.Update: %w", domain.ErrStoryPointsNotAllowed)
 		}
 	}
-	if err := s.repo.Update(ctx, exec, taskID, title, description, priority, dueDate, estimatedHours, storyPoints, sprintID); err != nil {
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, current.ProjectID)
+	if err != nil {
+		return fmt.Errorf("service.Update: %w", err)
+	}
+	// descriptionChanged (IG-97, RIWAYAT VERSI): snapshot diambil SEBELUM
+	// disimpan (DATABASE_SCHEMA.md §5.19) -- HANYA saat title/deskripsi
+	// benar-benar berubah, bukan tiap edit priority/due/SP (desain
+	// menyiratkan versi = "setiap perubahan deskripsi", bukan tiap edit
+	// field apa pun).
+	descriptionChanged := current.Title != title || !bytes.Equal(current.Description, description)
+	if descriptionChanged {
+		trigger := "Judul diubah"
+		if !bytes.Equal(current.Description, description) {
+			trigger = "Deskripsi diubah"
+		}
+		if err := s.repo.CreateVersionSnapshot(ctx, exec, taskID, current.Title, current.Description, actorID, trigger); err != nil {
+			return fmt.Errorf("service.Update: %w", err)
+		}
+	}
+	if err := s.repo.Update(ctx, exec, taskID, title, description, priority, dueDate, estimatedHours, storyPoints, sprintID, actorID, role, workspaceID); err != nil {
 		return fmt.Errorf("service.Update: %w", err)
 	}
 	return nil
@@ -332,6 +362,10 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	role, err := s.resolveRole(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return err
+	}
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("service.SetStatus: %w", err)
 	}
 	status, err := s.statuses.Get(ctx, exec, statusID)
 	if err != nil {
@@ -391,7 +425,7 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	}
 	isRegression := status.Position < currentStatus.Position
 
-	if err := s.repo.SetStatus(ctx, exec, taskID, statusID, status.Name == "DONE"); err != nil {
+	if err := s.repo.SetStatus(ctx, exec, taskID, statusID, status.Name == "DONE", actorID, role, workspaceID, current.StatusName, status.Name); err != nil {
 		return fmt.Errorf("service.SetStatus: %w", err)
 	}
 	if err := s.pics.DeactivateActiveForTask(ctx, exec, taskID); err != nil {
@@ -432,12 +466,9 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	// menggagalkan SetStatus yang sudah berhasil. fireRules=false untuk
 	// panggilan dari SetStatusForRule sendiri (mencegah infinite loop).
 	if fireRules {
-		workspaceID, wsErr := s.projects.GetWorkspaceID(ctx, exec, projectID)
-		if wsErr == nil {
-			current.StatusID = statusID
-			current.StatusName = status.Name
-			s.fireRules(ctx, exec, workspaceID, "status_changed", current, actorID, actorRole)
-		}
+		current.StatusID = statusID
+		current.StatusName = status.Name
+		s.fireRules(ctx, exec, workspaceID, "status_changed", current, actorID, actorRole)
 	}
 	return nil
 }
@@ -488,7 +519,7 @@ func (s *TaskService) Reorder(ctx context.Context, exec db.Executor, taskID, tar
 	if src.StatusID != target.StatusID {
 		return fmt.Errorf("service.Reorder: %w", domain.ErrInvalidInput)
 	}
-	if err := s.authorize(ctx, exec, src.ProjectID, actorID, actorRole); err != nil {
+	if _, err := s.authorize(ctx, exec, src.ProjectID, actorID, actorRole); err != nil {
 		return err
 	}
 	siblings, err := s.repo.List(ctx, exec, src.ProjectID, repository.TaskFilter{StatusID: src.StatusID})
@@ -580,7 +611,7 @@ func (s *TaskService) CreateSubtaskForRule(ctx context.Context, exec db.Executor
 	if err != nil {
 		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
-	if _, err := s.repo.Create(ctx, exec, projectID, nil, &parentTaskID, backlog.ID, title, nil, "medium", nil, nil, nil, actorID, nil); err != nil {
+	if _, err := s.repo.Create(ctx, exec, projectID, nil, &parentTaskID, backlog.ID, title, nil, "medium", nil, nil, nil, actorID, nil, "", workspaceID); err != nil {
 		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
 	return nil
@@ -595,13 +626,44 @@ func (s *TaskService) StartWork(ctx context.Context, exec db.Executor, taskID, a
 	if err != nil {
 		return err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
 		return err
 	}
 	if err := s.sessions.StartWork(ctx, exec, taskID); err != nil {
 		return fmt.Errorf("service.StartWork: %w", err)
 	}
 	return nil
+}
+
+// ListVersions menangani GET /tasks/:id/versions (IG-97, tab RIWAYAT VERSI).
+func (s *TaskService) ListVersions(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskVersionSnapshot, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("service.ListVersions: %w", domain.ErrInvalidInput)
+	}
+	list, err := s.repo.ListVersionSnapshots(ctx, exec, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListVersions: %w", err)
+	}
+	return list, nil
+}
+
+// ListActivity menangani GET /tasks/:id/activity (IG-94/IG-97, tab
+// AKTIVITAS) -- paginasi offset sederhana, default 20/halaman.
+func (s *TaskService) ListActivity(ctx context.Context, exec db.Executor, taskID string, page, perPage int) ([]repository.AuditEntry, int, error) {
+	if taskID == "" {
+		return nil, 0, fmt.Errorf("service.ListActivity: %w", domain.ErrInvalidInput)
+	}
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 20
+	}
+	list, total, err := s.repo.ListAudit(ctx, exec, taskID, perPage, (page-1)*perPage)
+	if err != nil {
+		return nil, 0, fmt.Errorf("service.ListActivity: %w", err)
+	}
+	return list, total, nil
 }
 
 // ListStatusSessions menangani GET /tasks/:id/status-sessions (Phase 4,
@@ -620,7 +682,7 @@ func (s *TaskService) ListStatusSessions(ctx context.Context, exec db.Executor, 
 
 // SetCompleteness menangani PUT /tasks/:id/completeness (Phase 3, S4-44) --
 // hanya pembuat task ATAU PIC aktif yang boleh mengubah flag ini.
-func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID string) error {
+func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole string) error {
 	if taskID == "" || (completeness != "complete" && completeness != "incomplete") {
 		return fmt.Errorf("service.SetCompleteness: %w", domain.ErrCompletenessInvalid)
 	}
@@ -637,7 +699,15 @@ func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, tas
 			return fmt.Errorf("service.SetCompleteness: %w", domain.ErrForbidden)
 		}
 	}
-	if err := s.repo.SetCompleteness(ctx, exec, taskID, completeness); err != nil {
+	role, err := s.resolveRole(ctx, exec, task.ProjectID, actorID, actorRole)
+	if err != nil {
+		return err
+	}
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, task.ProjectID)
+	if err != nil {
+		return fmt.Errorf("service.SetCompleteness: %w", err)
+	}
+	if err := s.repo.SetCompleteness(ctx, exec, taskID, completeness, actorID, role, workspaceID); err != nil {
 		return fmt.Errorf("service.SetCompleteness: %w", err)
 	}
 	return nil
@@ -651,10 +721,15 @@ func (s *TaskService) Delete(ctx context.Context, exec db.Executor, taskID, acto
 	if err != nil {
 		return err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return err
 	}
-	if err := s.repo.SoftDelete(ctx, exec, taskID); err != nil {
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("service.Delete: %w", err)
+	}
+	if err := s.repo.SoftDelete(ctx, exec, taskID, actorID, auditRole, workspaceID); err != nil {
 		return fmt.Errorf("service.Delete: %w", err)
 	}
 	return nil

@@ -19,8 +19,8 @@ type taskDependencyRepository interface {
 	ListPredecessors(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskDependency, error)
 	ListSuccessors(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskDependency, error)
 	WouldCreateCycle(ctx context.Context, exec db.Executor, predecessorID, successorID string) ([]string, error)
-	Create(ctx context.Context, exec db.Executor, predecessorID, successorID string, createdBy *string) error
-	Delete(ctx context.Context, exec db.Executor, predecessorID, successorID string) error
+	Create(ctx context.Context, exec db.Executor, predecessorID, successorID string, createdBy *string, actorRole, workspaceID string) error
+	Delete(ctx context.Context, exec db.Executor, predecessorID, successorID, actorID, actorRole, workspaceID string) error
 }
 
 // taskDependencyTaskResolver -- reuse TaskRepository.GetProjectID/Get.
@@ -41,31 +41,33 @@ func NewTaskDependencyService(repo taskDependencyRepository, tasks taskDependenc
 	return &TaskDependencyService{repo: repo, tasks: tasks, projects: projects, rbac: rbac, projectRoles: projectRoles}
 }
 
-// authorize -- identik TaskService.resolveRole tanpa nilai balik role
-// (viewer/division_viewer ditolak) -- duplikasi kecil disengaja, pola sama
-// tiap service Task Core.
-func (s *TaskDependencyService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error {
+// authorize -- identik TaskService.resolveRole (viewer/division_viewer
+// ditolak) -- duplikasi kecil disengaja, pola sama tiap service Task Core.
+// MENGEMBALIKAN role hasil resolve (IG-94, sama fix authorize TaskService)
+// -- rute dependency SAMA seperti rute task/sprint, tanpa RequireRole,
+// jadi parameter actorRole mentah SELALU kosong, audit harus pakai ini.
+func (s *TaskDependencyService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (string, error) {
 	if actorRole == "platform_admin" || actorRole == "group_admin" {
-		return nil
+		return actorRole, nil
 	}
 	if role, found, err := s.projectRoles.GetRole(ctx, exec, projectID, actorID); err == nil && found {
 		if role == "viewer" {
-			return fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
+			return "", fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
 		}
-		return nil
+		return role, nil
 	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
 	if err != nil {
-		return fmt.Errorf("service.authorize: %w", err)
+		return "", fmt.Errorf("service.authorize: %w", err)
 	}
 	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
 	if err != nil {
-		return fmt.Errorf("service.authorize: %w", err)
+		return "", fmt.Errorf("service.authorize: %w", err)
 	}
 	if role == "viewer" || role == "division_viewer" {
-		return fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
+		return "", fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
 	}
-	return nil
+	return role, nil
 }
 
 // List menangani GET /tasks/:id/dependencies.
@@ -99,7 +101,8 @@ func (s *TaskDependencyService) Add(ctx context.Context, exec db.Executor, taskI
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return nil, err
 	}
 	predecessorProjectID, err := s.tasks.GetProjectID(ctx, exec, predecessorTaskID)
@@ -122,7 +125,11 @@ func (s *TaskDependencyService) Add(ctx context.Context, exec db.Executor, taskI
 		return nil, fmt.Errorf("service.Add: %w", &domain.CircularDependencyError{CyclePath: codes})
 	}
 
-	if err := s.repo.Create(ctx, exec, predecessorTaskID, taskID, &actorID); err != nil {
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.Add: %w", err)
+	}
+	if err := s.repo.Create(ctx, exec, predecessorTaskID, taskID, &actorID, auditRole, workspaceID); err != nil {
 		return nil, err
 	}
 	predecessors, err := s.repo.ListPredecessors(ctx, exec, taskID)
@@ -164,10 +171,15 @@ func (s *TaskDependencyService) Remove(ctx context.Context, exec db.Executor, ta
 	if err != nil {
 		return err
 	}
-	if err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return err
 	}
-	if err := s.repo.Delete(ctx, exec, predecessorTaskID, taskID); err != nil {
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("service.Remove: %w", err)
+	}
+	if err := s.repo.Delete(ctx, exec, predecessorTaskID, taskID, actorID, auditRole, workspaceID); err != nil {
 		return err
 	}
 	return nil

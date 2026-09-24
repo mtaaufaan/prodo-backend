@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -19,14 +20,15 @@ import (
 // Handoff, US-017c completeness + US-018 dependencies). Story-point/time
 // tracking enforcement penuh adalah Phase 4.
 type TaskHandler struct {
-	tasks  *service.TaskService
-	pics   *service.TaskPicService
-	deps   *service.TaskDependencyService
-	logger *zap.Logger
+	tasks       *service.TaskService
+	pics        *service.TaskPicService
+	deps        *service.TaskDependencyService
+	timeEntries *service.TimeEntryService
+	logger      *zap.Logger
 }
 
-func NewTaskHandler(tasks *service.TaskService, pics *service.TaskPicService, deps *service.TaskDependencyService, logger *zap.Logger) *TaskHandler {
-	return &TaskHandler{tasks: tasks, pics: pics, deps: deps, logger: logger}
+func NewTaskHandler(tasks *service.TaskService, pics *service.TaskPicService, deps *service.TaskDependencyService, timeEntries *service.TimeEntryService, logger *zap.Logger) *TaskHandler {
+	return &TaskHandler{tasks: tasks, pics: pics, deps: deps, timeEntries: timeEntries, logger: logger}
 }
 
 type taskRequest struct {
@@ -119,8 +121,16 @@ func (h *TaskHandler) Get(c *fiber.Ctx) error {
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil PIC aktif")
 	}
+	// loggedMinutes (IG-97, chip header + field RINGKASAN "JAM TERCATAT")
+	// -- HANYA entri time_entries approved, lihat komentar
+	// TimeEntryRepository.SumLoggedMinutesForTask.
+	loggedMinutes, err := h.timeEntries.SumLoggedMinutes(c.Context(), exec, taskID)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil jam tercatat")
+	}
 	data := taskJSON(task)
 	data["active_pics"] = picPhasesJSON(pics)
+	data["logged_minutes"] = loggedMinutes
 	return c.JSON(response.Success(data))
 }
 
@@ -318,13 +328,60 @@ func (h *TaskHandler) StatusSessions(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
+// Versions menangani GET /tasks/:id/versions (IG-97, tab RIWAYAT VERSI).
+func (h *TaskHandler) Versions(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	list, err := h.tasks.ListVersions(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil riwayat versi task")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		v := &list[i]
+		data[i] = fiber.Map{
+			"id": v.ID, "task_id": v.TaskID, "title": v.Title, "description": v.Description,
+			"changed_by": v.ChangedBy, "changed_by_name": v.ChangedName, "changed_by_email": v.ChangedEmail,
+			"trigger": v.Trigger, "snapshot_at": v.SnapshotAt,
+		}
+	}
+	return c.JSON(response.Success(data))
+}
+
+// Activity menangani GET /tasks/:id/activity (IG-94/IG-97, tab AKTIVITAS)
+// -- query param ?page=&per_page= (default 1/20, sama pola "Grid 1").
+func (h *TaskHandler) Activity(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	page, _ := strconv.Atoi(c.Query("page"))
+	perPage, _ := strconv.Atoi(c.Query("per_page"))
+	list, total, err := h.tasks.ListActivity(c.Context(), exec, c.Params("id"), page, perPage)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil aktivitas task")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		e := &list[i]
+		data[i] = fiber.Map{
+			"id": e.ID, "action": e.Action, "actor_id": e.ActorID, "actor_name": e.ActorName,
+			"actor_email": e.ActorEmail, "actor_role": e.ActorRole, "state_before": e.StateBefore,
+			"state_after": e.StateAfter, "metadata": e.Metadata, "logged_at": e.LoggedAt,
+		}
+	}
+	return c.JSON(response.Success(fiber.Map{"items": data, "total": total}))
+}
+
 type taskCompletenessRequest struct {
 	Completeness string `json:"completeness"`
 }
 
 // Completeness menangani PUT /tasks/:id/completeness (Phase 3, S4-44).
 func (h *TaskHandler) Completeness(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
@@ -338,7 +395,7 @@ func (h *TaskHandler) Completeness(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	if err := h.tasks.SetCompleteness(c.Context(), exec, taskID, body.Completeness, actorUserID); err != nil {
+	if err := h.tasks.SetCompleteness(c.Context(), exec, taskID, body.Completeness, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah status kelengkapan task")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": taskID, "completeness": body.Completeness}))

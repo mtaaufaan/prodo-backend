@@ -538,6 +538,29 @@ var (
 	// nama workspace tidak cocok, mencegah klik tidak sengaja untuk aksi
 	// tanpa masa retensi ini.
 	ErrWorkspaceNameConfirmMismatch = errors.New("typed workspace name does not match")
+
+	// ErrTimerAlreadyRunning dikembalikan POST /tasks/:id/time-entries/start
+	// (Timesheet, IG-97/US-036) saat user sudah punya timer aktif di task
+	// mana pun -- PK active_timers = user_id, satu timer per user.
+	ErrTimerAlreadyRunning = errors.New("user already has an active timer")
+
+	// ErrNoActiveTimer dikembalikan POST /tasks/:id/time-entries/stop saat
+	// tidak ada timer aktif untuk task ini (bukan sekadar tidak ada timer
+	// sama sekali -- timer aktif user bisa saja untuk task LAIN).
+	ErrNoActiveTimer = errors.New("no active timer for this task")
+
+	// ErrTimeEntryOverlap dikembalikan POST /tasks/:id/time-entries (manual)
+	// saat rentang waktu baru overlap dengan entri time_entries lain milik
+	// user yang sama (timer maupun manual, apa pun statusnya).
+	ErrTimeEntryOverlap = errors.New("time entry overlaps with an existing entry")
+
+	// ErrTimeEntryAlreadyApproved dikembalikan PATCH /time-entries/:id saat
+	// entri sudah is_approved=TRUE (locked, US-037 AC).
+	ErrTimeEntryAlreadyApproved = errors.New("approved time entry cannot be edited")
+
+	// ErrTimeEntryNotPending dikembalikan approve/reject saat entri BUKAN
+	// timer/manual is_approved=NULL (sudah diputuskan sebelumnya).
+	ErrTimeEntryNotPending = errors.New("time entry is not pending approval")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
