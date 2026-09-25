@@ -120,6 +120,45 @@ func (h *ProjectMemberHandler) AddMembersBulk(c *fiber.Ctx) error {
 	}))
 }
 
+// ListCandidates menangani GET /projects/:id/member-candidates (IG-100
+// susulan, "candidate pool" modal Tambah Member Project) -- akun lintas
+// SELURUH organisasi yang belum jadi member workspace project ini dan
+// tidak sedang punya undangan pending.
+func (h *ProjectMemberHandler) ListCandidates(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectMemberHandler.ListCandidates dipanggil tanpa DBContextMiddleware -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectMemberHandler.ListCandidates dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	accounts, err := h.projects.ListCandidates(c.Context(), exec, projectID, actorUserID, claims.PlatformRole)
+	if err != nil {
+		return h.mapProjectMemberError(c, err, "Gagal mengambil daftar kandidat member")
+	}
+
+	data := make([]fiber.Map, len(accounts))
+	for i, a := range accounts {
+		data[i] = fiber.Map{
+			"user_id":      a.UserID,
+			"email":        a.Email,
+			"display_name": a.DisplayName,
+			"org_id":       a.OrgID,
+			"org_name":     a.OrgName,
+		}
+	}
+	return c.Status(fiber.StatusOK).JSON(response.Success(data))
+}
+
 type updateProjectMemberRoleRequest struct {
 	Role string `json:"role"`
 }

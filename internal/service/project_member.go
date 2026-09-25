@@ -41,6 +41,16 @@ type displayNameGetter interface {
 	GetDisplayName(ctx context.Context, userID string) (string, error)
 }
 
+// projectMemberCandidateLister -- interface didefinisikan di consumer,
+// diimplementasikan *GroupRepository (IG-100 susulan, "AW Invite
+// Member.dc.html" actingRole='Project Manager', "candidate pool"). Query
+// lintas SELURUH organisasi lewat function SQL SECURITY DEFINER, sama pola
+// GroupRepository.SearchAccounts (S3-20) tapi TANPA batas satu grup --
+// dikonfirmasi user.
+type projectMemberCandidateLister interface {
+	ListProjectMemberCandidates(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Account, error)
+}
+
 // projectRoleChecker -- interface didefinisikan di consumer, §3.9.
 // Diimplementasikan *RBACService (GetMemberRole, GetWorkspaceOrgID,
 // AssignRole -- AssignRole ditambah S4W susulan, dipakai ProjectService
@@ -62,10 +72,11 @@ type ProjectMemberService struct {
 	rbac        projectRoleChecker
 	invitations bulkMemberInviter
 	accounts    displayNameGetter
+	candidates  projectMemberCandidateLister
 }
 
-func NewProjectMemberService(repo projectMemberRepository, orgs orgAuthorizer, rbac projectRoleChecker, invitations bulkMemberInviter, accounts displayNameGetter) *ProjectMemberService {
-	return &ProjectMemberService{repo: repo, orgs: orgs, rbac: rbac, invitations: invitations, accounts: accounts}
+func NewProjectMemberService(repo projectMemberRepository, orgs orgAuthorizer, rbac projectRoleChecker, invitations bulkMemberInviter, accounts displayNameGetter, candidates projectMemberCandidateLister) *ProjectMemberService {
+	return &ProjectMemberService{repo: repo, orgs: orgs, rbac: rbac, invitations: invitations, accounts: accounts, candidates: candidates}
 }
 
 // authorize menolak actor yang bukan PA/GA-of-org/AW/PM di workspace
@@ -180,6 +191,23 @@ func (s *ProjectMemberService) AddMembersBulk(ctx context.Context, exec db.Execu
 		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
 	}
 	return result, nil
+}
+
+// ListCandidates -- "candidate pool" modal Tambah Member Project (IG-100
+// susulan). Otorisasi SAMA seperti AddMembersBulk (PM/AW workspace ini,
+// atau org-level bypass) -- pool-nya sendiri lintas SELURUH organisasi
+// (lihat projectMemberCandidateLister), otorisasi cuma menjaga SIAPA yang
+// boleh MEMANGGIL endpoint ini, bukan membatasi ISI poolnya.
+func (s *ProjectMemberService) ListCandidates(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) ([]repository.Account, error) {
+	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	accounts, err := s.candidates.ListProjectMemberCandidates(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListCandidates: %w", err)
+	}
+	return accounts, nil
 }
 
 // UpdateMemberRole mengubah role project member existing (S3-22).
