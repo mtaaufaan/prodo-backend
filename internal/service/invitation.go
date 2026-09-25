@@ -233,15 +233,15 @@ type BulkInvitationResult struct {
 // (projectScopedOnly=false, TIDAK berubah): `AssignRole` (yang mengubah/
 // menetapkan role WORKSPACE target) SAMA SEKALI TIDAK dipanggil -- role
 // workspace orang lain bukan wewenang PM untuk diubah lewat aksi ini.
-// - Email SUDAH terdaftar: `isScoped` dihitung dari GetMemberRole ke
-//   workspace ini -- kalau dia SUDAH member workspace (role apa pun),
-//   is_scoped=false (akses project ini menumpang role workspace yang
-//   sudah ada, TIDAK disentuh); kalau BUKAN member workspace sama sekali
-//   (termasuk dari organisasi lain), is_scoped=true (murni project-scoped,
-//   ProjectMemberRepository.AddMember otomatis notify Admin Workspace).
-// - Email BELUM terdaftar: undangan project_scoped_only=true (lihat
-//   AcceptInvitation) -- saat diterima TIDAK membuat workspace_members
-//   sama sekali, langsung project_members(is_scoped=true).
+//   - Email SUDAH terdaftar: `isScoped` dihitung dari GetMemberRole ke
+//     workspace ini -- kalau dia SUDAH member workspace (role apa pun),
+//     is_scoped=false (akses project ini menumpang role workspace yang
+//     sudah ada, TIDAK disentuh); kalau BUKAN member workspace sama sekali
+//     (termasuk dari organisasi lain), is_scoped=true (murni project-scoped,
+//     ProjectMemberRepository.AddMember otomatis notify Admin Workspace).
+//   - Email BELUM terdaftar: undangan project_scoped_only=true (lihat
+//     AcceptInvitation) -- saat diterima TIDAK membuat workspace_members
+//     sama sekali, langsung project_members(is_scoped=true).
 func (s *InvitationService) CreateBulkInvitations(
 	ctx context.Context,
 	exec db.Executor,
