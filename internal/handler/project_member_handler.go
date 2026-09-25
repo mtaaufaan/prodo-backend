@@ -161,13 +161,14 @@ func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 	for i := range members {
 		m := &members[i]
 		data[i] = fiber.Map{
-			"user_id":      m.UserID,
-			"email":        m.Email,
-			"display_name": m.Name,
-			"role":         m.Role,
-			"is_scoped":    m.IsScoped,
-			"added_at":     m.AddedAt,
-			"is_pm":        m.IsPM,
+			"user_id":        m.UserID,
+			"email":          m.Email,
+			"display_name":   m.Name,
+			"role":           m.Role,
+			"is_scoped":      m.IsScoped,
+			"added_at":       m.AddedAt,
+			"is_pm":          m.IsPM,
+			"workspace_role": m.WorkspaceRole,
 		}
 	}
 	return c.JSON(response.Success(data))

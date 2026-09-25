@@ -23,16 +23,22 @@ func NewProjectMemberRepository() *ProjectMemberRepository {
 	return &ProjectMemberRepository{}
 }
 
-// ProjectMember -- satu baris hasil ListMembers/GetMember.
+// ProjectMember -- satu baris hasil ListMembers/GetMember. WorkspaceRole
+// (IG-97 susulan, "PM Member Project.dc.html" panel Kelola) -- role member
+// ini di WORKSPACE pemilik project (BEDA dari Role di atas, yang selalu
+// project_scoped_role). NULL kalau member ini project-scoped murni tanpa
+// baris workspace_members di workspace ini (ditambahkan PM langsung ke
+// project, tidak pernah jadi member workspace).
 type ProjectMember struct {
-	ProjectID string
-	UserID    string
-	Email     string
-	Name      string
-	Role      string
-	IsScoped  bool
-	AddedAt   time.Time
-	IsPM      bool
+	ProjectID     string
+	UserID        string
+	Email         string
+	Name          string
+	Role          string
+	IsScoped      bool
+	AddedAt       time.Time
+	IsPM          bool
+	WorkspaceRole *string
 }
 
 // CrossOrgMembership -- satu baris hasil ListCrossOrgMemberships (S3-25).
@@ -242,9 +248,11 @@ func (r *ProjectMemberRepository) GetRole(ctx context.Context, exec db.Executor,
 
 func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at
+		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at, wm.role
 		FROM project_members pm
 		JOIN users u ON u.id = pm.user_id
+		JOIN projects p ON p.id = pm.project_id
+		LEFT JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = pm.user_id
 		WHERE pm.project_id = $1
 		ORDER BY pm.added_at ASC
 	`, projectID)
@@ -256,7 +264,7 @@ func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Execu
 	members := make([]ProjectMember, 0)
 	for rows.Next() {
 		var m ProjectMember
-		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Email, &m.Name, &m.Role, &m.IsScoped, &m.AddedAt); err != nil {
+		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Email, &m.Name, &m.Role, &m.IsScoped, &m.AddedAt, &m.WorkspaceRole); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		members = append(members, m)
@@ -299,8 +307,8 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 	if pmUserID == nil {
 		return members, nil
 	}
-	for _, m := range members {
-		if m.UserID == *pmUserID {
+	for i := range members {
+		if members[i].UserID == *pmUserID {
 			return members, nil
 		}
 	}
