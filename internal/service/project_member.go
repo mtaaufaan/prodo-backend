@@ -23,6 +23,24 @@ type projectMemberRepository interface {
 	RevokeAllScopedForUser(ctx context.Context, exec db.Executor, userID string) (int64, error)
 }
 
+// bulkMemberInviter -- interface didefinisikan di consumer (§3.9),
+// diimplementasikan *InvitationService (IG-100 susulan, "AW Invite
+// Member.dc.html" actingRole='Project Manager') -- reuse penuh mesin
+// bulk-email/undangan existing yang sudah dipakai AW, dengan
+// projectScopedOnly=true supaya PM bisa menambah member dari LUAR
+// workspace/organisasi ini murni project-scoped, TANPA membuat mereka
+// workspace_members (lihat komentar InvitationService.CreateBulkInvitations).
+type bulkMemberInviter interface {
+	CreateBulkInvitations(ctx context.Context, exec db.Executor, emails []string, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID string, projectScopedOnly bool) (*BulkInvitationResult, error)
+	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+}
+
+// displayNameGetter -- interface didefinisikan di consumer, diimplementasikan
+// *AccountService (dipakai isi email undangan "X menambahkan Anda...").
+type displayNameGetter interface {
+	GetDisplayName(ctx context.Context, userID string) (string, error)
+}
+
 // projectRoleChecker -- interface didefinisikan di consumer, §3.9.
 // Diimplementasikan *RBACService (GetMemberRole, GetWorkspaceOrgID,
 // AssignRole -- AssignRole ditambah S4W susulan, dipakai ProjectService
@@ -39,13 +57,15 @@ type projectRoleChecker interface {
 // Admin pengelola org, atau Admin Workspace/Project Manager di workspace
 // project ini) PENUH dicek di sini, sama pola GroupService (S3-20).
 type ProjectMemberService struct {
-	repo projectMemberRepository
-	orgs orgAuthorizer
-	rbac projectRoleChecker
+	repo        projectMemberRepository
+	orgs        orgAuthorizer
+	rbac        projectRoleChecker
+	invitations bulkMemberInviter
+	accounts    displayNameGetter
 }
 
-func NewProjectMemberService(repo projectMemberRepository, orgs orgAuthorizer, rbac projectRoleChecker) *ProjectMemberService {
-	return &ProjectMemberService{repo: repo, orgs: orgs, rbac: rbac}
+func NewProjectMemberService(repo projectMemberRepository, orgs orgAuthorizer, rbac projectRoleChecker, invitations bulkMemberInviter, accounts displayNameGetter) *ProjectMemberService {
+	return &ProjectMemberService{repo: repo, orgs: orgs, rbac: rbac, invitations: invitations, accounts: accounts}
 }
 
 // authorize menolak actor yang bukan PA/GA-of-org/AW/PM di workspace
@@ -108,6 +128,58 @@ func (s *ProjectMemberService) AddMember(ctx context.Context, exec db.Executor, 
 		return fmt.Errorf("service.AddMember: %w", err)
 	}
 	return nil
+}
+
+// projectScopedBulkRoles -- role yang boleh diberikan lewat AddMembersBulk,
+// SAMA PERSIS validProjectScopedRoles (handler/project_member_handler.go)
+// -- PM tidak pernah bisa memberi admin_workspace/division_viewer/
+// project_manager lewat aksi ini, cuma editor/approver/viewer.
+var projectScopedBulkRoles = map[string]bool{"editor": true, "approver": true, "viewer": true}
+
+// AddMembersBulk (IG-100 susulan, "AW Invite Member.dc.html"
+// actingRole='Project Manager'/"PM Member Project.dc.html" tombol "+
+// MEMBER") -- PM menambah project-scoped member lewat DAFTAR EMAIL
+// sekaligus, BOLEH dari luar workspace/organisasi ini sama sekali. Reuse
+// PENUH mesin InvitationService.CreateBulkInvitations (projectScopedOnly=
+// true) -- lihat komentar di sana untuk semantik lengkap isScoped/
+// undangan. TIDAK mengubah role WORKSPACE siapa pun -- lihat guard di sana.
+func (s *ProjectMemberService) AddMembersBulk(ctx context.Context, exec db.Executor, projectID string, emails []string, role, actorID, actorRole string) (*BulkInvitationResult, error) {
+	if projectID == "" || len(emails) == 0 || role == "" {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", domain.ErrInvalidInput)
+	}
+	if !projectScopedBulkRoles[role] {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", domain.ErrInvalidInput)
+	}
+	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+
+	// S4W susulan (dikonfirmasi user 2026-09-13): project yang masih
+	// "menunggu PM" tidak boleh menambah member project-scoped lain dulu --
+	// guard SAMA dengan AddMember tunggal.
+	hasPM, err := s.repo.HasPM(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+	if !hasPM {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", domain.ErrProjectAwaitingPM)
+	}
+
+	workspaceName, err := s.invitations.GetWorkspaceName(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+	inviterName, err := s.accounts.GetDisplayName(ctx, actorID)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+
+	result, err := s.invitations.CreateBulkInvitations(ctx, exec, emails, workspaceID, role, actorID, actorRole, workspaceName, inviterName, projectID, true)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+	return result, nil
 }
 
 // UpdateMemberRole mengubah role project member existing (S3-22).

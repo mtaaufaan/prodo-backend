@@ -49,7 +49,7 @@ type projectUserFinder interface {
 // sudah ada semua) -- dipakai resolvePM/AssignPM jalur "undang PM baru"
 // (email belum terdaftar sama sekali).
 type projectPMInviter interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, displayName string) (*Invitation, error)
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, displayName string, projectScopedOnly bool) (*Invitation, error)
 	CancelInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error
 	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 }
@@ -217,7 +217,7 @@ func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspa
 	if err != nil {
 		return fmt.Errorf("service.invitePM: %w", err)
 	}
-	if _, err := s.invites.CreateInvitation(ctx, exec, email, workspaceID, "project_manager", actorID, actorRole, workspaceName, inviterName, projectID, inviteeName); err != nil {
+	if _, err := s.invites.CreateInvitation(ctx, exec, email, workspaceID, "project_manager", actorID, actorRole, workspaceName, inviterName, projectID, inviteeName, false); err != nil {
 		return fmt.Errorf("service.invitePM: %w", err)
 	}
 	return nil

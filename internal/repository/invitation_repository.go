@@ -53,22 +53,29 @@ func NewInvitationRepository() *InvitationRepository {
 // (dikonfirmasi user 2026-09-14: token lama otomatis invalid, sama seperti
 // Resend, bukan diblokir dengan pesan error). id baris TETAP SAMA (UPDATE,
 // bukan baris baru) -- caller tidak perlu tahu ini insert atau reuse.
+// projectScopedOnly (IG-100 susulan) -- TRUE kalau ini undangan PM
+// menambah project-scoped member (bisa dari LUAR workspace/organisasi
+// ini) -- dibaca AcceptInvitation supaya TIDAK membuat baris
+// workspace_members sama sekali saat diterima, murni project_members.
+// FALSE (default) untuk semua undangan lama/AW invite member biasa --
+// perilaku PERSIS sama seperti sebelumnya.
 func (r *InvitationRepository) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
 	email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName string,
+	projectScopedOnly bool,
 	expiresAt time.Time,
 ) (string, error) {
 	var id string
 	err := exec.QueryRow(ctx, `
-		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at, project_id, display_name)
-		VALUES ($1, $2, $3::workspace_role, $4, $5, $6, NULLIF($7, '')::uuid, NULLIF($8, ''))
+		INSERT INTO user_invitations (email, workspace_id, role, invited_by, token_hash, expires_at, project_id, display_name, project_scoped_only)
+		VALUES ($1, $2, $3::workspace_role, $4, $5, $6, NULLIF($7, '')::uuid, NULLIF($8, ''), $9)
 		ON CONFLICT (workspace_id, email) WHERE accepted_at IS NULL AND cancelled_at IS NULL
 		DO UPDATE SET role = EXCLUDED.role, invited_by = EXCLUDED.invited_by, token_hash = EXCLUDED.token_hash,
 		              expires_at = EXCLUDED.expires_at, project_id = EXCLUDED.project_id,
-		              display_name = EXCLUDED.display_name, created_at = NOW()
+		              display_name = EXCLUDED.display_name, project_scoped_only = EXCLUDED.project_scoped_only, created_at = NOW()
 		RETURNING id
-	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt, projectID, displayName).Scan(&id)
+	`, email, workspaceID, role, invitedByUserID, tokenHash, expiresAt, projectID, displayName, projectScopedOnly).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("repository.CreateInvitation: %w", classifyUniqueViolation(err, domain.ErrInvitationAlreadyPending))
 	}
@@ -163,6 +170,8 @@ type InvitationTarget struct {
 	// diedit invitee.
 	DisplayName string
 	Title       string
+	// ProjectScopedOnly (IG-100 susulan) -- lihat komentar CreateInvitation.
+	ProjectScopedOnly bool
 }
 
 // FindPendingByTokenHash mencari undangan pending berdasarkan hash token.
@@ -176,13 +185,14 @@ func (r *InvitationRepository) FindPendingByTokenHash(ctx context.Context, exec 
 	err := exec.QueryRow(ctx, `
 		SELECT id, email, COALESCE(workspace_id::text, ''), COALESCE(role::text, ''),
 		       COALESCE(group_id::text, ''), is_executive_invite,
-		       COALESCE(display_name, ''), COALESCE(title, ''), COALESCE(project_id::text, '')
+		       COALESCE(display_name, ''), COALESCE(title, ''), COALESCE(project_id::text, ''),
+		       project_scoped_only
 		FROM user_invitations
 		WHERE token_hash = $1
 		  AND accepted_at IS NULL
 		  AND cancelled_at IS NULL
 		  AND expires_at > NOW()
-	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite, &t.DisplayName, &t.Title, &t.ProjectID)
+	`, tokenHash).Scan(&t.ID, &t.Email, &t.WorkspaceID, &t.Role, &t.GroupID, &t.IsExecutiveInvite, &t.DisplayName, &t.Title, &t.ProjectID, &t.ProjectScopedOnly)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.FindPendingByTokenHash: %w", domain.ErrInvitationNotFound)
@@ -198,10 +208,18 @@ func (r *InvitationRepository) FindPendingByTokenHash(ctx context.Context, exec 
 // service.InvitationService.AcceptInvitation soal konteks RLS khusus rute
 // publik ini). Kalau email sudah terdaftar (race jarang antara invite dan
 // accept), INSERT users gagal unique_violation -> domain.ErrEmailAlreadyExists.
+// projectScopedOnly (IG-100 susulan) -- TRUE berarti undangan PM
+// (project-scoped, mungkin dari LUAR workspace ini): baris
+// workspace_members SENGAJA DILEWATI di sini -- invitee TIDAK PERNAH
+// jadi member workspace ini, cuma project_members (ditautkan pemanggil
+// service SETELAH fungsi ini, lihat InvitationService.AcceptInvitation).
+// FALSE (default, semua undangan lama) mempertahankan insert
+// workspace_members PERSIS seperti sebelumnya.
 func (r *InvitationRepository) AcceptInvitation(
 	ctx context.Context,
 	exec db.Executor,
 	invitationID, email, displayName, title, keycloakUserID, workspaceID, role string,
+	projectScopedOnly bool,
 ) (userID string, err error) {
 	err = exec.QueryRow(ctx, `
 		INSERT INTO users (email, display_name, title, platform_role, is_active)
@@ -219,11 +237,13 @@ func (r *InvitationRepository) AcceptInvitation(
 		return "", fmt.Errorf("repository.AcceptInvitation: insert user_auth_providers: %w", err)
 	}
 
-	if _, err = exec.Exec(ctx, `
-		INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
-		VALUES ($1, $2, $3::workspace_role, NULL)
-	`, workspaceID, userID, role); err != nil {
-		return "", fmt.Errorf("repository.AcceptInvitation: insert workspace_members: %w", err)
+	if !projectScopedOnly {
+		if _, err = exec.Exec(ctx, `
+			INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
+			VALUES ($1, $2, $3::workspace_role, NULL)
+		`, workspaceID, userID, role); err != nil {
+			return "", fmt.Errorf("repository.AcceptInvitation: insert workspace_members: %w", err)
+		}
 	}
 
 	if _, err = exec.Exec(ctx, `

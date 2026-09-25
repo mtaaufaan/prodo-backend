@@ -70,6 +70,36 @@ func (f *fakeProjectMemberRepo) RevokeAllScopedForUser(_ context.Context, _ db.E
 	return f.revokeCount, nil
 }
 
+type fakeBulkMemberInviter struct {
+	result    *BulkInvitationResult
+	err       error
+	wsName    string
+	wsNameErr error
+}
+
+func (f *fakeBulkMemberInviter) CreateBulkInvitations(_ context.Context, _ db.Executor, _ []string, _, _, _, _, _, _, _ string, _ bool) (*BulkInvitationResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &BulkInvitationResult{Errors: map[string]string{}}, nil
+}
+
+func (f *fakeBulkMemberInviter) GetWorkspaceName(_ context.Context, _ db.Executor, _ string) (string, error) {
+	return f.wsName, f.wsNameErr
+}
+
+type fakeDisplayNameGetter struct {
+	name string
+	err  error
+}
+
+func (f *fakeDisplayNameGetter) GetDisplayName(_ context.Context, _ string) (string, error) {
+	return f.name, f.err
+}
+
 type fakeProjectRoleChecker struct {
 	role      string
 	roleErr   error
@@ -95,7 +125,7 @@ func (f *fakeProjectRoleChecker) AssignRole(_ context.Context, _ db.Executor, _,
 
 func TestProjectMemberService_AddMember_PlatformAdminBypass(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, hasPM: true}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "pa-1", "platform_admin")
 	if err != nil {
@@ -105,7 +135,7 @@ func TestProjectMemberService_AddMember_PlatformAdminBypass(t *testing.T) {
 
 func TestProjectMemberService_AddMember_WorkspacePM_Allowed(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, hasPM: true}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "project_manager"}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "pm-1", "member")
 	if err != nil {
@@ -118,7 +148,7 @@ func TestProjectMemberService_AddMember_WorkspacePM_Allowed(t *testing.T) {
 // diterima, HasPM false) tidak boleh menambah member project-scoped lain.
 func TestProjectMemberService_AddMember_RejectsWhenAwaitingPM(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, hasPM: false}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: ""}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrProjectAwaitingPM) {
@@ -128,7 +158,7 @@ func TestProjectMemberService_AddMember_RejectsWhenAwaitingPM(t *testing.T) {
 
 func TestProjectMemberService_AddMember_ViewerForbidden(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "viewer"}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "user-1", "editor", "viewer-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
@@ -138,7 +168,7 @@ func TestProjectMemberService_AddMember_ViewerForbidden(t *testing.T) {
 
 func TestProjectMemberService_AddMember_ProjectNotFound(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{}}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.AddMember(context.Background(), nil, "proj-missing", "user-1", "editor", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrProjectNotFound) {
@@ -147,7 +177,7 @@ func TestProjectMemberService_AddMember_ProjectNotFound(t *testing.T) {
 }
 
 func TestProjectMemberService_AddMember_MissingFields(t *testing.T) {
-	svc := NewProjectMemberService(&fakeProjectMemberRepo{}, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{})
+	svc := NewProjectMemberService(&fakeProjectMemberRepo{}, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.AddMember(context.Background(), nil, "proj-1", "", "editor", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrInvalidInput) {
@@ -157,7 +187,7 @@ func TestProjectMemberService_AddMember_MissingFields(t *testing.T) {
 
 func TestProjectMemberService_UpdateMemberRole_AlreadyExists(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, updateErr: domain.ErrProjectMemberNotFound}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.UpdateMemberRole(context.Background(), nil, "proj-1", "user-1", "viewer", "pa-1", "platform_admin")
 	if !errors.Is(err, domain.ErrProjectMemberNotFound) {
@@ -167,7 +197,7 @@ func TestProjectMemberService_UpdateMemberRole_AlreadyExists(t *testing.T) {
 
 func TestProjectMemberService_RemoveMember_Forbidden(t *testing.T) {
 	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "editor"})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{err: domain.ErrForbidden}, &fakeProjectRoleChecker{role: "editor"}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	err := svc.RemoveMember(context.Background(), nil, "proj-1", "user-1", "editor-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
@@ -177,7 +207,7 @@ func TestProjectMemberService_RemoveMember_Forbidden(t *testing.T) {
 
 func TestProjectMemberService_ListMembers_Success(t *testing.T) {
 	repo := &fakeProjectMemberRepo{listResult: []repository.ProjectMember{{UserID: "user-1"}}}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	members, err := svc.ListMembers(context.Background(), nil, "proj-1")
 	if err != nil {
@@ -190,7 +220,7 @@ func TestProjectMemberService_ListMembers_Success(t *testing.T) {
 
 func TestProjectMemberService_ListCrossOrgMemberships_Success(t *testing.T) {
 	repo := &fakeProjectMemberRepo{crossOrgResult: []repository.CrossOrgMembership{{UserID: "user-1"}}}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	list, err := svc.ListCrossOrgMemberships(context.Background(), nil, "group-1", "")
 	if err != nil {
@@ -203,7 +233,7 @@ func TestProjectMemberService_ListCrossOrgMemberships_Success(t *testing.T) {
 
 func TestProjectMemberService_RevokeAllScopedForUser_Success(t *testing.T) {
 	repo := &fakeProjectMemberRepo{revokeCount: 3}
-	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{})
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{})
 
 	count, err := svc.RevokeAllScopedForUser(context.Background(), nil, "user-1")
 	if err != nil {

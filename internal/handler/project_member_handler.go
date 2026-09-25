@@ -67,6 +67,59 @@ func (h *ProjectMemberHandler) AddMember(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"project_id": projectID, "user_id": req.UserID, "role": req.Role}))
 }
 
+type addMembersBulkRequest struct {
+	Emails []string `json:"emails"`
+	Role   string   `json:"role"`
+}
+
+// AddMembersBulk menangani POST /projects/:id/members/bulk (IG-100
+// susulan, desain "AW Invite Member.dc.html" actingRole='Project
+// Manager'/"PM Member Project.dc.html" tombol "+ MEMBER") -- daftar email
+// sekaligus, BOLEH dari luar workspace/organisasi ini. Email yang sudah
+// terdaftar langsung dapat akses; yang belum dapat undangan 72 jam (lihat
+// InvitationService.CreateBulkInvitations projectScopedOnly=true).
+func (h *ProjectMemberHandler) AddMembersBulk(c *fiber.Ctx) error {
+	actorUserID, _, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectMemberHandler.AddMembersBulk dipanggil tanpa DBContextMiddleware -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	claims, ok := middleware.ClaimsFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(response.Error("INVALID_CREDENTIALS", "Token tidak ditemukan", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("ProjectMemberHandler.AddMembersBulk dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	var req addMembersBulkRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	if len(req.Emails) == 0 || !validProjectScopedRoles[req.Role] {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "emails dan role wajib diisi",
+			[]response.FieldError{{Field: "role", Message: "harus salah satu dari editor, approver, viewer"}}))
+	}
+
+	result, err := h.projects.AddMembersBulk(c.Context(), exec, projectID, req.Emails, req.Role, actorUserID, claims.PlatformRole)
+	if err != nil {
+		return h.mapProjectMemberError(c, err, "Gagal menambahkan member project")
+	}
+
+	invitationIDs := make([]string, len(result.Created))
+	for i, inv := range result.Created {
+		invitationIDs[i] = inv.ID
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
+		"invitation_ids": invitationIDs,
+		"added_directly": result.AddedDirectly,
+		"errors":         result.Errors,
+	}))
+}
+
 type updateProjectMemberRoleRequest struct {
 	Role string `json:"role"`
 }

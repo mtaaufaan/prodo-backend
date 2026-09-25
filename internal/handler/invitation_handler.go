@@ -124,7 +124,7 @@ func (h *InvitationHandler) CreateInvitations(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses undangan", nil))
 	}
 
-	result, err := h.invitations.CreateBulkInvitations(c.Context(), exec, req.Emails, workspaceID, req.Role, actorUserID, actorRole, workspaceName, inviterName, req.ProjectID)
+	result, err := h.invitations.CreateBulkInvitations(c.Context(), exec, req.Emails, workspaceID, req.Role, actorUserID, actorRole, workspaceName, inviterName, req.ProjectID, false)
 	if err != nil {
 		if errors.Is(err, domain.ErrProjectNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("PROJECT_NOT_FOUND", "Project tidak ditemukan di workspace ini", nil))
