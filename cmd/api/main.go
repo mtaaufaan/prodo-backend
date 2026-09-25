@@ -231,6 +231,7 @@ func run() error {
 	taskDependencyRepo := repository.NewTaskDependencyRepository()
 	taskStatusSessionRepo := repository.NewTaskStatusSessionRepository()
 	timeEntryRepo := repository.NewTimeEntryRepository()
+	checklistItemRepo := repository.NewTaskChecklistItemRepository()
 
 	accountSvc := service.NewAccountService(accountRepo, kcAdmin, logger)
 	emailSvc := service.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom, cfg.SMTPUser, cfg.SMTPPass)
@@ -257,9 +258,10 @@ func run() error {
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc)
 	ruleSvc.SetTaskActions(taskSvc)
-	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
+	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc)
+	checklistItemSvc := service.NewTaskChecklistItemService(checklistItemRepo)
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
 	performanceRepo := repository.NewPerformanceRepository()
@@ -322,6 +324,7 @@ func run() error {
 	ruleHandler := handler.NewRuleHandler(ruleSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	timeEntryHandler := handler.NewTimeEntryHandler(timeEntrySvc, logger)
+	checklistItemHandler := handler.NewTaskChecklistItemHandler(checklistItemSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, timeEntrySvc, logger)
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
 	performanceHandler := handler.NewPerformanceHandler(performanceSvc, logger)
@@ -771,6 +774,11 @@ func run() error {
 
 	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
 	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
+	// IG-97 susulan, tab PIC FASE "+ Tambah PIC Paralel"/"SERAHKAN PIC
+	// FASE"/"✕ HAPUS PIC" -- lihat komentar service/task_pic.go.
+	v1.Post("/tasks/:id/pic/add", jwtAuth, dbCtx, taskHandler.AddPic)
+	v1.Post("/tasks/:id/pic/handoff", jwtAuth, dbCtx, taskHandler.HandoffPic)
+	v1.Delete("/tasks/:id/pic/:userId", jwtAuth, dbCtx, taskHandler.RemovePic)
 	v1.Get("/tasks/:id/pic-history", jwtAuth, dbCtx, taskHandler.PicHistory)
 	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.List)
 	v1.Post("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.Add)
@@ -799,6 +807,12 @@ func run() error {
 	v1.Patch("/time-entries/:entryId", jwtAuth, dbCtx, timeEntryHandler.UpdateManual)
 	v1.Post("/time-entries/:entryId/approve", jwtAuth, dbCtx, timeEntryHandler.Approve)
 	v1.Post("/time-entries/:entryId/reject", jwtAuth, dbCtx, timeEntryHandler.Reject)
+
+	// SUB-TASK / checklist item (IG-97 susulan).
+	v1.Post("/tasks/:id/checklist-items", jwtAuth, dbCtx, checklistItemHandler.Create)
+	v1.Get("/tasks/:id/checklist-items", jwtAuth, dbCtx, checklistItemHandler.List)
+	v1.Patch("/tasks/checklist-items/:itemId", jwtAuth, dbCtx, checklistItemHandler.Update)
+	v1.Delete("/tasks/checklist-items/:itemId", jwtAuth, dbCtx, checklistItemHandler.Delete)
 
 	// Attachment Management (H20-22, S4W-19/20/21, EPIC 10) -- upload/list
 	// per task tanpa RequireRole tambahan (RLS + otorisasi role di service

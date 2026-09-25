@@ -274,6 +274,78 @@ func (h *TaskHandler) Acknowledge(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": taskID}))
 }
 
+type taskPicAddRequest struct {
+	UserID string `json:"user_id"`
+}
+
+// AddPic menangani POST /tasks/:id/pic/add (IG-97 susulan, tab PIC FASE
+// "+ Tambah PIC Paralel").
+func (h *TaskHandler) AddPic(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	var body taskPicAddRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	taskID := c.Params("id")
+	if err := h.pics.AddPic(c.Context(), exec, taskID, body.UserID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menambah PIC")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID}))
+}
+
+type taskPicHandoffRequest struct {
+	FromUserID string `json:"from_user_id"`
+	ToUserID   string `json:"to_user_id"`
+}
+
+// HandoffPic menangani POST /tasks/:id/pic/handoff (IG-97 susulan, tab
+// PIC FASE "SERAHKAN PIC FASE"). from_user_id kosong berarti SEMUA PIC
+// aktif digantikan (desain chip "SEMUA PIC").
+func (h *TaskHandler) HandoffPic(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	var body taskPicHandoffRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	taskID := c.Params("id")
+	if err := h.pics.HandoffPic(c.Context(), exec, taskID, body.FromUserID, body.ToUserID, actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menyerahkan PIC")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID}))
+}
+
+// RemovePic menangani DELETE /tasks/:id/pic/:userId (IG-97 susulan,
+// tombol "✕ HAPUS PIC" -- PM/AW only, ditolak kalau PIC terakhir).
+func (h *TaskHandler) RemovePic(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	taskID := c.Params("id")
+	if err := h.pics.RemovePic(c.Context(), exec, taskID, c.Params("userId"), actorUserID, actorRole); err != nil {
+		return h.mapError(c, err, "Gagal menghapus PIC")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": taskID}))
+}
+
 // PicHistory menangani GET /tasks/:id/pic-history.
 func (h *TaskHandler) PicHistory(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
@@ -561,6 +633,10 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PIC_NOT_IN_GROUP", "PIC Group status ini belum memuat member yang Anda pilih. Minta Project Manager menambah anggota PIC Group.", nil))
 	case errors.Is(err, domain.ErrNotActivePic):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("NOT_ACTIVE_PIC", "Anda bukan PIC aktif task ini, atau sudah mengonfirmasi sebelumnya.", nil))
+	case errors.Is(err, domain.ErrPicAlreadyActive):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("PIC_ALREADY_ACTIVE", "User ini sudah menjadi PIC aktif pada fase ini.", nil))
+	case errors.Is(err, domain.ErrLastActivePic):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PIC_LAST_ACTIVE", "Tidak dapat menghapus PIC terakhir -- gunakan Serah Terima PIC.", nil))
 	case errors.Is(err, domain.ErrStoryPointsNotAllowed):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("STORY_POINTS_NOT_ALLOWED", "Anda tidak berwenang mengubah story point task ini -- hanya PM/AW atau Editor yang diizinkan project ini.", nil))
 	case errors.Is(err, domain.ErrNoActiveStatusSession):

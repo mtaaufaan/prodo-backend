@@ -443,7 +443,20 @@ var (
 
 	// ErrNotActivePic dikembalikan POST /tasks/:id/pic/acknowledge saat
 	// actor bukan PIC aktif task ini, atau sudah acknowledge sebelumnya.
+	// Direuse juga oleh HAPUS PIC/SERAHKAN PIC FASE (IG-97 susulan) saat
+	// target user_id yang dituju ternyata bukan PIC aktif fase ini.
 	ErrNotActivePic = errors.New("actor is not an active pic awaiting acknowledgement for this task")
+
+	// ErrPicAlreadyActive (IG-97 susulan, tab PIC FASE "+ Tambah PIC
+	// Paralel"/"SERAHKAN PIC FASE") -- user yang dituju SUDAH jadi PIC
+	// aktif fase ini, tidak boleh ditambah/diserahkan dobel.
+	ErrPicAlreadyActive = errors.New("user is already an active pic for this task phase")
+
+	// ErrLastActivePic (IG-97 susulan, tombol "✕ HAPUS PIC") -- setiap
+	// fase wajib punya minimal satu PIC aktif; hapus PIC terakhir ditolak,
+	// pemanggil diarahkan pakai SERAHKAN PIC FASE (yang selalu mengisi
+	// pengganti dalam satu aksi).
+	ErrLastActivePic = errors.New("cannot remove the last active pic for this task phase")
 
 	// ErrTaskIncomplete dikembalikan PUT /tasks/:id/status (Task Management
 	// Core Phase 3, US-017c/S4-43) saat task masih berstatus BACKLOG dengan
