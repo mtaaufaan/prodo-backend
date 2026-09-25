@@ -58,6 +58,10 @@ func (f *fakeProjectMemberRepo) ListAssignableMembers(_ context.Context, _ db.Ex
 	return f.listResult, nil
 }
 
+func (f *fakeProjectMemberRepo) ListMembersView(_ context.Context, _ db.Executor, _ string) ([]repository.ProjectMember, error) {
+	return f.listResult, nil
+}
+
 func (f *fakeProjectMemberRepo) ListCrossOrgMemberships(_ context.Context, _ db.Executor, _, _ string) ([]repository.CrossOrgMembership, error) {
 	return f.crossOrgResult, nil
 }

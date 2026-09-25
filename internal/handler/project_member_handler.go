@@ -133,11 +133,22 @@ func (h *ProjectMemberHandler) RemoveMember(c *fiber.Ctx) error {
 }
 
 // ListMembers menangani GET /projects/:id/members (S3-24 prasyarat FE).
-// Query param ?assignable=true (susulan S5) mengembalikan daftar kandidat
-// assignee/PIC -- ikut sertakan PM penanggung jawab project (yang normalnya
-// tidak muncul di project_members, lihat ProjectMemberRepository.
-// ListAssignableMembers) -- dipakai AddTaskModal/TaskDetailModal/KanbanBoard,
-// BUKAN halaman kelola member (butuh role project_scoped_role asli).
+// Dua query param opsional (mutually exclusive, `view` menang kalau
+// keduanya dikirim):
+//   - ?assignable=true (susulan S5): PM penanggung jawab project ikut
+//     sertakan sebagai entri sintetis -- dipakai picker assignee/PIC
+//     (AddTaskModal/TaskDetailModal/KanbanBoard).
+//   - ?view=manage (IG-100 susulan, dikonfirmasi user "yang dikecualikan
+//     itu admin group dan executive... AW, DV, PM, Editor, Approver, dan
+//     Viewer yang ditampilkan hanya yang berhubungan dengan project"):
+//     assignable + SEMUA Admin Workspace/Division Viewer di workspace
+//     pemilik project ini -- dipakai KHUSUS halaman kelola member
+//     ProjectMembersPage (lihat ProjectMemberRepository.ListMembersView).
+//
+// FE mengunci baris non-project-scoped (PM/AW/DV) di kedua mode lewat
+// `is_pm`/role check, backend tetap menolak UpdateRole/RemoveMember
+// terhadapnya sebagai defense in depth (baris itu tidak punya row
+// project_members asli).
 func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
@@ -148,9 +159,12 @@ func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 
 	var members []repository.ProjectMember
 	var err error
-	if c.Query("assignable") == "true" {
+	switch {
+	case c.Query("view") == "manage":
+		members, err = h.projects.ListMembersView(c.Context(), exec, projectID)
+	case c.Query("assignable") == "true":
 		members, err = h.projects.ListAssignableMembers(c.Context(), exec, projectID)
-	} else {
+	default:
 		members, err = h.projects.ListMembers(c.Context(), exec, projectID)
 	}
 	if err != nil {

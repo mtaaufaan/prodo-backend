@@ -18,6 +18,7 @@ type projectMemberRepository interface {
 	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
 	ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
+	ListMembersView(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
 	ListCrossOrgMemberships(ctx context.Context, exec db.Executor, groupID, orgIDFilter string) ([]repository.CrossOrgMembership, error)
 	RevokeAllScopedForUser(ctx context.Context, exec db.Executor, userID string) (int64, error)
 }
@@ -161,6 +162,21 @@ func (s *ProjectMemberService) ListAssignableMembers(ctx context.Context, exec d
 	members, err := s.repo.ListAssignableMembers(ctx, exec, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListAssignableMembers: %w", err)
+	}
+	return members, nil
+}
+
+// ListMembersView -- lihat ProjectMemberRepository.ListMembersView. TIDAK
+// ada pengecekan otorisasi tambahan, sama pola ListMembers (RLS pm_select
+// membatasi workspace_members yang ikut di-JOIN juga lewat RLS tabel itu
+// sendiri).
+func (s *ProjectMemberService) ListMembersView(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListMembersView: %w", domain.ErrInvalidInput)
+	}
+	members, err := s.repo.ListMembersView(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListMembersView: %w", err)
 	}
 	return members, nil
 }
