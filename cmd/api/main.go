@@ -258,7 +258,7 @@ func run() error {
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc)
 	ruleSvc.SetTaskActions(taskSvc)
-	taskPicSvc := service.NewTaskPicService(taskPicRepo, projectRepo, rbacSvc, projectMemberRepo)
+	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc)
 	checklistItemSvc := service.NewTaskChecklistItemService(checklistItemRepo)
@@ -774,6 +774,11 @@ func run() error {
 
 	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
 	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
+	// IG-97 susulan, tab PIC FASE "+ Tambah PIC Paralel"/"SERAHKAN PIC
+	// FASE"/"✕ HAPUS PIC" -- lihat komentar service/task_pic.go.
+	v1.Post("/tasks/:id/pic/add", jwtAuth, dbCtx, taskHandler.AddPic)
+	v1.Post("/tasks/:id/pic/handoff", jwtAuth, dbCtx, taskHandler.HandoffPic)
+	v1.Delete("/tasks/:id/pic/:userId", jwtAuth, dbCtx, taskHandler.RemovePic)
 	v1.Get("/tasks/:id/pic-history", jwtAuth, dbCtx, taskHandler.PicHistory)
 	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.List)
 	v1.Post("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.Add)
