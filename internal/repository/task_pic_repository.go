@@ -178,6 +178,89 @@ func (r *TaskPicRepository) Acknowledge(ctx context.Context, exec db.Executor, t
 	return ok, nil
 }
 
+// AddPic (IG-97 susulan, tab PIC FASE "+ Tambah PIC Paralel") -- PIC
+// tambahan pada fase (status) yang SEDANG aktif, TANPA menonaktifkan PIC
+// lain -- beda dari CreatePhase yang dipakai SetStatus (satu fase baru
+// menggantikan seluruhnya). Audit "task.pic_added" SENDIRI di sini --
+// CreatePhase tidak audit sendiri karena selalu menyertai audit
+// "task.status_changed" tunggal yang sudah mencakupnya.
+func (r *TaskPicRepository) AddPic(ctx context.Context, exec db.Executor, taskID, statusID, statusName, userID, actorID, actorRole, workspaceID string) error {
+	_, err := exec.Exec(ctx, `
+		INSERT INTO task_pic_phases (task_id, status_id, user_id, assigned_by)
+		VALUES ($1, $2, $3, $4)
+	`, taskID, statusID, userID, actorID)
+	if err != nil {
+		return fmt.Errorf("repository.AddPic: %w", err)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.pic_added", taskID, workspaceID, nil,
+		map[string]any{"status_name": statusName, "user_id": userID}); err != nil {
+		return fmt.Errorf("repository.AddPic: audit: %w", err)
+	}
+	return nil
+}
+
+// RemovePic (IG-97 susulan, tombol "✕ HAPUS PIC") -- lepas SATU PIC
+// aktif. Guard "bukan PIC terakhir" ada di service SEBELUM memanggil ini
+// (lewat ListActiveForTask) -- repo ini murni eksekusi + audit.
+func (r *TaskPicRepository) RemovePic(ctx context.Context, exec db.Executor, taskID, statusName, userID, actorID, actorRole, workspaceID string) (bool, error) {
+	tag, err := exec.Exec(ctx, `
+		UPDATE task_pic_phases SET is_active = FALSE, deactivated_at = NOW()
+		WHERE task_id = $1 AND user_id = $2 AND is_active = TRUE
+	`, taskID, userID)
+	if err != nil {
+		return false, fmt.Errorf("repository.RemovePic: %w", err)
+	}
+	ok := tag.RowsAffected() > 0
+	if ok {
+		if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.pic_removed", taskID, workspaceID, nil,
+			map[string]any{"status_name": statusName, "user_id": userID}); err != nil {
+			return false, fmt.Errorf("repository.RemovePic: audit: %w", err)
+		}
+	}
+	return ok, nil
+}
+
+// deactivateOnePic -- lepas satu PIC aktif TANPA audit sendiri -- dipakai
+// HandoffPic sebagai langkah "PIC lama dilepas" di dalam SATU aksi serah
+// terima (audit cukup satu baris "task.pic_handoff" yang mencakup dari+ke,
+// bukan baris terpisah per PIC yang dilepas).
+func (r *TaskPicRepository) deactivateOnePic(ctx context.Context, exec db.Executor, taskID, userID string) error {
+	_, err := exec.Exec(ctx, `
+		UPDATE task_pic_phases SET is_active = FALSE, deactivated_at = NOW()
+		WHERE task_id = $1 AND user_id = $2 AND is_active = TRUE
+	`, taskID, userID)
+	if err != nil {
+		return fmt.Errorf("repository.deactivateOnePic: %w", err)
+	}
+	return nil
+}
+
+// HandoffPic (IG-97 susulan, "SERAHKAN PIC FASE") -- lepas PIC lama
+// (fromUserIDs -- satu user tertentu, atau SEMUA PIC aktif kalau dipanggil
+// dengan seluruh isi ListActiveForTask), lalu buat fase baru (PENDING)
+// untuk toUserID. Satu audit "task.pic_handoff" mencakup keduanya --
+// BUKAN "task.pic_removed"+"task.pic_added" terpisah, supaya feed
+// AKTIVITAS/Audit Trail membaca ini sebagai satu peristiwa serah terima.
+func (r *TaskPicRepository) HandoffPic(ctx context.Context, exec db.Executor, taskID, statusID, statusName string, fromUserIDs []string, toUserID, actorID, actorRole, workspaceID string) error {
+	for _, uid := range fromUserIDs {
+		if err := r.deactivateOnePic(ctx, exec, taskID, uid); err != nil {
+			return fmt.Errorf("repository.HandoffPic: %w", err)
+		}
+	}
+	_, err := exec.Exec(ctx, `
+		INSERT INTO task_pic_phases (task_id, status_id, user_id, assigned_by)
+		VALUES ($1, $2, $3, $4)
+	`, taskID, statusID, toUserID, actorID)
+	if err != nil {
+		return fmt.Errorf("repository.HandoffPic: %w", err)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.pic_handoff", taskID, workspaceID, nil,
+		map[string]any{"status_name": statusName, "from_user_ids": fromUserIDs, "to_user_id": toUserID}); err != nil {
+		return fmt.Errorf("repository.HandoffPic: audit: %w", err)
+	}
+	return nil
+}
+
 // ListGroupForStatus -- PIC Group (project_id, status_id) tertentu --
 // kosong berarti mode Bebas (§5.34).
 func (r *TaskPicRepository) ListGroupForStatus(ctx context.Context, exec db.Executor, projectID, statusID string) ([]PicGroupMember, error) {
