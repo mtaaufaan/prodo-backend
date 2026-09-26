@@ -92,7 +92,7 @@ func (h *CSVImportHandler) Handle(ctx context.Context, task *asynq.Task) error {
 			continue // sudah 'skipped' saat dry-run, tidak diproses
 		}
 
-		result, err := h.invitations.CreateBulkInvitations(ctx, tx, []string{row.Email}, row.WorkspaceID, row.Role, imp.ImportedBy, imp.ActorRole, row.WorkspaceName, inviterName, "")
+		result, err := h.invitations.CreateBulkInvitations(ctx, tx, []string{row.Email}, row.WorkspaceID, row.Role, imp.ImportedBy, imp.ActorRole, row.WorkspaceName, inviterName, "", false)
 		if err != nil || len(result.Errors) > 0 {
 			row.Status = "skipped"
 			if msg, ok := result.Errors[row.Email]; ok {

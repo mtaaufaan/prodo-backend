@@ -246,7 +246,7 @@ func run() error {
 	workspaceRepo := repository.NewWorkspaceRepository()
 	workspaceSvc := service.NewWorkspaceService(workspaceRepo, organizationSvc, rbacSvc, accountRepo, emailSvc, invitationSvc, logger)
 	groupSvc := service.NewGroupService(groupRepo, organizationSvc)
-	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc)
+	projectMemberSvc := service.NewProjectMemberService(projectMemberRepo, organizationSvc, rbacSvc, invitationSvc, accountSvc, groupRepo)
 	webhookSvc := service.NewWebhookService(webhookRepo, organizationRepo, rbacSvc, projectRepo, &asynqWebhookEnqueuer{client: asynqClient}, emailSvc, logger)
 	groupAuditSvc := service.NewGroupAuditService(groupAuditRepo, organizationRepo)
 	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
@@ -744,6 +744,10 @@ func run() error {
 	v1.Post("/projects/:id/restore", jwtAuth, dbCtx, projectHandler.Restore)
 	v1.Get("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.ListMembers)
 	v1.Post("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.AddMember)
+	// IG-100 susulan, tombol "+ MEMBER" -- daftar email sekaligus, boleh
+	// dari luar workspace/organisasi ini (lihat service/project_member.go).
+	v1.Post("/projects/:id/members/bulk", jwtAuth, dbCtx, projectMemberHandler.AddMembersBulk)
+	v1.Get("/projects/:id/member-candidates", jwtAuth, dbCtx, projectMemberHandler.ListCandidates)
 	v1.Put("/projects/:id/members/:userId/role", jwtAuth, dbCtx, projectMemberHandler.UpdateMemberRole)
 	v1.Delete("/projects/:id/members/:userId", jwtAuth, dbCtx, projectMemberHandler.RemoveMember)
 	// S3-25/27, US-009c. GA/PA saja (bukan PM seperti S3-20) -- GA sudah
