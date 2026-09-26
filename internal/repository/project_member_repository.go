@@ -39,6 +39,13 @@ type ProjectMember struct {
 	AddedAt       time.Time
 	IsPM          bool
 	WorkspaceRole *string
+	// IsPending (IG-100 susulan lanjutan) -- baris sintetis dari
+	// user_invitations yang belum accepted/cancelled, lihat
+	// listPendingInvitations. UserID untuk baris ini BUKAN id user asli
+	// (undangan pending selalu berarti email belum terdaftar sebagai user
+	// sama sekali -- lihat InvitationService.CreateBulkInvitations),
+	// melainkan "pending:<invitation_id>" supaya tetap unik sebagai key FE.
+	IsPending bool
 }
 
 // CrossOrgMembership -- satu baris hasil ListCrossOrgMemberships (S3-25).
@@ -349,6 +356,10 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 // di sana apa adanya) -- AW/DV tidak otomatis relevan jadi kandidat
 // assignee task, cuma relevan sebagai INFORMASI "siapa yang punya akses"
 // di halaman kelola member.
+//
+// Diperluas lagi (IG-100 susulan lanjutan) menambahkan undangan pending
+// project ini (project_manager ATAU project-scoped) lewat
+// listPendingInvitations -- lihat komentar di sana.
 func (r *ProjectMemberRepository) ListMembersView(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	members, err := r.ListAssignableMembers(ctx, exec, projectID)
 	if err != nil {
@@ -399,7 +410,59 @@ func (r *ProjectMemberRepository) ListMembersView(ctx context.Context, exec db.E
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("repository.ListMembersView: %w", err)
 	}
-	return members, nil
+
+	pending, err := r.listPendingInvitations(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListMembersView: %w", err)
+	}
+	return append(members, pending...), nil
+}
+
+// listPendingInvitations (IG-100 susulan lanjutan, ditemukan user: akun
+// yang diundang project_manager tapi belum pernah accept muncul PENDING di
+// grid AW Member Roles, tapi TIDAK PERNAH muncul sama sekali di halaman
+// Member Project ini -- meski desain "PM Member Project.dc.html" punya
+// state AKTIF/PENDING di kolom STATUS). Difilter PERSIS project_id ini
+// (dikonfirmasi user "jika mengacu pada project yang sama") -- undangan
+// role workspace-scoped (admin_workspace/division_viewer) TIDAK PERNAH
+// diisi project_id, otomatis tidak pernah ikut. Baris hasil query ini
+// SELALU berarti email belum terdaftar user (lihat komentar IsPending di
+// struct ProjectMember) -- kalau sudah terdaftar, InvitationService
+// langsung meng-assign tanpa membuat baris user_invitations sama sekali.
+func (r *ProjectMemberRepository) listPendingInvitations(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT ui.id, ui.email, ui.role, ui.project_scoped_only, ui.created_at
+		FROM user_invitations ui
+		WHERE ui.project_id = $1 AND ui.accepted_at IS NULL AND ui.cancelled_at IS NULL
+		ORDER BY ui.created_at DESC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.listPendingInvitations: %w", err)
+	}
+	defer rows.Close()
+
+	pending := make([]ProjectMember, 0)
+	for rows.Next() {
+		var id, email, role string
+		var scopedOnly bool
+		var createdAt time.Time
+		if err := rows.Scan(&id, &email, &role, &scopedOnly, &createdAt); err != nil {
+			return nil, fmt.Errorf("repository.listPendingInvitations: scan: %w", err)
+		}
+		pending = append(pending, ProjectMember{
+			ProjectID: projectID,
+			UserID:    "pending:" + id,
+			Email:     email,
+			Role:      role,
+			IsScoped:  scopedOnly,
+			AddedAt:   createdAt,
+			IsPending: true,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.listPendingInvitations: %w", err)
+	}
+	return pending, nil
 }
 
 // ListCrossOrgMemberships mengembalikan project-scoped member (is_scoped =
