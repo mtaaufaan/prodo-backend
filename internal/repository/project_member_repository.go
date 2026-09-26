@@ -23,16 +23,22 @@ func NewProjectMemberRepository() *ProjectMemberRepository {
 	return &ProjectMemberRepository{}
 }
 
-// ProjectMember -- satu baris hasil ListMembers/GetMember.
+// ProjectMember -- satu baris hasil ListMembers/GetMember. WorkspaceRole
+// (IG-97 susulan, "PM Member Project.dc.html" panel Kelola) -- role member
+// ini di WORKSPACE pemilik project (BEDA dari Role di atas, yang selalu
+// project_scoped_role). NULL kalau member ini project-scoped murni tanpa
+// baris workspace_members di workspace ini (ditambahkan PM langsung ke
+// project, tidak pernah jadi member workspace).
 type ProjectMember struct {
-	ProjectID string
-	UserID    string
-	Email     string
-	Name      string
-	Role      string
-	IsScoped  bool
-	AddedAt   time.Time
-	IsPM      bool
+	ProjectID     string
+	UserID        string
+	Email         string
+	Name          string
+	Role          string
+	IsScoped      bool
+	AddedAt       time.Time
+	IsPM          bool
+	WorkspaceRole *string
 }
 
 // CrossOrgMembership -- satu baris hasil ListCrossOrgMemberships (S3-25).
@@ -242,9 +248,11 @@ func (r *ProjectMemberRepository) GetRole(ctx context.Context, exec db.Executor,
 
 func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at
+		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at, wm.role
 		FROM project_members pm
 		JOIN users u ON u.id = pm.user_id
+		JOIN projects p ON p.id = pm.project_id
+		LEFT JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = pm.user_id
 		WHERE pm.project_id = $1
 		ORDER BY pm.added_at ASC
 	`, projectID)
@@ -256,7 +264,7 @@ func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Execu
 	members := make([]ProjectMember, 0)
 	for rows.Next() {
 		var m ProjectMember
-		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Email, &m.Name, &m.Role, &m.IsScoped, &m.AddedAt); err != nil {
+		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Email, &m.Name, &m.Role, &m.IsScoped, &m.AddedAt, &m.WorkspaceRole); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		members = append(members, m)
@@ -267,18 +275,23 @@ func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Execu
 	return members, nil
 }
 
-// ListAssignableMembers -- susulan (S5, "bukankah role PM termasuk dari
-// member project"): sama seperti ListMembers, TAPI ditambah PM
-// penanggung jawab project (projects.pm_user_id) sebagai entri sintetis
-// (IsPM=true, Role="project_manager") kalau PM belum juga tercatat di
-// project_members (kasus umum -- PM adalah workspace_role, BUKAN
-// project_scoped_role, lihat DATABASE_SCHEMA.md §5.12 catatan pm_user_id,
-// jadi normalnya PM tidak akan pernah muncul lewat ListMembers biasa).
-// Dipakai KHUSUS oleh consumer yang butuh daftar kandidat assignee/PIC
-// (AddTaskModal, TaskDetailModal, KanbanBoard) -- TIDAK dipakai halaman
-// kelola member (ProjectMembersPage/WorkspaceMembersPage) karena entri PM
-// sintetis ini tidak punya role project_scoped_role asli yang bisa
-// diedit/dihapus lewat endpoint member biasa.
+// ListAssignableMembers -- awalnya susulan S5 ("bukankah role PM termasuk
+// dari member project") untuk picker assignee/PIC (AddTaskModal,
+// TaskDetailModal, KanbanBoard): sama seperti ListMembers, TAPI ditambah
+// PM penanggung jawab project (projects.pm_user_id) sebagai entri
+// sintetis (IsPM=true, Role="project_manager") kalau PM belum juga
+// tercatat di project_members (kasus umum -- PM adalah workspace_role,
+// BUKAN project_scoped_role, lihat DATABASE_SCHEMA.md §5.12 catatan
+// pm_user_id, jadi normalnya PM tidak akan pernah muncul lewat ListMembers
+// biasa). SEKARANG (IG-100 susulan) JUGA dipakai ProjectMembersPage --
+// desain "PM Member Project.dc.html" memang menampilkan PM sebagai baris
+// (dikunci "— KUNCI", tidak bisa diedit/dihapus dari sini) supaya PM
+// terlihat sebagai member project, bukan disembunyikan total seperti
+// keputusan awal yang salah. Entri sintetis PM TETAP tidak punya role
+// project_scoped_role asli -- FE WAJIB mengunci baris ini (cek
+// `is_pm`)) sebelum memanggil UpdateRole/RemoveMember (yang akan
+// menolaknya dengan ErrProjectMemberNotFound kalau tetap dicoba, defense
+// in depth).
 func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	members, err := r.ListMembers(ctx, exec, projectID)
 	if err != nil {
@@ -299,8 +312,8 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 	if pmUserID == nil {
 		return members, nil
 	}
-	for _, m := range members {
-		if m.UserID == *pmUserID {
+	for i := range members {
+		if members[i].UserID == *pmUserID {
 			return members, nil
 		}
 	}
@@ -320,6 +333,73 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 		Role:      "project_manager",
 		IsPM:      true,
 	}), nil
+}
+
+// ListMembersView -- khusus halaman kelola member project (IG-100
+// susulan, dikonfirmasi user: "yang dikecualikan itu admin group dan
+// executive, untuk AW, DV, PM, Editor, Approver, dan Viewer yang
+// ditampilkan hanya yang berhubungan dengan project"). Gabungan
+// ListAssignableMembers (project_members + PM sintetis) DITAMBAH SEMUA
+// Admin Workspace dan Division Viewer di WORKSPACE PEMILIK project ini
+// (role scope-nya seluruh workspace -- "berhubungan dengan project" lewat
+// akses implisit ke semua project workspace tersebut, BUKAN baris
+// project_members). Group Admin/Executive/Platform Admin SENGAJA TIDAK
+// disertakan -- role org-level itu tidak terikat ke satu project mana pun.
+// TIDAK dipakai picker assignee/PIC (ListAssignableMembers tetap dipakai
+// di sana apa adanya) -- AW/DV tidak otomatis relevan jadi kandidat
+// assignee task, cuma relevan sebagai INFORMASI "siapa yang punya akses"
+// di halaman kelola member.
+func (r *ProjectMemberRepository) ListMembersView(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
+	members, err := r.ListAssignableMembers(ctx, exec, projectID)
+	if err != nil {
+		return nil, err
+	}
+	workspaceID, err := r.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListMembersView: %w", err)
+	}
+
+	rows, err := exec.Query(ctx, `
+		SELECT wm.user_id, u.email, u.display_name, wm.role, wm.joined_at
+		FROM workspace_members wm
+		JOIN users u ON u.id = wm.user_id
+		WHERE wm.workspace_id = $1 AND wm.role IN ('admin_workspace', 'division_viewer')
+		ORDER BY wm.joined_at ASC
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListMembersView: %w", err)
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool, len(members))
+	for i := range members {
+		existing[members[i].UserID] = true
+	}
+	for rows.Next() {
+		var userID, email, name, role string
+		var joinedAt time.Time
+		if err := rows.Scan(&userID, &email, &name, &role, &joinedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListMembersView: scan: %w", err)
+		}
+		if existing[userID] {
+			continue
+		}
+		wsRole := role
+		members = append(members, ProjectMember{
+			ProjectID:     projectID,
+			UserID:        userID,
+			Email:         email,
+			Name:          name,
+			Role:          role,
+			IsScoped:      false,
+			AddedAt:       joinedAt,
+			WorkspaceRole: &wsRole,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListMembersView: %w", err)
+	}
+	return members, nil
 }
 
 // ListCrossOrgMemberships mengembalikan project-scoped member (is_scoped =

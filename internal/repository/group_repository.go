@@ -74,6 +74,34 @@ func (r *GroupRepository) SearchAccounts(ctx context.Context, exec db.Executor, 
 	return accounts, nil
 }
 
+// ListProjectMemberCandidates (IG-100 susulan, desain "AW Invite
+// Member.dc.html" actingRole='Project Manager') -- pool akun LINTAS
+// SELURUH organisasi di sistem yang belum jadi member workspaceID dan
+// tidak sedang punya undangan pending ke workspace itu, dikonfirmasi user
+// SENGAJA tidak dibatasi satu grup (beda dari SearchAccounts di atas)
+// karena Project Manager boleh menambah project-scoped member dari
+// organisasi mana pun.
+func (r *GroupRepository) ListProjectMemberCandidates(ctx context.Context, exec db.Executor, workspaceID string) ([]Account, error) {
+	rows, err := exec.Query(ctx, `SELECT user_id, email, display_name, org_id, org_name FROM prodo_project_member_candidates($1)`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListProjectMemberCandidates: %w", err)
+	}
+	defer rows.Close()
+
+	accounts := make([]Account, 0)
+	for rows.Next() {
+		var a Account
+		if err := rows.Scan(&a.UserID, &a.Email, &a.DisplayName, &a.OrgID, &a.OrgName); err != nil {
+			return nil, fmt.Errorf("repository.ListProjectMemberCandidates: scan: %w", err)
+		}
+		accounts = append(accounts, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListProjectMemberCandidates: %w", err)
+	}
+	return accounts, nil
+}
+
 // GroupLocale -- format tanggal/waktu/zona waktu/angka LEVEL GRUP (S4G-27,
 // US-010 lanjutan), migrasi 20261004090000. Beda dari
 // organizations.default_language (S3-29-31, per-organisasi).

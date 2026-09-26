@@ -18,8 +18,37 @@ type projectMemberRepository interface {
 	RemoveMember(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
 	ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
+	ListMembersView(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
 	ListCrossOrgMemberships(ctx context.Context, exec db.Executor, groupID, orgIDFilter string) ([]repository.CrossOrgMembership, error)
 	RevokeAllScopedForUser(ctx context.Context, exec db.Executor, userID string) (int64, error)
+}
+
+// bulkMemberInviter -- interface didefinisikan di consumer (§3.9),
+// diimplementasikan *InvitationService (IG-100 susulan, "AW Invite
+// Member.dc.html" actingRole='Project Manager') -- reuse penuh mesin
+// bulk-email/undangan existing yang sudah dipakai AW, dengan
+// projectScopedOnly=true supaya PM bisa menambah member dari LUAR
+// workspace/organisasi ini murni project-scoped, TANPA membuat mereka
+// workspace_members (lihat komentar InvitationService.CreateBulkInvitations).
+type bulkMemberInviter interface {
+	CreateBulkInvitations(ctx context.Context, exec db.Executor, emails []string, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID string, projectScopedOnly bool) (*BulkInvitationResult, error)
+	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
+}
+
+// displayNameGetter -- interface didefinisikan di consumer, diimplementasikan
+// *AccountService (dipakai isi email undangan "X menambahkan Anda...").
+type displayNameGetter interface {
+	GetDisplayName(ctx context.Context, userID string) (string, error)
+}
+
+// projectMemberCandidateLister -- interface didefinisikan di consumer,
+// diimplementasikan *GroupRepository (IG-100 susulan, "AW Invite
+// Member.dc.html" actingRole='Project Manager', "candidate pool"). Query
+// lintas SELURUH organisasi lewat function SQL SECURITY DEFINER, sama pola
+// GroupRepository.SearchAccounts (S3-20) tapi TANPA batas satu grup --
+// dikonfirmasi user.
+type projectMemberCandidateLister interface {
+	ListProjectMemberCandidates(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Account, error)
 }
 
 // projectRoleChecker -- interface didefinisikan di consumer, §3.9.
@@ -38,13 +67,16 @@ type projectRoleChecker interface {
 // Admin pengelola org, atau Admin Workspace/Project Manager di workspace
 // project ini) PENUH dicek di sini, sama pola GroupService (S3-20).
 type ProjectMemberService struct {
-	repo projectMemberRepository
-	orgs orgAuthorizer
-	rbac projectRoleChecker
+	repo        projectMemberRepository
+	orgs        orgAuthorizer
+	rbac        projectRoleChecker
+	invitations bulkMemberInviter
+	accounts    displayNameGetter
+	candidates  projectMemberCandidateLister
 }
 
-func NewProjectMemberService(repo projectMemberRepository, orgs orgAuthorizer, rbac projectRoleChecker) *ProjectMemberService {
-	return &ProjectMemberService{repo: repo, orgs: orgs, rbac: rbac}
+func NewProjectMemberService(repo projectMemberRepository, orgs orgAuthorizer, rbac projectRoleChecker, invitations bulkMemberInviter, accounts displayNameGetter, candidates projectMemberCandidateLister) *ProjectMemberService {
+	return &ProjectMemberService{repo: repo, orgs: orgs, rbac: rbac, invitations: invitations, accounts: accounts, candidates: candidates}
 }
 
 // authorize menolak actor yang bukan PA/GA-of-org/AW/PM di workspace
@@ -109,6 +141,75 @@ func (s *ProjectMemberService) AddMember(ctx context.Context, exec db.Executor, 
 	return nil
 }
 
+// projectScopedBulkRoles -- role yang boleh diberikan lewat AddMembersBulk,
+// SAMA PERSIS validProjectScopedRoles (handler/project_member_handler.go)
+// -- PM tidak pernah bisa memberi admin_workspace/division_viewer/
+// project_manager lewat aksi ini, cuma editor/approver/viewer.
+var projectScopedBulkRoles = map[string]bool{"editor": true, "approver": true, "viewer": true}
+
+// AddMembersBulk (IG-100 susulan, "AW Invite Member.dc.html"
+// actingRole='Project Manager'/"PM Member Project.dc.html" tombol "+
+// MEMBER") -- PM menambah project-scoped member lewat DAFTAR EMAIL
+// sekaligus, BOLEH dari luar workspace/organisasi ini sama sekali. Reuse
+// PENUH mesin InvitationService.CreateBulkInvitations (projectScopedOnly=
+// true) -- lihat komentar di sana untuk semantik lengkap isScoped/
+// undangan. TIDAK mengubah role WORKSPACE siapa pun -- lihat guard di sana.
+func (s *ProjectMemberService) AddMembersBulk(ctx context.Context, exec db.Executor, projectID string, emails []string, role, actorID, actorRole string) (*BulkInvitationResult, error) {
+	if projectID == "" || len(emails) == 0 || role == "" {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", domain.ErrInvalidInput)
+	}
+	if !projectScopedBulkRoles[role] {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", domain.ErrInvalidInput)
+	}
+	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+
+	// S4W susulan (dikonfirmasi user 2026-09-13): project yang masih
+	// "menunggu PM" tidak boleh menambah member project-scoped lain dulu --
+	// guard SAMA dengan AddMember tunggal.
+	hasPM, err := s.repo.HasPM(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+	if !hasPM {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", domain.ErrProjectAwaitingPM)
+	}
+
+	workspaceName, err := s.invitations.GetWorkspaceName(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+	inviterName, err := s.accounts.GetDisplayName(ctx, actorID)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+
+	result, err := s.invitations.CreateBulkInvitations(ctx, exec, emails, workspaceID, role, actorID, actorRole, workspaceName, inviterName, projectID, true)
+	if err != nil {
+		return nil, fmt.Errorf("service.AddMembersBulk: %w", err)
+	}
+	return result, nil
+}
+
+// ListCandidates -- "candidate pool" modal Tambah Member Project (IG-100
+// susulan). Otorisasi SAMA seperti AddMembersBulk (PM/AW workspace ini,
+// atau org-level bypass) -- pool-nya sendiri lintas SELURUH organisasi
+// (lihat projectMemberCandidateLister), otorisasi cuma menjaga SIAPA yang
+// boleh MEMANGGIL endpoint ini, bukan membatasi ISI poolnya.
+func (s *ProjectMemberService) ListCandidates(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) ([]repository.Account, error) {
+	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	accounts, err := s.candidates.ListProjectMemberCandidates(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListCandidates: %w", err)
+	}
+	return accounts, nil
+}
+
 // UpdateMemberRole mengubah role project member existing (S3-22).
 func (s *ProjectMemberService) UpdateMemberRole(ctx context.Context, exec db.Executor, projectID, targetUserID, role, actorID, actorRole string) error {
 	if projectID == "" || targetUserID == "" || role == "" {
@@ -161,6 +262,21 @@ func (s *ProjectMemberService) ListAssignableMembers(ctx context.Context, exec d
 	members, err := s.repo.ListAssignableMembers(ctx, exec, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListAssignableMembers: %w", err)
+	}
+	return members, nil
+}
+
+// ListMembersView -- lihat ProjectMemberRepository.ListMembersView. TIDAK
+// ada pengecekan otorisasi tambahan, sama pola ListMembers (RLS pm_select
+// membatasi workspace_members yang ikut di-JOIN juga lewat RLS tabel itu
+// sendiri).
+func (s *ProjectMemberService) ListMembersView(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListMembersView: %w", domain.ErrInvalidInput)
+	}
+	members, err := s.repo.ListMembersView(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListMembersView: %w", err)
 	}
 	return members, nil
 }

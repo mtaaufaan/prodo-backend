@@ -28,10 +28,10 @@ const invitationTTL = 72 * time.Hour
 // terautentikasi biasa), untuk AcceptInvitation dari konteks khusus rute
 // publik (lihat komentar AcceptInvitation).
 type invitationRepository interface {
-	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName string, expiresAt time.Time) (string, error)
+	CreateInvitation(ctx context.Context, exec db.Executor, email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName string, projectScopedOnly bool, expiresAt time.Time) (string, error)
 	CreateExecutiveInvitation(ctx context.Context, exec db.Executor, email, groupID, invitedByUserID, tokenHash string, expiresAt time.Time) (string, error)
 	FindPendingByTokenHash(ctx context.Context, exec db.Executor, tokenHash string) (*repository.InvitationTarget, error)
-	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, workspaceID, role string) (string, error)
+	AcceptInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, workspaceID, role string, projectScopedOnly bool) (string, error)
 	AcceptExecutiveInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, groupID string) (string, error)
 	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error
 	Resend(ctx context.Context, exec db.Executor, workspaceID, invitationID, newTokenHash string, newExpiresAt time.Time) (*repository.ResendTarget, error)
@@ -58,8 +58,15 @@ type existingUserFinder interface {
 // workspaceAssigner -- interface didefinisikan di consumer,
 // diimplementasikan *RBACService (S2-23: shortcut tambah langsung ke
 // workspace, bukan bikin undangan, kalau email sudah terdaftar).
+// GetMemberRole (IG-100 susulan) dipakai CreateBulkInvitations jalur
+// project_scoped_only supaya tahu apakah target SUDAH member workspace
+// ini (is_scoped harus false, jangan sentuh role workspace-nya) atau
+// benar-benar dari luar (is_scoped true, project-scoped murni) -- *RBACService
+// SUDAH mengimplementasikan method ini untuk consumer lain, tidak perlu
+// wiring baru di main.go.
 type workspaceAssigner interface {
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole, projectID string) (*RoleChangeResult, error)
+	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 }
 
 // projectPMAssigner -- interface didefinisikan di consumer, diimplementasikan
@@ -141,6 +148,7 @@ func (s *InvitationService) CreateInvitation(
 	ctx context.Context,
 	exec db.Executor,
 	email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, displayName string,
+	projectScopedOnly bool,
 ) (*Invitation, error) {
 	rawToken, tokenHash, err := generateActivationToken()
 	if err != nil {
@@ -148,7 +156,7 @@ func (s *InvitationService) CreateInvitation(
 	}
 	expiresAt := time.Now().Add(invitationTTL)
 
-	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName, expiresAt)
+	id, err := s.repo.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, actorRole, tokenHash, projectID, displayName, projectScopedOnly, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateInvitation: %w", err)
 	}
@@ -216,11 +224,30 @@ type BulkInvitationResult struct {
 // penautan ke project terjadi SEKARANG JUGA (SetPM untuk project_manager,
 // AddMember untuk role project-scoped) -- beda dari email baru yang baru
 // ditautkan begitu undangannya diterima (lihat AcceptInvitation).
+//
+// projectScopedOnly (IG-100 susulan, desain "AW Invite Member.dc.html"
+// actingRole='Project Manager'/"PM Member Project.dc.html" tombol "+
+// MEMBER") -- TRUE berarti PM menambah project-scoped member (role WAJIB
+// editor/approver/viewer, divalidasi caller) yang BOLEH dari luar
+// workspace/organisasi ini sama sekali. BEDA PENTING dari jalur AW biasa
+// (projectScopedOnly=false, TIDAK berubah): `AssignRole` (yang mengubah/
+// menetapkan role WORKSPACE target) SAMA SEKALI TIDAK dipanggil -- role
+// workspace orang lain bukan wewenang PM untuk diubah lewat aksi ini.
+//   - Email SUDAH terdaftar: `isScoped` dihitung dari GetMemberRole ke
+//     workspace ini -- kalau dia SUDAH member workspace (role apa pun),
+//     is_scoped=false (akses project ini menumpang role workspace yang
+//     sudah ada, TIDAK disentuh); kalau BUKAN member workspace sama sekali
+//     (termasuk dari organisasi lain), is_scoped=true (murni project-scoped,
+//     ProjectMemberRepository.AddMember otomatis notify Admin Workspace).
+//   - Email BELUM terdaftar: undangan project_scoped_only=true (lihat
+//     AcceptInvitation) -- saat diterima TIDAK membuat workspace_members
+//     sama sekali, langsung project_members(is_scoped=true).
 func (s *InvitationService) CreateBulkInvitations(
 	ctx context.Context,
 	exec db.Executor,
 	emails []string,
 	workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID string,
+	projectScopedOnly bool,
 ) (*BulkInvitationResult, error) {
 	if projectID != "" {
 		projectWorkspaceID, err := s.projectMembers.GetWorkspaceID(ctx, exec, projectID)
@@ -260,6 +287,16 @@ func (s *InvitationService) CreateBulkInvitations(
 		case err == nil:
 			// S2-23: email sudah terdaftar -- tambah langsung, tanpa undangan/email.
 			err := withSavepoint(ctx, exec, savepoint, func() error {
+				if projectScopedOnly {
+					// PM: TIDAK PERNAH AssignRole (role workspace bukan
+					// wewenangnya) -- isScoped ditentukan dari status
+					// keanggotaan workspace target SAAT INI, bukan diubah.
+					existingWsRole, err := s.assigner.GetMemberRole(ctx, exec, workspaceID, existingUserID)
+					if err != nil {
+						return err
+					}
+					return s.projectMembers.AddMember(ctx, exec, projectID, workspaceID, existingUserID, role, existingWsRole == "", invitedByUserID, actorRole)
+				}
 				if _, err := s.assigner.AssignRole(ctx, exec, workspaceID, existingUserID, role, &invitedByUserID, invitedByUserID, actorRole, ""); err != nil {
 					return err
 				}
@@ -280,7 +317,7 @@ func (s *InvitationService) CreateBulkInvitations(
 			var inv *Invitation
 			err := withSavepoint(ctx, exec, savepoint, func() error {
 				var err error
-				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, "")
+				inv, err = s.CreateInvitation(ctx, exec, email, workspaceID, role, invitedByUserID, actorRole, workspaceName, inviterName, projectID, "", projectScopedOnly)
 				return err
 			})
 			if err != nil {
@@ -403,7 +440,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 		return &AcceptedInvitation{UserID: userID, Email: target.Email}, nil
 	}
 
-	userID, err := s.repo.AcceptInvitation(ctx, exec, target.ID, target.Email, displayName, title, kcUserID, target.WorkspaceID, target.Role)
+	userID, err := s.repo.AcceptInvitation(ctx, exec, target.ID, target.Email, displayName, title, kcUserID, target.WorkspaceID, target.Role, target.ProjectScopedOnly)
 	if err != nil {
 		s.logger.Error("user Keycloak berhasil dibuat tapi gagal simpan PRODO -- kemungkinan orphan, perlu cleanup manual",
 			zap.String("email", target.Email),
@@ -431,9 +468,13 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 			}
 		case "editor", "approver", "viewer":
 			if s.projectMembers != nil {
-				// isScoped=false: orang ini SUDAH jadi workspace_members lewat
-				// insert di atas, bukan project-scoped murni dari luar workspace.
-				if err := s.projectMembers.AddMember(ctx, exec, target.ProjectID, target.WorkspaceID, userID, target.Role, false, userID, "member"); err != nil {
+				// isScoped = target.ProjectScopedOnly (IG-100 susulan): undangan
+				// AW biasa (false) -- orang ini SUDAH jadi workspace_members lewat
+				// insert di atas, bukan project-scoped murni. Undangan PM
+				// project_scoped_only (true) -- repo.AcceptInvitation SENGAJA
+				// TIDAK membuat workspace_members sama sekali, jadi baris ini
+				// SATU-SATUNYA akses yang didapat, is_scoped WAJIB true.
+				if err := s.projectMembers.AddMember(ctx, exec, target.ProjectID, target.WorkspaceID, userID, target.Role, target.ProjectScopedOnly, userID, "member"); err != nil {
 					s.logger.Error("undangan diterima tapi gagal menambahkan sebagai project member",
 						zap.String("project_id", target.ProjectID), zap.String("user_id", userID), zap.Error(err))
 				}
