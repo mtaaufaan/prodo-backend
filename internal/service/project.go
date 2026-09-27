@@ -21,19 +21,21 @@ var projectCodePattern = regexp.MustCompile(`^[A-Z]{2,5}$`)
 // projectRepository -- interface didefinisikan di consumer, §3.9.
 type projectRepository interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
-	Create(ctx context.Context, exec db.Executor, workspaceID, name, code, pmUserID, actorID, actorRole string) (*repository.Project, error)
+	Create(ctx context.Context, exec db.Executor, workspaceID, name, code, actorID, actorRole string) (*repository.Project, error)
 	List(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Project, error)
 	NameExists(ctx context.Context, exec db.Executor, workspaceID, name, excludeProjectID string) (bool, error)
-	Update(ctx context.Context, exec db.Executor, projectID, name, status, pmUserID, actorID, actorRole string, endDate *time.Time) error
+	Update(ctx context.Context, exec db.Executor, projectID, name, status, actorID, actorRole string, endDate *time.Time) error
 	SetArchived(ctx context.Context, exec db.Executor, projectID string, archive bool, actorID, actorRole string) error
 	SoftDelete(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	Restore(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
 	SetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string, allow bool) error
 	AssignPendingPM(ctx context.Context, exec db.Executor, projectID, userID string) error
-	GetPMUserID(ctx context.Context, exec db.Executor, projectID string) (string, error)
-	RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
-	SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
-	GetPendingPMInvitationID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	// AddPM/RemovePM/CountPMsExcluding (susulan multi-PM) -- lihat
+	// repository.ProjectRepository, satu project boleh punya lebih dari
+	// satu PM sekarang (dikonfirmasi user).
+	AddPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	RemovePM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	CountPMsExcluding(ctx context.Context, exec db.Executor, projectID, excludeUserID string) (int, error)
 }
 
 // projectUserFinder -- interface didefinisikan di consumer, diimplementasikan
@@ -223,30 +225,13 @@ func (s *ProjectService) invitePM(ctx context.Context, exec db.Executor, workspa
 	return nil
 }
 
-// cancelExistingPMInvitation membatalkan undangan PM pending yang tertaut
-// project ini kalau ada -- dipanggil sebelum menetapkan PM baru (resolved
-// ATAU undangan baru) supaya satu project tidak pernah punya lebih dari
-// satu undangan PM pending sekaligus.
-func (s *ProjectService) cancelExistingPMInvitation(ctx context.Context, exec db.Executor, workspaceID, projectID, actorID, actorRole string) error {
-	pendingID, err := s.repo.GetPendingPMInvitationID(ctx, exec, projectID)
-	if err != nil {
-		return fmt.Errorf("service.cancelExistingPMInvitation: %w", err)
-	}
-	if pendingID == "" {
-		return nil
-	}
-	if err := s.invites.CancelInvitation(ctx, exec, workspaceID, pendingID, actorID, actorRole); err != nil {
-		return fmt.Errorf("service.cancelExistingPMInvitation: %w", err)
-	}
-	return nil
-}
-
 // Create membuat project baru (S4-02, diperluas S4W susulan). code WAJIB;
 // PM ditunjuk lewat PERSIS SATU dari pmUserID/pmEmail (mutual exclusion
 // ditegakkan handler, sama pola WorkspaceHandler.CreateWorkspace) --
 // project TETAP dibuat meski PM masih undangan pending ("menunggu PM",
-// pm_user_id NULL), BEDA dari AC lama yang mewajibkan PM aktif sejak awal.
-// inviterName dipakai isi email undangan kalau jalur invite-baru terpakai.
+// 0 baris project_managers), BEDA dari AC lama yang mewajibkan PM aktif
+// sejak awal. inviterName dipakai isi email undangan kalau jalur
+// invite-baru terpakai.
 func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspaceID, name, code, pmUserID, pmEmail, pmName, actorID, actorRole, inviterName string) (*repository.Project, error) {
 	name = strings.TrimSpace(name)
 	code = strings.ToUpper(strings.TrimSpace(code))
@@ -269,11 +254,16 @@ func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspace
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
 
-	p, err := s.repo.Create(ctx, exec, workspaceID, name, code, pm.ResolvedUserID, actorID, actorRole)
+	p, err := s.repo.Create(ctx, exec, workspaceID, name, code, actorID, actorRole)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
 
+	if pm.ResolvedUserID != "" {
+		if err := s.repo.AddPM(ctx, exec, p.ID, pm.ResolvedUserID, actorID, actorRole); err != nil {
+			return nil, fmt.Errorf("service.Create: %w", err)
+		}
+	}
 	if pm.InviteEmail != "" {
 		if err := s.invitePM(ctx, exec, workspaceID, p.ID, pm.InviteEmail, actorID, actorRole, inviterName, pm.InviteName); err != nil {
 			return nil, fmt.Errorf("service.Create: %w", err)
@@ -322,22 +312,25 @@ func (s *ProjectService) Update(ctx context.Context, exec db.Executor, projectID
 	if nameTaken {
 		return fmt.Errorf("service.Update: %w", domain.ErrProjectNameTaken)
 	}
-	if err := s.repo.Update(ctx, exec, projectID, name, status, "", actorID, actorRole, endDate); err != nil {
+	if err := s.repo.Update(ctx, exec, projectID, name, status, actorID, actorRole, endDate); err != nil {
 		return fmt.Errorf("service.Update: %w", err)
 	}
 	s.dispatchWebhook(ctx, exec, workspaceID, projectID, "project.updated", map[string]any{"id": projectID, "name": name})
 	return nil
 }
 
-// AssignPM (S4W susulan) menetapkan/mengganti PM penanggung jawab --
-// dipakai panel Kelola baik saat project sudah punya PM aktif (ganti) MAUPUN
-// saat masih "menunggu PM" (isi pertama kali). Sama pola resolvePM Create:
-// pmUserID ATAU pmEmail (mutual exclusion ditegakkan handler). Undangan PM
-// pending LAMA (kalau ada) otomatis dibatalkan dulu -- satu project cuma
-// boleh punya SATU undangan PM pending sekaligus.
-func (s *ProjectService) AssignPM(ctx context.Context, exec db.Executor, projectID, pmUserID, pmEmail, pmName, actorID, actorRole, inviterName string) error {
+// AddPM (S4W susulan, diperluas susulan multi-PM setelah user menemukan
+// "+ Tetapkan PM" ternyata MENGGANTI PM yang ada -- "bagaimana cara
+// menambah PM dalam suatu project?") menambah SATU PM ke project ini,
+// ADITIF -- PM lain yang sudah ada TIDAK disentuh. Dipakai panel Kelola
+// baik saat project masih "menunggu PM" (isi pertama kali) MAUPUN sudah
+// punya PM aktif (tambah co-PM). Sama pola resolvePM Create: pmUserID ATAU
+// pmEmail (mutual exclusion ditegakkan handler). BEDA dari versi lama:
+// undangan PM pending BOLEH lebih dari satu bersamaan (dikonfirmasi user),
+// jadi TIDAK ADA lagi auto-cancel undangan lain sebelum membuat yang baru.
+func (s *ProjectService) AddPM(ctx context.Context, exec db.Executor, projectID, pmUserID, pmEmail, pmName, actorID, actorRole, inviterName string) error {
 	if projectID == "" || (pmUserID == "" && pmEmail == "") {
-		return fmt.Errorf("service.AssignPM: %w", domain.ErrInvalidInput)
+		return fmt.Errorf("service.AddPM: %w", domain.ErrInvalidInput)
 	}
 	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
@@ -345,57 +338,40 @@ func (s *ProjectService) AssignPM(ctx context.Context, exec db.Executor, project
 	}
 	pm, err := s.resolvePM(ctx, exec, workspaceID, pmUserID, pmEmail, pmName, actorID, actorRole)
 	if err != nil {
-		return fmt.Errorf("service.AssignPM: %w", err)
-	}
-	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID, actorRole); err != nil {
-		return fmt.Errorf("service.AssignPM: %w", err)
+		return fmt.Errorf("service.AddPM: %w", err)
 	}
 	if pm.ResolvedUserID != "" {
-		if err := s.repo.SetPM(ctx, exec, projectID, pm.ResolvedUserID, actorID, actorRole); err != nil {
-			return fmt.Errorf("service.AssignPM: %w", err)
+		if err := s.repo.AddPM(ctx, exec, projectID, pm.ResolvedUserID, actorID, actorRole); err != nil {
+			return fmt.Errorf("service.AddPM: %w", err)
 		}
 		return nil
 	}
-	// Jalur undang-baru (email belum terdaftar): PM AKTIF saat ini (kalau
-	// ada) dikosongkan dulu -- project balik ke "menunggu PM" sampai
-	// undangan ini diterima, konsisten dengan Create yang juga membuat
-	// project tanpa PM aktif untuk kasus yang sama.
-	if err := s.repo.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
-		return fmt.Errorf("service.AssignPM: %w", err)
-	}
 	if err := s.invitePM(ctx, exec, workspaceID, projectID, pm.InviteEmail, actorID, actorRole, inviterName, pm.InviteName); err != nil {
-		return fmt.Errorf("service.AssignPM: %w", err)
+		return fmt.Errorf("service.AddPM: %w", err)
 	}
 	return nil
 }
 
-// RemovePM (S4W susulan) mengosongkan PM aktif TANPA pengganti -- project
-// masuk/kembali ke status "menunggu PM". Undangan PM pending (kalau ada,
-// jarang -- biasanya cuma ada saat TIDAK ada PM aktif) ikut dibatalkan
-// supaya tidak ada undangan mengambang begitu AW eksplisit menghapus.
-func (s *ProjectService) RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error {
-	if projectID == "" {
+// RemovePM (S4W susulan, diperluas susulan multi-PM) melepas SATU PM
+// spesifik (targetUserID) dari project ini -- PM lain yang tersisa TIDAK
+// terpengaruh. Guard "cabut PM terakhir" (susulan 2026-09-15) sekarang
+// menghitung SISA co-PM lewat CountPMsExcluding, bukan cek biner ada/tidak
+// -- boleh dicabut selama masih ada co-PM lain tersisa.
+func (s *ProjectService) RemovePM(ctx context.Context, exec db.Executor, projectID, targetUserID, actorID, actorRole string) error {
+	if projectID == "" || targetUserID == "" {
 		return fmt.Errorf("service.RemovePM: %w", domain.ErrInvalidInput)
 	}
-	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
-	if err != nil {
+	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
 		return err
 	}
-	// Guard "cabut PM terakhir" (susulan 2026-09-15, ditemukan user) --
-	// project cuma punya SATU slot PM, jadi PM aktif = PM terakhir. Tidak
-	// berlaku untuk project yang memang belum pernah punya PM aktif (cuma
-	// undangan pending) -- itu tetap boleh dibatalkan lewat jalur ini.
-	currentPM, err := s.repo.GetPMUserID(ctx, exec, projectID)
+	remaining, err := s.repo.CountPMsExcluding(ctx, exec, projectID, targetUserID)
 	if err != nil {
 		return fmt.Errorf("service.RemovePM: %w", err)
 	}
-	if currentPM != "" {
+	if remaining == 0 {
 		return fmt.Errorf("service.RemovePM: %w", domain.ErrCannotRemoveLastProjectManager)
 	}
-	if err := s.cancelExistingPMInvitation(ctx, exec, workspaceID, projectID, actorID, actorRole); err != nil {
-		return fmt.Errorf("service.RemovePM: %w", err)
-	}
-	if err := s.repo.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
+	if err := s.repo.RemovePM(ctx, exec, projectID, targetUserID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.RemovePM: %w", err)
 	}
 	return nil

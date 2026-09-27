@@ -33,15 +33,16 @@ type fakeProjectRepo struct {
 	assignPendingPMErr   error
 	assignPendingPMCalls []recordedPMSet
 
-	activePMUserID string
-	removePMErr    error
-	removePMCalls  int
+	addPMErr   error
+	addPMCalls []recordedPMSet
 
-	setPMErr   error
-	setPMCalls []recordedPMSet
-
-	pendingInvitationID    string
-	pendingInvitationIDErr error
+	// remainingPMs -- nilai balik CountPMsExcluding (susulan multi-PM,
+	// menggantikan activePMUserID biner lama) -- 0 berarti target yang
+	// mau dicabut adalah PM TERAKHIR, guard di service harus menolak.
+	remainingPMs  int
+	countPMsErr   error
+	removePMErr   error
+	removePMCalls []recordedPMSet
 }
 
 func (f *fakeProjectRepo) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
@@ -55,15 +56,11 @@ func (f *fakeProjectRepo) GetWorkspaceID(_ context.Context, _ db.Executor, proje
 	return ws, nil
 }
 
-func (f *fakeProjectRepo) Create(_ context.Context, _ db.Executor, workspaceID, name, code, pmUserID, _, _ string) (*repository.Project, error) {
+func (f *fakeProjectRepo) Create(_ context.Context, _ db.Executor, workspaceID, name, code, _, _ string) (*repository.Project, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	p := &repository.Project{WorkspaceID: workspaceID, Name: name, Code: code}
-	if pmUserID != "" {
-		p.PMUserID = &pmUserID
-	}
-	return p, nil
+	return &repository.Project{WorkspaceID: workspaceID, Name: name, Code: code}, nil
 }
 
 func (f *fakeProjectRepo) List(_ context.Context, _ db.Executor, _ string) ([]repository.Project, error) {
@@ -74,7 +71,7 @@ func (f *fakeProjectRepo) NameExists(_ context.Context, _ db.Executor, _, _, _ s
 	return f.nameExists, nil
 }
 
-func (f *fakeProjectRepo) Update(_ context.Context, _ db.Executor, _, name, status, _, _, _ string, endDate *time.Time) error {
+func (f *fakeProjectRepo) Update(_ context.Context, _ db.Executor, _, name, status, _, _ string, endDate *time.Time) error {
 	f.updateCalls = append(f.updateCalls, struct {
 		name, status string
 		endDate      *time.Time
@@ -106,28 +103,24 @@ func (f *fakeProjectRepo) AssignPendingPM(_ context.Context, _ db.Executor, proj
 	return nil
 }
 
-func (f *fakeProjectRepo) GetPMUserID(_ context.Context, _ db.Executor, _ string) (string, error) {
-	return f.activePMUserID, nil
+func (f *fakeProjectRepo) AddPM(_ context.Context, _ db.Executor, projectID, userID, _, _ string) error {
+	if f.addPMErr != nil {
+		return f.addPMErr
+	}
+	f.addPMCalls = append(f.addPMCalls, recordedPMSet{projectID, userID})
+	return nil
 }
 
-func (f *fakeProjectRepo) RemovePM(_ context.Context, _ db.Executor, _, _, _ string) error {
+func (f *fakeProjectRepo) CountPMsExcluding(_ context.Context, _ db.Executor, _, _ string) (int, error) {
+	return f.remainingPMs, f.countPMsErr
+}
+
+func (f *fakeProjectRepo) RemovePM(_ context.Context, _ db.Executor, projectID, userID, _, _ string) error {
 	if f.removePMErr != nil {
 		return f.removePMErr
 	}
-	f.removePMCalls++
+	f.removePMCalls = append(f.removePMCalls, recordedPMSet{projectID, userID})
 	return nil
-}
-
-func (f *fakeProjectRepo) SetPM(_ context.Context, _ db.Executor, projectID, userID, _, _ string) error {
-	if f.setPMErr != nil {
-		return f.setPMErr
-	}
-	f.setPMCalls = append(f.setPMCalls, recordedPMSet{projectID, userID})
-	return nil
-}
-
-func (f *fakeProjectRepo) GetPendingPMInvitationID(_ context.Context, _ db.Executor, _ string) (string, error) {
-	return f.pendingInvitationID, f.pendingInvitationIDErr
 }
 
 // fakeProjectPMInviter -- projectPMInviter palsu (CreateInvitation/
@@ -208,18 +201,20 @@ func TestProjectService_Create_RejectsMissingFields(t *testing.T) {
 // TestProjectService_Create_PMUserID_PromotesAnyExistingMember -- S4W
 // susulan: pmUserID TIDAK LAGI harus sudah project_manager (beda dari AC
 // lama) -- member workspace apa pun boleh dipilih, rolenya dinaikkan lewat
-// AssignRole.
+// AssignRole. Susulan multi-PM: Create sendiri tidak lagi menyisipkan PM
+// langsung di INSERT, melainkan lewat AddPM terpisah setelah project
+// dibuat -- diverifikasi lewat repo.addPMCalls, bukan field di *Project.
 func TestProjectService_Create_PMUserID_PromotesAnyExistingMember(t *testing.T) {
 	rbac := &fakeProjectRoleChecker{role: "editor"}
 	repo := &fakeProjectRepo{}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, rbac, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
 
-	p, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "user-1", "", "", "aw-1", "member", "Admin")
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "user-1", "", "", "aw-1", "member", "Admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.PMUserID == nil || *p.PMUserID != "user-1" {
-		t.Errorf("PMUserID = %v, want user-1", p.PMUserID)
+	if len(repo.addPMCalls) != 1 || repo.addPMCalls[0].userID != "user-1" {
+		t.Errorf("addPMCalls = %+v, want satu entri user-1", repo.addPMCalls)
 	}
 }
 
@@ -243,12 +238,12 @@ func TestProjectService_Create_PMEmail_ExistingUser_ResolvedImmediately(t *testi
 	invites := &fakeProjectPMInviter{}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "editor"}, &stubExistingUserFinder{userID: "user-existing"}, invites)
 
-	p, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "", "sudah@terdaftar.com", "", "aw-1", "member", "Admin")
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "", "sudah@terdaftar.com", "", "aw-1", "member", "Admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.PMUserID == nil || *p.PMUserID != "user-existing" {
-		t.Errorf("PMUserID = %v, want user-existing", p.PMUserID)
+	if len(repo.addPMCalls) != 1 || repo.addPMCalls[0].userID != "user-existing" {
+		t.Errorf("addPMCalls = %+v, want satu entri user-existing", repo.addPMCalls)
 	}
 	if len(invites.createCalls) != 0 {
 		t.Errorf("CreateInvitation dipanggil %d kali, want 0 (email sudah terdaftar tidak perlu undangan)", len(invites.createCalls))
@@ -264,12 +259,12 @@ func TestProjectService_Create_PMEmail_NewUser_CreatesProjectAwaitingPM(t *testi
 	invites := &fakeProjectPMInviter{}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &stubExistingUserFinder{}, invites)
 
-	p, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "", "baru@example.com", "Budi Baru", "aw-1", "member", "Admin")
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rilis Q4", "RIL", "", "baru@example.com", "Budi Baru", "aw-1", "member", "Admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.PMUserID != nil {
-		t.Errorf("PMUserID = %v, want nil (menunggu PM)", p.PMUserID)
+	if len(repo.addPMCalls) != 0 {
+		t.Errorf("addPMCalls = %+v, want kosong (email belum terdaftar, menunggu PM)", repo.addPMCalls)
 	}
 	if len(invites.createCalls) != 1 || invites.createCalls[0].email != "baru@example.com" || invites.createCalls[0].role != "project_manager" {
 		t.Errorf("createCalls = %+v, want satu entri baru@example.com/project_manager", invites.createCalls)
@@ -393,94 +388,94 @@ func TestProjectService_Restore_AllowedForGroupAdmin(t *testing.T) {
 	}
 }
 
-// TestProjectService_AssignPM_ExistingMember_SetsImmediately -- panel
-// Kelola menaikkan member existing (bukan cuma yang sudah project_manager)
-// jadi PM, entah project sedang "menunggu PM" atau sudah ada PM aktif lain.
-func TestProjectService_AssignPM_ExistingMember_SetsImmediately(t *testing.T) {
+// TestProjectService_AddPM_ExistingMember_AddsImmediately -- panel Kelola
+// menaikkan member existing (bukan cuma yang sudah project_manager) jadi
+// PM, entah project sedang "menunggu PM" atau sudah ada PM aktif lain
+// (susulan multi-PM -- ADITIF, bukan overwrite).
+func TestProjectService_AddPM_ExistingMember_AddsImmediately(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "editor"}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
 
-	err := svc.AssignPM(context.Background(), nil, "proj-1", "user-2", "", "", "aw-1", "member", "Admin")
+	err := svc.AddPM(context.Background(), nil, "proj-1", "user-2", "", "", "aw-1", "member", "Admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(repo.setPMCalls) != 1 || repo.setPMCalls[0].projectID != "proj-1" || repo.setPMCalls[0].userID != "user-2" {
-		t.Errorf("setPMCalls = %+v, want satu entri proj-1/user-2", repo.setPMCalls)
+	if len(repo.addPMCalls) != 1 || repo.addPMCalls[0].projectID != "proj-1" || repo.addPMCalls[0].userID != "user-2" {
+		t.Errorf("addPMCalls = %+v, want satu entri proj-1/user-2", repo.addPMCalls)
 	}
 }
 
-// TestProjectService_AssignPM_NewEmail_ClearsThenInvites -- jalur undang
-// email baru: PM aktif (kalau ada) dikosongkan dulu (project balik ke
-// "menunggu PM"), baru undangan baru dibuat.
-func TestProjectService_AssignPM_NewEmail_ClearsThenInvites(t *testing.T) {
+// TestProjectService_AddPM_NewEmail_InvitesWithoutClearingExisting --
+// susulan multi-PM: jalur undang email baru TIDAK LAGI mengosongkan PM
+// aktif lain (dulu "clear-then-invite", sekarang co-PM invite murni
+// aditif) -- dikonfirmasi user "boleh bersamaan" untuk beberapa undangan
+// PM pending sekaligus.
+func TestProjectService_AddPM_NewEmail_InvitesWithoutClearingExisting(t *testing.T) {
 	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
 	invites := &fakeProjectPMInviter{}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &stubExistingUserFinder{}, invites)
 
-	err := svc.AssignPM(context.Background(), nil, "proj-1", "", "baru@example.com", "Budi Baru", "aw-1", "member", "Admin")
+	err := svc.AddPM(context.Background(), nil, "proj-1", "", "baru@example.com", "Budi Baru", "aw-1", "member", "Admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if repo.removePMCalls != 1 {
-		t.Errorf("removePMCalls = %d, want 1", repo.removePMCalls)
+	if len(repo.removePMCalls) != 0 {
+		t.Errorf("removePMCalls = %+v, want kosong (co-PM invite tidak boleh mengosongkan PM lain)", repo.removePMCalls)
 	}
 	if len(invites.createCalls) != 1 || invites.createCalls[0].email != "baru@example.com" {
 		t.Errorf("createCalls = %+v, want satu entri baru@example.com", invites.createCalls)
 	}
 }
 
-// TestProjectService_AssignPM_CancelsExistingPendingInvitation -- undangan
-// PM pending LAMA dibatalkan dulu sebelum menetapkan PM baru (satu project
-// cuma boleh punya satu undangan PM pending).
-func TestProjectService_AssignPM_CancelsExistingPendingInvitation(t *testing.T) {
-	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, pendingInvitationID: "inv-old"}
+// TestProjectService_AddPM_DoesNotCancelExistingPendingInvitation --
+// susulan multi-PM: BEDA dari perilaku lama (auto-cancel undangan PM
+// pending sebelumnya) -- sekarang boleh ada lebih dari satu undangan PM
+// pending bersamaan, jadi CancelInvitation TIDAK PERNAH dipanggil dari
+// jalur AddPM sama sekali.
+func TestProjectService_AddPM_DoesNotCancelExistingPendingInvitation(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
 	invites := &fakeProjectPMInviter{}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{role: "editor"}, &stubExistingUserFinder{}, invites)
 
-	if err := svc.AssignPM(context.Background(), nil, "proj-1", "user-2", "", "", "aw-1", "member", "Admin"); err != nil {
+	if err := svc.AddPM(context.Background(), nil, "proj-1", "user-2", "", "", "aw-1", "member", "Admin"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(invites.cancelCalls) != 1 || invites.cancelCalls[0].invitationID != "inv-old" {
-		t.Errorf("cancelCalls = %+v, want satu entri inv-old", invites.cancelCalls)
+	if len(invites.cancelCalls) != 0 {
+		t.Errorf("cancelCalls = %+v, want kosong (co-PM invite tidak pernah membatalkan undangan lain)", invites.cancelCalls)
 	}
 }
 
-// TestProjectService_RemovePM_ClearsAndCancelsPending -- project TANPA PM
-// aktif (cuma undangan pending mengambang, kasus jarang) tetap boleh
-// dibatalkan lewat jalur ini -- guard "cabut PM terakhir" cuma menyala
-// kalau ADA PM aktif.
-func TestProjectService_RemovePM_ClearsAndCancelsPending(t *testing.T) {
-	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, pendingInvitationID: "inv-1"}
-	invites := &fakeProjectPMInviter{}
-	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &stubExistingUserFinder{}, invites)
-
-	if err := svc.RemovePM(context.Background(), nil, "proj-1", "aw-1", "member"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if repo.removePMCalls != 1 {
-		t.Errorf("removePMCalls = %d, want 1", repo.removePMCalls)
-	}
-	if len(invites.cancelCalls) != 1 || invites.cancelCalls[0].invitationID != "inv-1" {
-		t.Errorf("cancelCalls = %+v, want satu entri inv-1", invites.cancelCalls)
-	}
-}
-
-// TestProjectService_RemovePM_ActivePM_Rejected (susulan 2026-09-15,
-// ditemukan user: "kenapa pada project PM bisa dicabut sampai habis?
-// ... bertentangan dengan validasi wajib PM di Tambah Project") -- project
-// cuma punya SATU slot PM, jadi PM aktif = PM terakhir. "Cabut" ditolak,
-// AW harus pakai "+ Tetapkan PM" (ganti langsung) supaya project tidak
-// pernah kosong PM setelah pernah punya satu.
-func TestProjectService_RemovePM_ActivePM_Rejected(t *testing.T) {
-	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, activePMUserID: "pm-1"}
+// TestProjectService_RemovePM_RemainingCoPM_Allowed (susulan multi-PM) --
+// project dengan LEBIH dari satu PM boleh mencabut salah satunya, PM lain
+// yang tersisa tidak terpengaruh.
+func TestProjectService_RemovePM_RemainingCoPM_Allowed(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, remainingPMs: 1}
 	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
 
-	err := svc.RemovePM(context.Background(), nil, "proj-1", "aw-1", "member")
+	if err := svc.RemovePM(context.Background(), nil, "proj-1", "pm-1", "aw-1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.removePMCalls) != 1 || repo.removePMCalls[0].userID != "pm-1" {
+		t.Errorf("removePMCalls = %+v, want satu entri pm-1", repo.removePMCalls)
+	}
+}
+
+// TestProjectService_RemovePM_LastPM_Rejected (susulan 2026-09-15,
+// ditemukan user: "kenapa pada project PM bisa dicabut sampai habis?
+// ... bertentangan dengan validasi wajib PM di Tambah Project"; diperluas
+// susulan multi-PM) -- guard sekarang menghitung SISA co-PM
+// (CountPMsExcluding), bukan cek biner ada/tidak. remainingPMs=0 berarti
+// target adalah PM TERAKHIR, "Cabut" ditolak.
+func TestProjectService_RemovePM_LastPM_Rejected(t *testing.T) {
+	repo := &fakeProjectRepo{workspaceID: map[string]string{"proj-1": "ws-1"}, remainingPMs: 0}
+	svc := newTestProjectService(repo, &fakeOrgAuthorizer{}, &fakeProjectRoleChecker{}, &stubExistingUserFinder{}, &fakeProjectPMInviter{})
+
+	err := svc.RemovePM(context.Background(), nil, "proj-1", "pm-1", "aw-1", "member")
 	if !errors.Is(err, domain.ErrCannotRemoveLastProjectManager) {
 		t.Errorf("err = %v, want domain.ErrCannotRemoveLastProjectManager", err)
 	}
-	if repo.removePMCalls != 0 {
-		t.Errorf("removePMCalls = %d, want 0 (ditolak sebelum repo terpanggil)", repo.removePMCalls)
+	if len(repo.removePMCalls) != 0 {
+		t.Errorf("removePMCalls = %+v, want kosong (ditolak sebelum repo terpanggil)", repo.removePMCalls)
 	}
 }
 

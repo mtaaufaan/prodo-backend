@@ -32,15 +32,18 @@ type workspaceMemberRepository interface {
 // diimplementasikan *ProjectRepository -- dipakai AssignRole (Kelola
 // Member & Roles, S4W susulan role restructuring 2026-09-14, dikonfirmasi
 // user) untuk validasi project_id milik workspace ini, guard "project
-// tidak boleh kehilangan PM tanpa pengganti", dan menetapkan PM baru.
+// tidak boleh kehilangan PM tanpa pengganti", dan menambah PM baru.
+// AddPM/CountPMsExcluding (susulan multi-PM) menggantikan SetPM -- ADITIF,
+// bukan overwrite, dan guard "PM terakhir" sekarang menghitung SISA co-PM.
 type projectPMRepository interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 	ListPMProjectNames(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]repository.PMProjectRef, error)
-	SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	AddPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	CountPMsExcluding(ctx context.Context, exec db.Executor, projectID, excludeUserID string) (int, error)
 	// RemovePM -- dipakai RemoveMember (susulan 2026-09-14, "Keluarkan"
 	// pada role project-scoped, dikonfirmasi user) untuk melepas PM dari
 	// SATU project saja saat member itu PM di LEBIH dari satu project.
-	RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error
+	RemovePM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 	// NotifyPMRemoved -- in-app notification ke target (susulan
 	// 2026-09-15, dikonfirmasi user "jangan lupa mengeluarkan notifikasi
 	// sesuai standar sebelumnya") setelah RemovePM di atas berhasil.
@@ -154,8 +157,19 @@ func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspac
 			if err != nil {
 				return nil, fmt.Errorf("service.AssignRole: cek project yang dipimpin: %w", err)
 			}
-			if len(pmProjects) > 0 {
-				return nil, fmt.Errorf("service.AssignRole: %w", domain.ErrProjectWouldLoseLastPM)
+			// Susulan multi-PM: dulu len(pmProjects) > 0 SELALU memblokir
+			// (1 PM per project, menurunkan role PASTI menyisakan project
+			// tanpa PM). Sekarang co-PM lain di project yang sama boleh
+			// menampung -- baru diblokir kalau ADA project yang benar-benar
+			// akan kehilangan PM terakhirnya.
+			for _, proj := range pmProjects {
+				remaining, err := s.projects.CountPMsExcluding(ctx, exec, proj.ID, userID)
+				if err != nil {
+					return nil, fmt.Errorf("service.AssignRole: cek sisa PM %s: %w", proj.ID, err)
+				}
+				if remaining == 0 {
+					return nil, fmt.Errorf("service.AssignRole: %w", domain.ErrProjectWouldLoseLastPM)
+				}
 			}
 		}
 	}
@@ -187,7 +201,7 @@ func (s *RBACService) AssignRole(ctx context.Context, exec db.Executor, workspac
 			}
 		}
 		if role == "project_manager" {
-			if err := s.projects.SetPM(ctx, exec, projectID, userID, actorID, actorRole); err != nil {
+			if err := s.projects.AddPM(ctx, exec, projectID, userID, actorID, actorRole); err != nil {
 				return nil, fmt.Errorf("service.AssignRole: tetapkan PM: %w", err)
 			}
 		} else {
@@ -307,7 +321,7 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 				return fmt.Errorf("service.RemoveMember: cek project yang dipimpin: %w", err)
 			}
 			if len(pmProjects) > 1 {
-				if err := s.projects.RemovePM(ctx, exec, projectID, actorID, actorRole); err != nil {
+				if err := s.projects.RemovePM(ctx, exec, projectID, userID, actorID, actorRole); err != nil {
 					return fmt.Errorf("service.RemoveMember: lepas PM dari project: %w", err)
 				}
 				if err := s.projects.NotifyPMRemoved(ctx, exec, projectID, userID, actorID); err != nil {

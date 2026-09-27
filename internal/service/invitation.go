@@ -72,14 +72,15 @@ type workspaceAssigner interface {
 // projectPMAssigner -- interface didefinisikan di consumer, diimplementasikan
 // *ProjectRepository (S4W susulan, migrasi 20261017090000). AssignPendingPM
 // dipanggil AcceptInvitation begitu undangan project_manager yang tertaut
-// project TERTENTU diterima, supaya projects.pm_user_id project itu
-// otomatis terisi tanpa langkah manual tambahan. SetPM dipanggil
-// CreateBulkInvitations (email SUDAH terdaftar, S4W susulan lanjutan --
-// role restructuring 2026-09-14) karena jalur itu tidak lewat
-// AcceptInvitation sama sekali (tidak ada undangan yang perlu diterima).
+// project TERTENTU diterima, supaya project_managers project itu otomatis
+// dapat baris baru tanpa langkah manual tambahan (susulan multi-PM --
+// ADITIF, tidak mengganti PM lain). AddPM dipanggil CreateBulkInvitations
+// (email SUDAH terdaftar, S4W susulan lanjutan -- role restructuring
+// 2026-09-14) karena jalur itu tidak lewat AcceptInvitation sama sekali
+// (tidak ada undangan yang perlu diterima).
 type projectPMAssigner interface {
 	AssignPendingPM(ctx context.Context, exec db.Executor, projectID, userID string) error
-	SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	AddPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
 }
 
 // projectMemberLinker -- interface didefinisikan di consumer, diimplementasikan
@@ -221,7 +222,7 @@ type BulkInvitationResult struct {
 // dilakukan handler, di sini cuma dipastikan project itu benar MILIK
 // workspaceID yang diminta (bukan tebak ID project workspace lain).
 // Kalau email SUDAH terdaftar (langsung di-assign, bukan lewat undangan),
-// penautan ke project terjadi SEKARANG JUGA (SetPM untuk project_manager,
+// penautan ke project terjadi SEKARANG JUGA (AddPM untuk project_manager,
 // AddMember untuk role project-scoped) -- beda dari email baru yang baru
 // ditautkan begitu undangannya diterima (lihat AcceptInvitation).
 //
@@ -304,7 +305,7 @@ func (s *InvitationService) CreateBulkInvitations(
 					return nil
 				}
 				if role == "project_manager" {
-					return s.projects.SetPM(ctx, exec, projectID, existingUserID, invitedByUserID, actorRole)
+					return s.projects.AddPM(ctx, exec, projectID, existingUserID, invitedByUserID, actorRole)
 				}
 				return s.projectMembers.AddMember(ctx, exec, projectID, workspaceID, existingUserID, role, false, invitedByUserID, actorRole)
 			})
