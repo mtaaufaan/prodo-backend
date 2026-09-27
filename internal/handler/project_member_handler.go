@@ -275,6 +275,7 @@ func (h *ProjectMemberHandler) ListMembers(c *fiber.Ctx) error {
 			"added_at":       m.AddedAt,
 			"is_pm":          m.IsPM,
 			"workspace_role": m.WorkspaceRole,
+			"is_pending":     m.IsPending,
 		}
 	}
 	return c.JSON(response.Success(data))
