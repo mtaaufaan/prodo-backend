@@ -126,16 +126,17 @@ func (r *TaskStatusSessionRepository) ListForTask(ctx context.Context, exec db.E
 	return list, rows.Err()
 }
 
-// NotifyRegression -- S4-68: notify PM project + seluruh Admin Workspace
-// begitu regresi terjadi. Satu INSERT...SELECT (PM dari projects.pm_user_id,
-// AW dari workspace_members role admin_workspace), bukan loop per-recipient.
+// NotifyRegression -- S4-68: notify SEMUA PM project (project_managers,
+// susulan multi-PM -- dulu satu dari projects.pm_user_id) + seluruh Admin
+// Workspace begitu regresi terjadi. Satu INSERT...SELECT, bukan loop
+// per-recipient.
 func (r *TaskStatusSessionRepository) NotifyRegression(ctx context.Context, exec db.Executor, taskID, projectID string) error {
 	_, err := exec.Exec(ctx, `
 		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
 		SELECT DISTINCT recipients.user_id, NULL::uuid, 'task_regressed', 'task', $1::uuid,
 		       'Task Mengalami Regresi', 'Sebuah task kembali ke status yang lebih awal dari sebelumnya.'
 		FROM (
-			SELECT pm_user_id AS user_id FROM projects WHERE id = $2 AND pm_user_id IS NOT NULL
+			SELECT user_id FROM project_managers WHERE project_id = $2
 			UNION
 			SELECT wm.user_id FROM workspace_members wm
 			JOIN projects p ON p.workspace_id = wm.workspace_id

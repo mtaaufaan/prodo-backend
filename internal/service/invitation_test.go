@@ -212,7 +212,7 @@ func (a *stubProjectPMAssigner) AssignPendingPM(_ context.Context, _ db.Executor
 	return nil
 }
 
-func (a *stubProjectPMAssigner) SetPM(_ context.Context, _ db.Executor, projectID, userID, actorID, actorRole string) error {
+func (a *stubProjectPMAssigner) AddPM(_ context.Context, _ db.Executor, projectID, userID, actorID, actorRole string) error {
 	if a.setPMErr != nil {
 		return a.setPMErr
 	}
@@ -444,7 +444,7 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_AddedDirectly(t *t
 
 // TestInvitationService_CreateBulkInvitations_ExistingUser_ProjectManager_SetsPM
 // -- role restructuring 2026-09-14: email SUDAH terdaftar diundang sebagai
-// project_manager DENGAN project_id harus langsung SetPM (bukan cuma
+// project_manager DENGAN project_id harus langsung AddPM (bukan cuma
 // AssignRole workspace) -- jalur ini tidak lewat AcceptInvitation sama
 // sekali (tidak ada undangan yang perlu diterima).
 func TestInvitationService_CreateBulkInvitations_ExistingUser_ProjectManager_SetsPM(t *testing.T) {
@@ -470,7 +470,7 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_ProjectManager_Set
 
 // TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProjectMember
 // -- varian di atas untuk role project-scoped (editor/approver/viewer):
-// AddMember ke project_members, BUKAN SetPM.
+// AddMember ke project_members, BUKAN AddPM.
 func TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProjectMember(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	projects := &stubProjectPMAssigner{}

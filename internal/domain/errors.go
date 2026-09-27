@@ -193,19 +193,22 @@ var (
 	// ErrProjectWouldLoseLastPM dikembalikan RBACService.AssignRole (Kelola
 	// Member & Roles, S4W susulan role restructuring 2026-09-14, dikonfirmasi
 	// user) saat mengubah role SEORANG project_manager ke role lain akan
-	// menyisakan project yang dia pimpin tanpa PM sama sekali -- AW harus
-	// tetapkan PM baru dulu lewat Kelola Project (SetPM/invite PM baru)
-	// sebelum bisa memindahkan orang ini ke role lain.
+	// menyisakan project yang dia pimpin tanpa PM sama sekali. Diperluas
+	// susulan multi-PM: sejak project boleh punya lebih dari satu PM
+	// (project_managers, bukan lagi projects.pm_user_id tunggal), guard ini
+	// cuma menyala kalau orang ini adalah PM TERAKHIR project itu (co-PM
+	// lain yang tersisa boleh menampung) -- lihat
+	// ProjectRepository.CountPMsExcluding.
 	ErrProjectWouldLoseLastPM = errors.New("changing this role would leave a project without a project manager")
 
 	// ErrCannotRemoveLastProjectManager dikembalikan ProjectService.RemovePM
 	// (susulan 2026-09-15, ditemukan user: "kenapa pada project PM bisa
-	// dicabut sampai habis?") -- project cuma punya SATU slot PM
-	// (pm_user_id tunggal, beda dari admin_workspace yang bisa banyak),
-	// jadi "PM aktif ada" berarti SELALU "PM terakhir/satu-satunya".
-	// Menghapus PM aktif tanpa pengganti lewat tombol "Cabut" ditolak --
-	// AW harus pakai "+ Tetapkan PM" (ganti langsung) supaya project tidak
-	// pernah benar-benar kosong PM setelah pernah punya satu, konsisten
+	// dicabut sampai habis?"; diperluas susulan multi-PM setelah user
+	// menemukan "+ Tetapkan PM" ternyata mengganti bukan menambah PM) --
+	// project SEKARANG boleh punya lebih dari satu PM (project_managers),
+	// tapi tidak pernah boleh nol -- "Cabut" ditolak kalau target adalah PM
+	// TERAKHIR (CountPMsExcluding == 0), AW harus tambah co-PM lain dulu
+	// lewat "+ Tetapkan PM" sebelum mencabut PM terakhir ini, konsisten
 	// dengan Tambah Project yang MEWAJIBKAN PM (existing atau undangan)
 	// sejak awal. Sama pola ErrCannotRemoveLastWorkspaceAdmin, TIDAK
 	// berlaku untuk membatalkan undangan PM pending (project yang memang

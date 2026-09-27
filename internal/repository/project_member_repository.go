@@ -107,12 +107,16 @@ func (r *ProjectMemberRepository) ListProjectIDsForUserInWorkspace(ctx context.C
 }
 
 // HasPM (S4W susulan, dikonfirmasi user 2026-09-13) -- true kalau project
-// sudah punya pm_user_id aktif. Dipakai AddMember menolak penambahan
-// member project-scoped selama project masih "menunggu PM" (undangan
-// project_manager belum diterima).
+// sudah punya SEKURANG-KURANGNYA satu PM aktif (project_managers, susulan
+// multi-PM). Dipakai AddMember menolak penambahan member project-scoped
+// selama project masih "menunggu PM" (undangan project_manager belum
+// diterima).
 func (r *ProjectMemberRepository) HasPM(ctx context.Context, exec db.Executor, projectID string) (bool, error) {
 	var hasPM bool
-	err := exec.QueryRow(ctx, `SELECT pm_user_id IS NOT NULL FROM projects WHERE id = $1`, projectID).Scan(&hasPM)
+	err := exec.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM project_managers pmg WHERE pmg.project_id = p.id)
+		FROM projects p WHERE p.id = $1
+	`, projectID).Scan(&hasPM)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, fmt.Errorf("repository.HasPM: %w", domain.ErrProjectNotFound)
@@ -285,61 +289,62 @@ func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Execu
 // ListAssignableMembers -- awalnya susulan S5 ("bukankah role PM termasuk
 // dari member project") untuk picker assignee/PIC (AddTaskModal,
 // TaskDetailModal, KanbanBoard): sama seperti ListMembers, TAPI ditambah
-// PM penanggung jawab project (projects.pm_user_id) sebagai entri
-// sintetis (IsPM=true, Role="project_manager") kalau PM belum juga
+// SEMUA PM penanggung jawab project (project_managers, susulan multi-PM --
+// dulu SATU baris dari projects.pm_user_id, sekarang N baris) sebagai
+// entri sintetis (IsPM=true, Role="project_manager") kalau belum juga
 // tercatat di project_members (kasus umum -- PM adalah workspace_role,
-// BUKAN project_scoped_role, lihat DATABASE_SCHEMA.md §5.12 catatan
-// pm_user_id, jadi normalnya PM tidak akan pernah muncul lewat ListMembers
-// biasa). SEKARANG (IG-100 susulan) JUGA dipakai ProjectMembersPage --
-// desain "PM Member Project.dc.html" memang menampilkan PM sebagai baris
-// (dikunci "— KUNCI", tidak bisa diedit/dihapus dari sini) supaya PM
-// terlihat sebagai member project, bukan disembunyikan total seperti
-// keputusan awal yang salah. Entri sintetis PM TETAP tidak punya role
-// project_scoped_role asli -- FE WAJIB mengunci baris ini (cek
-// `is_pm`)) sebelum memanggil UpdateRole/RemoveMember (yang akan
-// menolaknya dengan ErrProjectMemberNotFound kalau tetap dicoba, defense
-// in depth).
+// BUKAN project_scoped_role, jadi normalnya PM tidak akan pernah muncul
+// lewat ListMembers biasa). SEKARANG (IG-100 susulan) JUGA dipakai
+// ProjectMembersPage -- desain "PM Member Project.dc.html" memang
+// menampilkan PM sebagai baris (dikunci "— KUNCI", tidak bisa diedit/
+// dihapus dari sini) supaya PM terlihat sebagai member project, bukan
+// disembunyikan total seperti keputusan awal yang salah. Entri sintetis PM
+// TETAP tidak punya role project_scoped_role asli -- FE WAJIB mengunci
+// baris ini (cek `is_pm`) sebelum memanggil UpdateRole/RemoveMember (yang
+// akan menolaknya dengan ErrProjectMemberNotFound kalau tetap dicoba,
+// defense in depth).
 func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	members, err := r.ListMembers(ctx, exec, projectID)
 	if err != nil {
 		return nil, err
 	}
 
-	var pmUserID, pmEmail, pmName *string
-	err = exec.QueryRow(ctx, `
-		SELECT p.pm_user_id, u.email, u.display_name
-		FROM projects p
-		LEFT JOIN users u ON u.id = p.pm_user_id
-		WHERE p.id = $1
-	`, projectID).Scan(&pmUserID, &pmEmail, &pmName)
+	rows, err := exec.Query(ctx, `
+		SELECT pmg.user_id, u.email, u.display_name
+		FROM project_managers pmg
+		JOIN users u ON u.id = pmg.user_id
+		WHERE pmg.project_id = $1
+	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListAssignableMembers: pm: %w", err)
 	}
+	defer rows.Close()
 
-	if pmUserID == nil {
-		return members, nil
-	}
+	existing := make(map[string]bool, len(members))
 	for i := range members {
-		if members[i].UserID == *pmUserID {
-			return members, nil
+		existing[members[i].UserID] = true
+	}
+	for rows.Next() {
+		var userID, email, name string
+		if err := rows.Scan(&userID, &email, &name); err != nil {
+			return nil, fmt.Errorf("repository.ListAssignableMembers: pm scan: %w", err)
 		}
+		if existing[userID] {
+			continue
+		}
+		members = append(members, ProjectMember{
+			ProjectID: projectID,
+			UserID:    userID,
+			Email:     email,
+			Name:      name,
+			Role:      "project_manager",
+			IsPM:      true,
+		})
 	}
-	name := ""
-	if pmName != nil {
-		name = *pmName
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListAssignableMembers: pm rows: %w", err)
 	}
-	email := ""
-	if pmEmail != nil {
-		email = *pmEmail
-	}
-	return append(members, ProjectMember{
-		ProjectID: projectID,
-		UserID:    *pmUserID,
-		Email:     email,
-		Name:      name,
-		Role:      "project_manager",
-		IsPM:      true,
-	}), nil
+	return members, nil
 }
 
 // ListMembersView -- khusus halaman kelola member project (IG-100

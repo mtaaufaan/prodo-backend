@@ -37,9 +37,11 @@ type performanceProjectResolver interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 }
 
-// performancePMChecker -- reuse ProjectRepository.GetPMUserID.
+// performancePMChecker -- reuse ProjectRepository.IsPM (susulan multi-PM --
+// dulu GetPMUserID+bandingkan manual, sekarang project boleh punya lebih
+// dari satu PM jadi cek keanggotaan langsung).
 type performancePMChecker interface {
-	GetPMUserID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	IsPM(ctx context.Context, exec db.Executor, projectID, userID string) (bool, error)
 }
 
 type PerformanceService struct {
@@ -73,11 +75,11 @@ func (s *PerformanceService) authorizeProject(ctx context.Context, exec db.Execu
 	if actorRole == "platform_admin" || actorRole == "group_admin" {
 		return nil
 	}
-	pmID, err := s.pm.GetPMUserID(ctx, exec, projectID)
+	isPM, err := s.pm.IsPM(ctx, exec, projectID, actorID)
 	if err != nil {
 		return fmt.Errorf("service.authorizeProject: %w", err)
 	}
-	if pmID != "" && pmID == actorID {
+	if isPM {
 		return nil
 	}
 	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
