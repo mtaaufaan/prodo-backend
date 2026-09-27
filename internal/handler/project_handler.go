@@ -26,22 +26,27 @@ func NewProjectHandler(projects *service.ProjectService, accounts displayNameGet
 }
 
 func projectToMap(p *repository.Project) fiber.Map {
+	pms := make([]fiber.Map, len(p.PMs))
+	for i, pm := range p.PMs {
+		pms[i] = fiber.Map{"user_id": pm.UserID, "name": pm.Name, "email": pm.Email}
+	}
+	pendingPMs := make([]fiber.Map, len(p.PendingPMs))
+	for i, pm := range p.PendingPMs {
+		pendingPMs[i] = fiber.Map{"invitation_id": pm.InvitationID, "email": pm.Email}
+	}
 	return fiber.Map{
 		"id":                       p.ID,
 		"workspace_id":             p.WorkspaceID,
 		"name":                     p.Name,
 		"code":                     p.Code,
-		"pm_user_id":               p.PMUserID,
-		"pm_name":                  p.PMName,
-		"pm_email":                 p.PMEmail,
+		"project_managers":         pms,
+		"pending_pm_invitations":   pendingPMs,
 		"is_archived":              p.IsArchived,
 		"member_count":             p.MemberCount,
 		"sprint_count":             p.SprintCount,
 		"task_count":               p.TaskCount,
 		"created_by_name":          p.CreatedByName,
 		"created_by_email":         p.CreatedByEmail,
-		"pm_pending_email":         p.PMPendingEmail,
-		"pm_pending_invitation_id": p.PMPendingInvitationID,
 		"created_at":               p.CreatedAt,
 		"archived_at":              p.ArchivedAt,
 		"status":                   p.Status,
@@ -183,10 +188,10 @@ type assignProjectPMRequest struct {
 	PMName   string `json:"pm_name"`
 }
 
-// AssignPM menangani POST /projects/:id/pm (S4W susulan) -- tetapkan/ganti
-// PM, sama pola Create (existing member ATAU invite email baru). Dipakai
-// panel Kelola baik untuk mengisi project yang masih "menunggu PM" maupun
-// mengganti PM aktif.
+// AssignPM menangani POST /projects/:id/pm (S4W susulan, diperluas susulan
+// multi-PM) -- TAMBAH PM (existing member ATAU invite email baru), ADITIF,
+// TIDAK mengganti PM lain yang sudah ada. Dipakai panel Kelola baik untuk
+// mengisi project yang masih "menunggu PM" maupun menambah co-PM baru.
 func (h *ProjectHandler) AssignPM(c *fiber.Ctx) error {
 	actorUserID, _, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -218,14 +223,16 @@ func (h *ProjectHandler) AssignPM(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menetapkan PM", nil))
 	}
 
-	if err := h.projects.AssignPM(c.Context(), exec, projectID, req.PMUserID, req.PMEmail, req.PMName, actorUserID, claims.PlatformRole, inviterName); err != nil {
+	if err := h.projects.AddPM(c.Context(), exec, projectID, req.PMUserID, req.PMEmail, req.PMName, actorUserID, claims.PlatformRole, inviterName); err != nil {
 		return h.mapProjectError(c, err, "Gagal menetapkan PM")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": projectID}))
 }
 
-// RemovePM menangani DELETE /projects/:id/pm (S4W susulan) -- kosongkan PM
-// aktif tanpa pengganti, project masuk status "menunggu PM".
+// RemovePM menangani DELETE /projects/:id/pm/:userId (S4W susulan,
+// diperluas susulan multi-PM -- route gains :userId, dulu "hapus PM" tanpa
+// target sekarang harus bilang PM MANA) -- cabut SATU PM spesifik, PM lain
+// yang tersisa TIDAK terpengaruh.
 func (h *ProjectHandler) RemovePM(c *fiber.Ctx) error {
 	actorUserID, _, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -242,8 +249,9 @@ func (h *ProjectHandler) RemovePM(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 	projectID := c.Params("id")
+	targetUserID := c.Params("userId")
 
-	if err := h.projects.RemovePM(c.Context(), exec, projectID, actorUserID, claims.PlatformRole); err != nil {
+	if err := h.projects.RemovePM(c.Context(), exec, projectID, targetUserID, actorUserID, claims.PlatformRole); err != nil {
 		return h.mapProjectError(c, err, "Gagal menghapus PM")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": projectID}))
@@ -422,7 +430,7 @@ func (h *ProjectHandler) mapProjectError(c *fiber.Ctx, err error, fallbackMessag
 		return c.Status(fiber.StatusConflict).JSON(response.Error("PROJECT_NOT_DELETED", "Project ini tidak sedang dihapus", nil))
 	case errors.Is(err, domain.ErrCannotRemoveLastProjectManager):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("CANNOT_REMOVE_LAST_PM",
-			"Project harus punya Project Manager -- tetapkan PM pengganti dulu lewat \"+ Tetapkan PM\" sebelum mencabut PM ini", nil))
+			"Project harus punya minimal satu Project Manager -- tambahkan PM lain dulu lewat \"+ Tetapkan PM\" sebelum mencabut PM terakhir ini", nil))
 	case errors.Is(err, domain.ErrInvitationAlreadyPending):
 		// S4W susulan (ditemukan user 2026-09-14): resolvePM/invitePM
 		// memanggil InvitationService.CreateInvitation langsung (bukan

@@ -101,6 +101,14 @@ type stubProjectPMRepo struct {
 	setPMErr  error
 	setPMCall []struct{ projectID, userID string }
 
+	// remainingPMs -- nilai balik CountPMsExcluding (susulan multi-PM).
+	// Default 0 SENGAJA dipertahankan supaya test lama yang mengisi
+	// pmProjectsResult (mengasumsikan "PM tunggal, pasti diblokir") tetap
+	// lolos tanpa perubahan -- 0 co-PM tersisa = tetap diblokir persis
+	// perilaku lama.
+	remainingPMs int
+	countPMsErr  error
+
 	removePMErr   error
 	removePMCalls []string
 
@@ -124,7 +132,7 @@ func (r *stubProjectPMRepo) ListPMProjectNames(_ context.Context, _ db.Executor,
 	return r.pmProjectsResult, r.pmProjectsErr
 }
 
-func (r *stubProjectPMRepo) SetPM(_ context.Context, _ db.Executor, projectID, userID, _, _ string) error {
+func (r *stubProjectPMRepo) AddPM(_ context.Context, _ db.Executor, projectID, userID, _, _ string) error {
 	if r.setPMErr != nil {
 		return r.setPMErr
 	}
@@ -132,7 +140,11 @@ func (r *stubProjectPMRepo) SetPM(_ context.Context, _ db.Executor, projectID, u
 	return nil
 }
 
-func (r *stubProjectPMRepo) RemovePM(_ context.Context, _ db.Executor, projectID, _, _ string) error {
+func (r *stubProjectPMRepo) CountPMsExcluding(_ context.Context, _ db.Executor, _, _ string) (int, error) {
+	return r.remainingPMs, r.countPMsErr
+}
+
+func (r *stubProjectPMRepo) RemovePM(_ context.Context, _ db.Executor, projectID, _, _, _ string) error {
 	if r.removePMErr != nil {
 		return r.removePMErr
 	}

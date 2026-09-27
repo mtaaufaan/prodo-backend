@@ -46,8 +46,8 @@ func (f *fakePerformanceProjectResolver) GetWorkspaceID(_ context.Context, _ db.
 
 type fakePerformancePMChecker struct{ pmUserID string }
 
-func (f *fakePerformancePMChecker) GetPMUserID(_ context.Context, _ db.Executor, _ string) (string, error) {
-	return f.pmUserID, nil
+func (f *fakePerformancePMChecker) IsPM(_ context.Context, _ db.Executor, _, userID string) (bool, error) {
+	return f.pmUserID != "" && f.pmUserID == userID, nil
 }
 
 type fakePerformanceRoleChecker struct{ role string }

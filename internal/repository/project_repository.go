@@ -10,6 +10,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -27,6 +28,25 @@ func NewProjectRepository() *ProjectRepository {
 	return &ProjectRepository{}
 }
 
+// ProjectPM -- satu PM aktif project (many-to-many, tabel project_managers
+// -- susulan "bagaimana cara menambah PM dalam suatu project", dikonfirmasi
+// user: satu project boleh punya LEBIH dari satu PM, "+ Tetapkan PM" versi
+// lama yang mengganti PM diganti jadi aditif).
+type ProjectPM struct {
+	UserID string `json:"user_id"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+}
+
+// ProjectPendingPM -- satu undangan project_manager pending tertaut
+// project ini. BOLEH lebih dari satu bersamaan (dikonfirmasi user) --
+// beda dari perilaku lama yang otomatis membatalkan undangan sebelumnya
+// setiap kali PM baru ditetapkan/diundang.
+type ProjectPendingPM struct {
+	InvitationID string `json:"invitation_id"`
+	Email        string `json:"email"`
+}
+
 // Project -- satu baris hasil Create/Get/List (AW Projects.dc.html).
 // CreatedByName/CreatedByEmail (dikonfirmasi user 2026-09-13) -- workspace
 // bisa punya lebih dari satu admin_workspace, jadi perlu jelas project mana
@@ -37,25 +57,17 @@ type Project struct {
 	WorkspaceID    string
 	Name           string
 	Code           string
-	PMUserID       *string
-	PMName         string
-	PMEmail        string
+	PMs            []ProjectPM
+	PendingPMs     []ProjectPendingPM
 	IsArchived     bool
 	MemberCount    int
 	SprintCount    int
 	TaskCount      int
 	CreatedByName  string
 	CreatedByEmail string
-	// PMPendingEmail/PMPendingInvitationID -- kosong kecuali PMUserID nil DAN
-	// ada undangan project_manager pending tertaut project ini ("menunggu
-	// PM", S4W susulan). InvitationID dipakai FE untuk tombol "Cabut" lewat
-	// endpoint cancel-invitation yang SUDAH ADA (sama dipakai undangan
-	// admin_workspace), bukan endpoint baru.
-	PMPendingEmail        string
-	PMPendingInvitationID string
-	CreatedAt             time.Time
-	ArchivedAt            *time.Time
-	DeletedAt             *time.Time
+	CreatedAt      time.Time
+	ArchivedAt     *time.Time
+	DeletedAt      *time.Time
 	// Status/EndDate (susulan 2026-10-18, diminta user langsung "tambahkan
 	// status project, dan tanggal berakhir project") -- AC awal US-012
 	// (backlog.md: "tanggal mulai, tanggal selesai, dan status awal") tidak
@@ -98,14 +110,18 @@ type PMProjectRef struct {
 	Name string
 }
 
-// ListPMProjectNames mengembalikan project di workspaceID ini yang
-// pm_user_id-nya userID -- dipakai RBACService.AssignRole (Kelola Member &
-// Roles, S4W susulan role restructuring 2026-09-14) sebagai guard:
-// mengubah role SEORANG PM ke role lain tidak boleh menyisakan project
-// manapun tanpa PM, AW harus tetapkan PM baru dulu lewat Kelola Project.
+// ListPMProjectNames mengembalikan project di workspaceID ini yang userID
+// jadi SALAH SATU PM-nya (project_managers, many-to-many sejak susulan
+// multi-PM) -- dipakai RBACService.AssignRole (Kelola Member & Roles, S4W
+// susulan role restructuring 2026-09-14) sebagai guard: mengubah role
+// SEORANG PM ke role lain tidak boleh menyisakan project manapun tanpa PM
+// SAMA SEKALI (dicek lebih lanjut via CountPMsExcluding per project, co-PM
+// lain di project yang sama tetap boleh menampung).
 func (r *ProjectRepository) ListPMProjectNames(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]PMProjectRef, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, name FROM projects WHERE workspace_id = $1 AND pm_user_id = $2 AND deleted_at IS NULL
+		SELECT p.id, p.name FROM projects p
+		JOIN project_managers pmg ON pmg.project_id = p.id
+		WHERE p.workspace_id = $1 AND pmg.user_id = $2 AND p.deleted_at IS NULL
 	`, workspaceID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListPMProjectNames: %w", err)
@@ -153,24 +169,18 @@ func (r *ProjectRepository) SetAllowEditorStoryPoints(ctx context.Context, exec 
 }
 
 // Create menyimpan project baru + audit trail (S4-02). code wajib diisi
-// CALLER (service) -- divalidasi di sana, bukan di sini. pmUserID BOLEH
-// kosong (S4W susulan, dikonfirmasi user 2026-09-13) -- project masuk
-// status "menunggu PM" (pm_user_id NULL) kalau AW memilih undang PM baru
-// lewat email yang belum terdaftar; caller (service) yang menautkan
-// undangan project_manager ke project ini SETELAH baris ini dibuat (perlu
-// project.ID lebih dulu).
-func (r *ProjectRepository) Create(ctx context.Context, exec db.Executor, workspaceID, name, code, pmUserID, actorID, actorRole string) (*Project, error) {
+// CALLER (service) -- divalidasi di sana, bukan di sini. PM TIDAK LAGI
+// diisi di sini sejak susulan multi-PM -- project SELALU dibuat dulu tanpa
+// PM (status "menunggu PM"), caller (service.Create) memanggil AddPM
+// terpisah SETELAH baris ini dibuat (perlu project.ID lebih dulu, sama
+// pola undangan project_manager yang sudah begitu dari awal).
+func (r *ProjectRepository) Create(ctx context.Context, exec db.Executor, workspaceID, name, code, actorID, actorRole string) (*Project, error) {
 	p := &Project{WorkspaceID: workspaceID, Name: name, Code: code}
-	var pmParam any
-	if pmUserID != "" {
-		pmParam = pmUserID
-		p.PMUserID = &pmUserID
-	}
 	err := exec.QueryRow(ctx, `
-		INSERT INTO projects (workspace_id, name, code, pm_user_id, created_by)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO projects (workspace_id, name, code, created_by)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at, status
-	`, workspaceID, name, code, pmParam, actorID).Scan(&p.ID, &p.CreatedAt, &p.Status)
+	`, workspaceID, name, code, actorID).Scan(&p.ID, &p.CreatedAt, &p.Status)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", classifyUniqueViolation(err, domain.ErrProjectCodeTaken))
 	}
@@ -185,26 +195,34 @@ func (r *ProjectRepository) Create(ctx context.Context, exec db.Executor, worksp
 // List mengembalikan project dalam satu workspace, TIDAK termasuk yang
 // soft-deleted (AW Projects.dc.html: project terhapus hilang dari daftar
 // sepenuhnya, beda dari arsip yang tetap tampil di tab "Arsip"). Scoping
-// tambahan lewat RLS projects_select.
+// tambahan lewat RLS projects_select. PMs/PendingPMs diagregasi lewat
+// json_agg per project (susulan multi-PM) -- N PM aktif DAN N undangan
+// project_manager pending BOLEH sekaligus tampil (dikonfirmasi user), beda
+// dari versi lama yang cuma satu-satu.
 func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspaceID string) ([]Project, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT p.id, p.workspace_id, p.name, p.code, p.pm_user_id,
-		       COALESCE(u.display_name, ''), COALESCE(u.email, ''),
+		SELECT p.id, p.workspace_id, p.name, p.code,
 		       p.is_archived, p.created_at, p.archived_at,
 		       (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id),
 		       (SELECT COUNT(*) FROM sprints s WHERE s.project_id = p.id),
 		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL),
 		       COALESCE(creator.display_name, ''), COALESCE(creator.email, ''),
-		       COALESCE(pm_pending.email, ''), COALESCE(pm_pending.id::text, ''),
+		       COALESCE(pms.data, '[]'::json), COALESCE(pending_pms.data, '[]'::json),
 		       p.status, p.end_date, p.mention_cooldown_minutes
 		FROM projects p
-		LEFT JOIN users u ON u.id = p.pm_user_id
 		LEFT JOIN users creator ON creator.id = p.created_by
 		LEFT JOIN LATERAL (
-			SELECT id, email FROM user_invitations
-			WHERE project_id = p.id AND accepted_at IS NULL AND cancelled_at IS NULL
-			ORDER BY created_at DESC LIMIT 1
-		) pm_pending ON true
+			SELECT json_agg(json_build_object('user_id', pmg.user_id, 'name', u.display_name, 'email', u.email) ORDER BY u.display_name) AS data
+			FROM project_managers pmg
+			JOIN users u ON u.id = pmg.user_id
+			WHERE pmg.project_id = p.id
+		) pms ON true
+		LEFT JOIN LATERAL (
+			SELECT json_agg(json_build_object('invitation_id', ui.id, 'email', ui.email) ORDER BY ui.created_at) AS data
+			FROM user_invitations ui
+			WHERE ui.project_id = p.id AND ui.role = 'project_manager'
+			  AND ui.accepted_at IS NULL AND ui.cancelled_at IS NULL
+		) pending_pms ON true
 		WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
 		ORDER BY p.created_at DESC
 	`, workspaceID)
@@ -216,11 +234,18 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 	list := make([]Project, 0)
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code, &p.PMUserID,
-			&p.PMName, &p.PMEmail, &p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
+		var pmsJSON, pendingJSON []byte
+		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code,
+			&p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
 			&p.SprintCount, &p.TaskCount, &p.CreatedByName, &p.CreatedByEmail,
-			&p.PMPendingEmail, &p.PMPendingInvitationID, &p.Status, &p.EndDate, &p.MentionCooldownMinutes); err != nil {
+			&pmsJSON, &pendingJSON, &p.Status, &p.EndDate, &p.MentionCooldownMinutes); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
+		}
+		if err := json.Unmarshal(pmsJSON, &p.PMs); err != nil {
+			return nil, fmt.Errorf("repository.List: decode pms: %w", err)
+		}
+		if err := json.Unmarshal(pendingJSON, &p.PendingPMs); err != nil {
+			return nil, fmt.Errorf("repository.List: decode pending_pms: %w", err)
 		}
 		list = append(list, p)
 	}
@@ -250,15 +275,17 @@ func (r *ProjectRepository) NameExists(ctx context.Context, exec db.Executor, wo
 	return exists, nil
 }
 
-// AssignPendingPM (S4W susulan) -- dipanggil InvitationService.AcceptInvitation
-// begitu undangan project_manager yang tertaut project TERTENTU (project_id
-// di user_invitations, migrasi 20261017090000) diterima. WHERE
-// pm_user_id IS NULL adalah guard idempotensi -- kalau project sudah keburu
-// dapat PM lain lewat jalur berbeda (jarang), UPDATE ini jadi no-op (BUKAN
-// error) alih-alih menimpa PM yang sudah benar.
+// AssignPendingPM (S4W susulan, disesuaikan susulan multi-PM) -- dipanggil
+// InvitationService.AcceptInvitation begitu undangan project_manager yang
+// tertaut project TERTENTU (project_id di user_invitations, migrasi
+// 20261017090000) diterima. ON CONFLICT DO NOTHING adalah guard
+// idempotensi -- kalau user ini sudah keburu jadi PM project ini lewat
+// jalur lain (jarang), INSERT ini jadi no-op (BUKAN error) alih-alih
+// gagal unique violation.
 func (r *ProjectRepository) AssignPendingPM(ctx context.Context, exec db.Executor, projectID, userID string) error {
 	tag, err := exec.Exec(ctx, `
-		UPDATE projects SET pm_user_id = $2, updated_at = NOW() WHERE id = $1 AND pm_user_id IS NULL
+		INSERT INTO project_managers (project_id, user_id, added_by) VALUES ($1, $2, $2)
+		ON CONFLICT (project_id, user_id) DO NOTHING
 	`, projectID, userID)
 	if err != nil {
 		return fmt.Errorf("repository.AssignPendingPM: %w", err)
@@ -270,53 +297,92 @@ func (r *ProjectRepository) AssignPendingPM(ctx context.Context, exec db.Executo
 	if err != nil {
 		return fmt.Errorf("repository.AssignPendingPM: %w", err)
 	}
-	if err := insertProjectAudit(ctx, exec, userID, "member", "project.pm_assigned", projectID, workspaceID, nil,
-		map[string]any{"pm_user_id": userID}, nil); err != nil {
+	if err := insertProjectAudit(ctx, exec, userID, "member", "project.pm_added", projectID, workspaceID, nil,
+		map[string]any{"user_id": userID}, nil); err != nil {
 		return fmt.Errorf("repository.AssignPendingPM: audit: %w", err)
 	}
 	return nil
 }
 
-// GetPMUserID (susulan 2026-09-15) mengembalikan pm_user_id aktif project
-// ini, "" kalau belum/tidak punya PM aktif -- dipakai ProjectService.
-// RemovePM buat guard "cabut PM terakhir" sebelum benar-benar menghapus.
-func (r *ProjectRepository) GetPMUserID(ctx context.Context, exec db.Executor, projectID string) (string, error) {
-	var pmUserID string
+// IsPM mengecek apakah userID SALAH SATU PM aktif project ini (susulan
+// multi-PM -- dulu GetPMUserID mengembalikan ID tunggal untuk dibandingkan
+// caller, sekarang caller cukup tanya ya/tidak karena bisa ada lebih dari
+// satu PM). Dipakai PerformanceService.authorizeProject menggantikan
+// GetPMUserID + perbandingan manual.
+func (r *ProjectRepository) IsPM(ctx context.Context, exec db.Executor, projectID, userID string) (bool, error) {
+	var isPM bool
 	if err := exec.QueryRow(ctx, `
-		SELECT COALESCE(pm_user_id::text, '') FROM projects WHERE id = $1 AND deleted_at IS NULL
-	`, projectID).Scan(&pmUserID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", fmt.Errorf("repository.GetPMUserID: %w", domain.ErrProjectNotFound)
-		}
-		return "", fmt.Errorf("repository.GetPMUserID: %w", err)
+		SELECT EXISTS(SELECT 1 FROM project_managers WHERE project_id = $1 AND user_id = $2)
+	`, projectID, userID).Scan(&isPM); err != nil {
+		return false, fmt.Errorf("repository.IsPM: %w", err)
 	}
-	return pmUserID, nil
+	return isPM, nil
 }
 
-// RemovePM (S4W susulan) mengosongkan pm_user_id -- project masuk status
-// "menunggu PM" sampai PM baru ditetapkan/undangan baru diterima. BEDA dari
-// Update yang menganggap pmUserID kosong sebagai "tidak diubah" -- ini aksi
-// eksplisit terpisah dipicu tombol "Hapus PM" panel Kelola, dikonfirmasi
-// user boleh dilakukan kapan saja (bukan cuma saat undangan pending).
-func (r *ProjectRepository) RemovePM(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) error {
-	var oldPM string
+// CountPMsExcluding menghitung PM aktif project ini TIDAK termasuk
+// excludeUserID (susulan multi-PM, pola PERSIS WorkspaceMemberRepository.
+// CountAdminsExcluding) -- dipakai ProjectService.RemovePM dan
+// RBACService.AssignRole sebagai guard "jangan sampai project kehilangan
+// PM terakhir", sekarang menghitung SISA co-PM, bukan cek biner ada/tidak.
+func (r *ProjectRepository) CountPMsExcluding(ctx context.Context, exec db.Executor, projectID, excludeUserID string) (int, error) {
+	var count int
 	if err := exec.QueryRow(ctx, `
-		SELECT COALESCE(pm_user_id::text, '') FROM projects WHERE id = $1 AND deleted_at IS NULL
-	`, projectID).Scan(&oldPM); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("repository.RemovePM: %w", domain.ErrProjectNotFound)
-		}
+		SELECT COUNT(*) FROM project_managers WHERE project_id = $1 AND user_id != $2
+	`, projectID, excludeUserID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("repository.CountPMsExcluding: %w", err)
+	}
+	return count, nil
+}
+
+// AddPM menambahkan SATU PM ke project ini (susulan "bagaimana cara
+// menambah PM dalam suatu project", dikonfirmasi user) -- ADITIF, TIDAK
+// mengganti PM lain yang sudah ada (beda dari SetPM versi lama yang
+// overwrite tunggal). ON CONFLICT DO NOTHING -- menambahkan user yang
+// sudah jadi PM project ini adalah no-op, bukan error.
+func (r *ProjectRepository) AddPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `
+		INSERT INTO project_managers (project_id, user_id, added_by) VALUES ($1, $2, $3)
+		ON CONFLICT (project_id, user_id) DO NOTHING
+	`, projectID, userID, actorID)
+	if err != nil {
+		return fmt.Errorf("repository.AddPM: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	workspaceID, err := r.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return fmt.Errorf("repository.AddPM: %w", err)
+	}
+	if err := insertProjectAudit(ctx, exec, actorID, actorRole, "project.pm_added", projectID, workspaceID, nil,
+		map[string]any{"user_id": userID}, nil); err != nil {
+		return fmt.Errorf("repository.AddPM: audit: %w", err)
+	}
+	return nil
+}
+
+// RemovePM melepas SATU PM spesifik dari project ini (susulan multi-PM --
+// dulu mengosongkan pm_user_id tunggal, sekarang menghapus SATU baris
+// project_managers, PM lain yang tersisa TIDAK terpengaruh). Guard "jangan
+// cabut PM terakhir" ada di service (CountPMsExcluding), BUKAN di sini --
+// method ini murni eksekusi, sama pola RemoveMember/UpdateRole lain.
+// RowsAffected 0 (userID sudah bukan PM project ini, mis. double-klik atau
+// dicabut orang lain barengan) diperlakukan idempoten -- BUKAN error, sama
+// pola AddPM/AssignPendingPM ON CONFLICT DO NOTHING.
+func (r *ProjectRepository) RemovePM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error {
+	tag, err := exec.Exec(ctx, `DELETE FROM project_managers WHERE project_id = $1 AND user_id = $2`, projectID, userID)
+	if err != nil {
 		return fmt.Errorf("repository.RemovePM: %w", err)
 	}
-	if _, err := exec.Exec(ctx, `UPDATE projects SET pm_user_id = NULL, updated_at = NOW() WHERE id = $1`, projectID); err != nil {
-		return fmt.Errorf("repository.RemovePM: %w", err)
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 	workspaceID, err := r.GetWorkspaceID(ctx, exec, projectID)
 	if err != nil {
 		return fmt.Errorf("repository.RemovePM: %w", err)
 	}
 	if err := insertProjectAudit(ctx, exec, actorID, actorRole, "project.pm_removed", projectID, workspaceID,
-		map[string]any{"pm_user_id": oldPM}, nil, nil); err != nil {
+		map[string]any{"user_id": userID}, nil, nil); err != nil {
 		return fmt.Errorf("repository.RemovePM: audit: %w", err)
 	}
 	return nil
@@ -347,99 +413,27 @@ func (r *ProjectRepository) NotifyPMRemoved(ctx context.Context, exec db.Executo
 	return nil
 }
 
-// SetPM (S4W susulan) menetapkan pm_user_id TANPA syarat (beda dari
-// AssignPendingPM yang cuma jalan kalau sebelumnya NULL) -- dipakai
-// AssignPM saat AW eksplisit menetapkan/mengganti PM lewat panel Kelola,
-// baik project sedang "menunggu PM" maupun sudah punya PM aktif lain.
-func (r *ProjectRepository) SetPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error {
-	var oldPM string
-	if err := exec.QueryRow(ctx, `
-		SELECT COALESCE(pm_user_id::text, '') FROM projects WHERE id = $1 AND deleted_at IS NULL
-	`, projectID).Scan(&oldPM); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("repository.SetPM: %w", domain.ErrProjectNotFound)
-		}
-		return fmt.Errorf("repository.SetPM: %w", err)
-	}
-	if _, err := exec.Exec(ctx, `UPDATE projects SET pm_user_id = $2, updated_at = NOW() WHERE id = $1`, projectID, userID); err != nil {
-		return fmt.Errorf("repository.SetPM: %w", err)
-	}
-	workspaceID, err := r.GetWorkspaceID(ctx, exec, projectID)
-	if err != nil {
-		return fmt.Errorf("repository.SetPM: %w", err)
-	}
-	action := "project.pm_assigned"
-	var before map[string]any
-	if oldPM != "" {
-		action = "project.pm_reassigned"
-		before = map[string]any{"pm_user_id": oldPM}
-	}
-	if err := insertProjectAudit(ctx, exec, actorID, actorRole, action, projectID, workspaceID, before,
-		map[string]any{"pm_user_id": userID}, nil); err != nil {
-		return fmt.Errorf("repository.SetPM: audit: %w", err)
-	}
-	return nil
-}
-
-// GetPendingPMInvitationID -- ID undangan project_manager pending yang
-// tertaut project ini kalau ada, "" kalau tidak ada. Dipakai service.AssignPM
-// untuk auto-cancel undangan lama SEBELUM membuat undangan PM baru (satu
-// project cuma boleh punya SATU undangan PM pending sekaligus).
-func (r *ProjectRepository) GetPendingPMInvitationID(ctx context.Context, exec db.Executor, projectID string) (string, error) {
-	var id string
-	err := exec.QueryRow(ctx, `
-		SELECT id FROM user_invitations
-		WHERE project_id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL
-		ORDER BY created_at DESC LIMIT 1
-	`, projectID).Scan(&id)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
-		}
-		return "", fmt.Errorf("repository.GetPendingPMInvitationID: %w", err)
-	}
-	return id, nil
-}
-
-// Update mengubah nama, status/tanggal berakhir, dan/atau PM penanggung
-// jawab (S4-02). pmUserID kosong berarti PM tidak diubah (AW
-// Projects.dc.html: reassignment cuma terjadi kalau pengguna benar-benar
-// memilih orang lain). status/endDate (susulan 2026-10-18) SELALU dikirim
-// FE apa adanya (sama kontrak dengan name) -- beda dari pmUserID, tidak
-// ada bahaya "kepilih tanpa sadar" untuk keduanya.
-func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projectID, name, status, pmUserID, actorID, actorRole string, endDate *time.Time) error {
-	var oldName, oldPM, oldStatus string
+// Update mengubah nama, status, dan/atau tanggal berakhir project (S4-02,
+// diperluas susulan 2026-10-18). PM TIDAK LAGI diubah lewat sini sejak S4W
+// susulan (dipindah ke AddPM/RemovePM, seksi terpisah panel Kelola) --
+// susulan multi-PM menghapus parameter pmUserID yang sudah vestigial sejak
+// itu (satu-satunya pemanggil selalu mengirim "").
+func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projectID, name, status, actorID, actorRole string, endDate *time.Time) error {
+	var oldName, oldStatus string
 	var oldEndDate *time.Time
 	if err := exec.QueryRow(ctx, `
-		SELECT name, COALESCE(pm_user_id::text, ''), status, end_date FROM projects WHERE id = $1 AND deleted_at IS NULL
-	`, projectID).Scan(&oldName, &oldPM, &oldStatus, &oldEndDate); err != nil {
+		SELECT name, status, end_date FROM projects WHERE id = $1 AND deleted_at IS NULL
+	`, projectID).Scan(&oldName, &oldStatus, &oldEndDate); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("repository.Update: %w", domain.ErrProjectNotFound)
 		}
 		return fmt.Errorf("repository.Update: %w", err)
 	}
 
-	newPM := pmUserID
-	if newPM == "" {
-		newPM = oldPM
-	}
-	// newPMArg (susulan 2026-09-15, ditemukan lewat verifikasi live dirty
-	// notice ManageProjectModal -- bug PRA-EXISTING, tidak terkait
-	// perubahan itu) -- newPM bisa TETAP kosong di titik ini kalau project
-	// belum punya PM sama sekali (pm_user_id NULL, oldPM juga "" lewat
-	// COALESCE di atas) DAN pmUserID request juga kosong (rename/ubah
-	// status saja). pm_user_id kolom uuid -- kirim string kosong lewat
-	// exec.Exec bikin Postgres menolak dengan "invalid input syntax for
-	// type uuid" (22P02), bukan NULL. any(nil) supaya pgx mem-bind SQL
-	// NULL yang benar saat memang belum ada PM.
-	var newPMArg any = newPM
-	if newPM == "" {
-		newPMArg = nil
-	}
 	tag, err := exec.Exec(ctx, `
-		UPDATE projects SET name = $2, pm_user_id = $3, status = $4::project_lifecycle_status, end_date = $5, updated_at = NOW()
+		UPDATE projects SET name = $2, status = $3::project_lifecycle_status, end_date = $4, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
-	`, projectID, name, newPMArg, status, endDate)
+	`, projectID, name, status, endDate)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", classifyUniqueViolation(err, domain.ErrProjectCodeTaken))
 	}
@@ -457,8 +451,8 @@ func (r *ProjectRepository) Update(ctx context.Context, exec db.Executor, projec
 		}
 		return t.Format("2006-01-02")
 	}
-	before := map[string]any{"name": oldName, "pm_user_id": oldPM, "status": oldStatus, "end_date": dateStr(oldEndDate)}
-	after := map[string]any{"name": name, "pm_user_id": newPM, "status": status, "end_date": dateStr(endDate)}
+	before := map[string]any{"name": oldName, "status": oldStatus, "end_date": dateStr(oldEndDate)}
+	after := map[string]any{"name": name, "status": status, "end_date": dateStr(endDate)}
 	if err := insertProjectAudit(ctx, exec, actorID, actorRole, "project.updated", projectID, workspaceID, before, after, nil); err != nil {
 		return fmt.Errorf("repository.Update: audit: %w", err)
 	}

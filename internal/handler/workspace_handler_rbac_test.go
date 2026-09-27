@@ -97,10 +97,13 @@ func (stubProjectRepo) GetWorkspaceID(context.Context, db.Executor, string) (str
 func (stubProjectRepo) ListPMProjectNames(context.Context, db.Executor, string, string) ([]repository.PMProjectRef, error) {
 	return nil, nil
 }
-func (stubProjectRepo) SetPM(context.Context, db.Executor, string, string, string, string) error {
+func (stubProjectRepo) AddPM(context.Context, db.Executor, string, string, string, string) error {
 	return nil
 }
-func (stubProjectRepo) RemovePM(context.Context, db.Executor, string, string, string) error {
+func (stubProjectRepo) CountPMsExcluding(context.Context, db.Executor, string, string) (int, error) {
+	return 1, nil
+}
+func (stubProjectRepo) RemovePM(context.Context, db.Executor, string, string, string, string) error {
 	return nil
 }
 func (stubProjectRepo) NotifyPMRemoved(context.Context, db.Executor, string, string, string) error {

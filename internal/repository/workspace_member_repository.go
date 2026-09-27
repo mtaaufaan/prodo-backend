@@ -168,8 +168,9 @@ type Member struct {
 	JoinedAt    time.Time
 	// ProjectNames -- nama project (dipisah ", ", urut abjad) tempat user
 	// ini punya keterkaitan project-level di workspace INI -- PM lewat
-	// projects.pm_user_id, editor/approver/viewer lewat project_members
-	// (S4W susulan role restructuring, 2026-09-14). Kosong untuk role
+	// project_managers (susulan multi-PM), editor/approver/viewer lewat
+	// project_members (S4W susulan role restructuring, 2026-09-14). Kosong
+	// untuk role
 	// workspace-scoped murni (admin_workspace/division_viewer) atau kalau
 	// belum ditautkan ke project mana pun.
 	ProjectNames string
@@ -201,9 +202,10 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 			       (array_agg(p.id ORDER BY p.name))[1] AS first_id
 			FROM projects p
 			WHERE p.workspace_id = wm.workspace_id AND p.deleted_at IS NULL
-			  AND (p.pm_user_id = wm.user_id OR EXISTS (
-			        SELECT 1 FROM project_members pmem WHERE pmem.project_id = p.id AND pmem.user_id = wm.user_id
-			      ))
+			  AND (
+			    EXISTS (SELECT 1 FROM project_managers pmg WHERE pmg.project_id = p.id AND pmg.user_id = wm.user_id)
+			    OR EXISTS (SELECT 1 FROM project_members pmem WHERE pmem.project_id = p.id AND pmem.user_id = wm.user_id)
+			  )
 		) proj ON true
 		WHERE wm.workspace_id = $1
 		ORDER BY wm.joined_at ASC
