@@ -53,6 +53,9 @@ type stubInvitationRepo struct {
 
 	listPendingResult []repository.PendingInvitation
 	listPendingErr    error
+
+	getProjectIDResult string
+	getProjectIDErr    error
 }
 
 func (r *stubInvitationRepo) CreateInvitation(_ context.Context, _ db.Executor, email, workspaceID, role, invitedByUserID, _, tokenHash, projectID, displayName string, _ bool, expiresAt time.Time) (string, error) {
@@ -93,6 +96,10 @@ func (r *stubInvitationRepo) AcceptExecutiveInvitation(_ context.Context, _ db.E
 
 func (r *stubInvitationRepo) Cancel(_ context.Context, _ db.Executor, _, _, _, _ string) error {
 	return r.cancelErr
+}
+
+func (r *stubInvitationRepo) GetProjectID(_ context.Context, _ db.Executor, _ string) (string, error) {
+	return r.getProjectIDResult, r.getProjectIDErr
 }
 
 func (r *stubInvitationRepo) Resend(_ context.Context, _ db.Executor, _, _, _ string, _ time.Time) (*repository.ResendTarget, error) {
@@ -202,6 +209,9 @@ type stubProjectPMAssigner struct {
 
 	setPMErr error
 	setPM    []recordedSetPM
+
+	isPMResult bool
+	isPMErr    error
 }
 
 func (a *stubProjectPMAssigner) AssignPendingPM(_ context.Context, _ db.Executor, projectID, userID string) error {
@@ -218,6 +228,10 @@ func (a *stubProjectPMAssigner) AddPM(_ context.Context, _ db.Executor, projectI
 	}
 	a.setPM = append(a.setPM, recordedSetPM{projectID, userID, actorID, actorRole})
 	return nil
+}
+
+func (a *stubProjectPMAssigner) IsPM(_ context.Context, _ db.Executor, _, _ string) (bool, error) {
+	return a.isPMResult, a.isPMErr
 }
 
 type recordedProjectMember struct {
@@ -619,7 +633,7 @@ func TestInvitationService_AcceptInvitation_KeycloakError_Propagates(t *testing.
 
 func TestInvitationService_CancelInvitation_NotFound(t *testing.T) {
 	repo := &stubInvitationRepo{cancelErr: fmt.Errorf("repository.Cancel: %w", domain.ErrInvitationNotFound)}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{memberRole: "admin_workspace"}, &stubProjectPMAssigner{})
 
 	err := svc.CancelInvitation(context.Background(), nil, "ws-1", "inv-1", "actor-1", "member")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
@@ -629,9 +643,37 @@ func TestInvitationService_CancelInvitation_NotFound(t *testing.T) {
 
 func TestInvitationService_CancelInvitation_Success(t *testing.T) {
 	repo := &stubInvitationRepo{}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{memberRole: "admin_workspace"}, &stubProjectPMAssigner{})
 
 	if err := svc.CancelInvitation(context.Background(), nil, "ws-1", "inv-1", "actor-1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestInvitationService_CancelInvitation_ForbiddenForNonAdminNonPM (susulan,
+// ditemukan user: PM tidak bisa mengelola undangan project-scoped-nya
+// sendiri karena Cancel/Resend dulu HANYA digerbangi RequireRole
+// admin_workspace di route -- sekarang otorisasi presisi di service).
+func TestInvitationService_CancelInvitation_ForbiddenForNonAdminNonPM(t *testing.T) {
+	repo := &stubInvitationRepo{getProjectIDResult: "proj-1"}
+	projects := &stubProjectPMAssigner{isPMResult: false}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{memberRole: "editor"}, projects)
+
+	err := svc.CancelInvitation(context.Background(), nil, "ws-1", "inv-1", "editor-1", "member")
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want domain.ErrForbidden", err)
+	}
+}
+
+// TestInvitationService_CancelInvitation_AllowsPMOfProject (susulan) -- PM
+// yang bukan admin_workspace tetap boleh membatalkan undangan project yang
+// dia kelola (invitation.project_id cocok, IsPM true).
+func TestInvitationService_CancelInvitation_AllowsPMOfProject(t *testing.T) {
+	repo := &stubInvitationRepo{getProjectIDResult: "proj-1"}
+	projects := &stubProjectPMAssigner{isPMResult: true}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{memberRole: "project_manager"}, projects)
+
+	if err := svc.CancelInvitation(context.Background(), nil, "ws-1", "inv-1", "pm-1", "member"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -639,9 +681,9 @@ func TestInvitationService_CancelInvitation_Success(t *testing.T) {
 func TestInvitationService_ResendInvitation_Success(t *testing.T) {
 	repo := &stubInvitationRepo{resendResult: &repository.ResendTarget{Email: "budi@example.com", Role: "editor"}}
 	emailer := &stubInvitationEmailer{}
-	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
+	svc := newTestInvitationService(repo, emailer, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{memberRole: "admin_workspace"}, &stubProjectPMAssigner{})
 
-	if err := svc.ResendInvitation(context.Background(), nil, "ws-1", "inv-1", "WS", "Actor"); err != nil {
+	if err := svc.ResendInvitation(context.Background(), nil, "ws-1", "inv-1", "actor-1", "member", "WS", "Actor"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(emailer.sent) != 1 || emailer.sent[0].to != "budi@example.com" {
@@ -666,9 +708,9 @@ func TestInvitationService_ListPendingInvitations_ReturnsList(t *testing.T) {
 
 func TestInvitationService_ResendInvitation_NotFound(t *testing.T) {
 	repo := &stubInvitationRepo{resendErr: fmt.Errorf("repository.Resend: %w", domain.ErrInvitationNotFound)}
-	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{}, &stubProjectPMAssigner{})
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{}, &stubWorkspaceAssigner{memberRole: "admin_workspace"}, &stubProjectPMAssigner{})
 
-	err := svc.ResendInvitation(context.Background(), nil, "ws-1", "inv-1", "WS", "Actor")
+	err := svc.ResendInvitation(context.Background(), nil, "ws-1", "inv-1", "actor-1", "member", "WS", "Actor")
 	if !errors.Is(err, domain.ErrInvitationNotFound) {
 		t.Errorf("err = %v, want domain.ErrInvitationNotFound", err)
 	}

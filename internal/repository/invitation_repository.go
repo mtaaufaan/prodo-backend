@@ -342,6 +342,24 @@ type ResendTarget struct {
 	Role  string
 }
 
+// GetProjectID (susulan, otorisasi PM-of-project untuk Cancel/Resend --
+// lihat komentar InvitationService.authorizeManage) -- project_id undangan
+// ini, "" kalau undangan tidak tertaut project (invitation workspace biasa).
+func (r *InvitationRepository) GetProjectID(ctx context.Context, exec db.Executor, invitationID string) (string, error) {
+	var projectID *string
+	err := exec.QueryRow(ctx, `SELECT project_id::text FROM user_invitations WHERE id = $1`, invitationID).Scan(&projectID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("repository.GetProjectID: %w", domain.ErrInvitationNotFound)
+		}
+		return "", fmt.Errorf("repository.GetProjectID: %w", err)
+	}
+	if projectID == nil {
+		return "", nil
+	}
+	return *projectID, nil
+}
+
 // Resend (S2-22) menerbitkan token baru untuk undangan yang masih pending
 // -- menimpa token_hash lama (token mentah lama otomatis invalid karena
 // hash-nya tidak lagi cocok baris manapun) dan memperpanjang expires_at.
