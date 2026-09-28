@@ -98,6 +98,12 @@ type projectPMAssigner interface {
 type projectMemberLinker interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 	AddMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error
+	// UpsertMember (susulan, ditemukan user: undang member existing-user
+	// yang sudah punya baris project_members untuk project ini -- mis.
+	// project-scoped-only ditambahkan PM sebelumnya -- gagal "project
+	// member already exists" lewat AddMember di atas) -- dipakai
+	// CreateBulkInvitations existing-user path SAJA, lihat komentar di sana.
+	UpsertMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error
 }
 
 // InvitationService menangani lifecycle undangan workspace (S2-17/18/20/
@@ -296,11 +302,15 @@ func (s *InvitationService) CreateBulkInvitations(
 					// PM: TIDAK PERNAH AssignRole (role workspace bukan
 					// wewenangnya) -- isScoped ditentukan dari status
 					// keanggotaan workspace target SAAT INI, bukan diubah.
+					// UpsertMember (bukan AddMember) -- target bisa saja
+					// SUDAH punya baris project_members (mis. sebelumnya
+					// ditambahkan AW sebagai member workspace penuh, PM
+					// sekarang menambahkannya scoped ke project ini juga).
 					existingWsRole, err := s.assigner.GetMemberRole(ctx, exec, workspaceID, existingUserID)
 					if err != nil {
 						return err
 					}
-					return s.projectMembers.AddMember(ctx, exec, projectID, workspaceID, existingUserID, role, existingWsRole == "", invitedByUserID, actorRole)
+					return s.projectMembers.UpsertMember(ctx, exec, projectID, workspaceID, existingUserID, role, existingWsRole == "", invitedByUserID, actorRole)
 				}
 				if _, err := s.assigner.AssignRole(ctx, exec, workspaceID, existingUserID, role, &invitedByUserID, invitedByUserID, actorRole, ""); err != nil {
 					return err
@@ -311,7 +321,16 @@ func (s *InvitationService) CreateBulkInvitations(
 				if role == "project_manager" {
 					return s.projects.AddPM(ctx, exec, projectID, existingUserID, invitedByUserID, actorRole)
 				}
-				return s.projectMembers.AddMember(ctx, exec, projectID, workspaceID, existingUserID, role, false, invitedByUserID, actorRole)
+				// UpsertMember (bukan AddMember, susulan ditemukan user:
+				// "menambahkan member dari member & roles AW ... gagal") --
+				// target bisa saja SUDAH punya baris project_members (mis.
+				// sebelumnya ditambahkan PM sebagai project-scoped-only ke
+				// project yang sama) -- AddMember gagal "already exists"
+				// walau intent AW di sini jelas "pastikan role+scope ini",
+				// bukan menolak. UpsertMember menyamakan is_scoped ke false
+				// juga (dia kini genuinely workspace member lewat AssignRole
+				// barusan, bukan scoped-only lagi).
+				return s.projectMembers.UpsertMember(ctx, exec, projectID, workspaceID, existingUserID, role, false, invitedByUserID, actorRole)
 			})
 			if err != nil {
 				result.Errors[email] = err.Error()

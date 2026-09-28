@@ -145,23 +145,85 @@ func (r *ProjectMemberRepository) AddMember(ctx context.Context, exec db.Executo
 	if err := insertProjectMemberAudit(ctx, exec, addedBy, actorRole, "project_member.added", projectID, userID, nil, nil); err != nil {
 		return fmt.Errorf("repository.AddMember: audit: %w", err)
 	}
-
 	if isScoped {
-		var awUserID string
-		err := exec.QueryRow(ctx, `
-			SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'admin_workspace' LIMIT 1
-		`, workspaceID).Scan(&awUserID)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("repository.AddMember: cari admin_workspace: %w", err)
+		if err := notifyAWIfScopedAdd(ctx, exec, workspaceID, projectID, addedBy); err != nil {
+			return fmt.Errorf("repository.AddMember: %w", err)
 		}
-		if awUserID != "" {
-			if _, err := exec.Exec(ctx, `
-				INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
-				VALUES ($1, $2, 'project_scoped_member_added', 'project', $3, 'Member Baru Lintas Organisasi', 'Project Manager menambahkan member dari luar workspace ke salah satu project Anda.')
-			`, awUserID, addedBy, projectID); err != nil {
-				return fmt.Errorf("repository.AddMember: notifikasi AW: %w", err)
-			}
+	}
+	return nil
+}
+
+// UpsertMember (susulan, ditemukan user: undang member dari "AW Member &
+// Roles" gagal untuk email yang SUDAH terdaftar sebagai user DAN sudah
+// punya baris project_members untuk project yang sama -- mis. sebelumnya
+// ditambahkan PM sebagai project-scoped-only, lalu AW mengundangnya lagi
+// sebagai member workspace penuh dengan role+project yang sama).
+// AddMember di atas SENGAJA strict (dipakai PM AddMemberModal langsung
+// lewat POST /projects/:id/members, ErrProjectMemberAlreadyExists memang
+// harus ditolak jelas di sana) -- method ini KHUSUS dipakai
+// InvitationService.CreateBulkInvitations existing-user path, yang
+// intent-nya selalu "pastikan role+scope project ini", bukan "tolak
+// kalau sudah ada".
+func (r *ProjectMemberRepository) UpsertMember(ctx context.Context, exec db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error {
+	var oldRole string
+	var oldScoped bool
+	existed := true
+	if err := exec.QueryRow(ctx, `
+		SELECT role::text, is_scoped FROM project_members WHERE project_id = $1 AND user_id = $2
+	`, projectID, userID).Scan(&oldRole, &oldScoped); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("repository.UpsertMember: %w", err)
 		}
+		existed = false
+	}
+
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO project_members (project_id, user_id, role, is_scoped, added_by)
+		VALUES ($1, $2, $3::project_scoped_role, $4, $5)
+		ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role, is_scoped = EXCLUDED.is_scoped
+	`, projectID, userID, role, isScoped, addedBy); err != nil {
+		return fmt.Errorf("repository.UpsertMember: %w", err)
+	}
+
+	if !existed {
+		if err := insertProjectMemberAudit(ctx, exec, addedBy, actorRole, "project_member.added", projectID, userID, nil, nil); err != nil {
+			return fmt.Errorf("repository.UpsertMember: audit: %w", err)
+		}
+	} else if oldRole != role || oldScoped != isScoped {
+		before := map[string]any{"role": oldRole, "is_scoped": oldScoped}
+		after := map[string]any{"role": role, "is_scoped": isScoped}
+		if err := insertProjectMemberAudit(ctx, exec, addedBy, actorRole, "project_member.role_changed", projectID, userID, before, after); err != nil {
+			return fmt.Errorf("repository.UpsertMember: audit: %w", err)
+		}
+	}
+	if !existed && isScoped {
+		if err := notifyAWIfScopedAdd(ctx, exec, workspaceID, projectID, addedBy); err != nil {
+			return fmt.Errorf("repository.UpsertMember: %w", err)
+		}
+	}
+	return nil
+}
+
+// notifyAWIfScopedAdd (S3-17) -- notifikasi Admin Workspace saat member
+// project-scoped ditambahkan (dari luar workspace), dipakai AddMember/
+// UpsertMember. Diam-diam dilewati kalau AW belum ada (workspace baru/
+// belum ditunjuk), bukan menggagalkan operasi tambah member.
+func notifyAWIfScopedAdd(ctx context.Context, exec db.Executor, workspaceID, projectID, addedBy string) error {
+	var awUserID string
+	err := exec.QueryRow(ctx, `
+		SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'admin_workspace' LIMIT 1
+	`, workspaceID).Scan(&awUserID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("notifyAWIfScopedAdd: cari admin_workspace: %w", err)
+	}
+	if awUserID == "" {
+		return nil
+	}
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+		VALUES ($1, $2, 'project_scoped_member_added', 'project', $3, 'Member Baru Lintas Organisasi', 'Project Manager menambahkan member dari luar workspace ke salah satu project Anda.')
+	`, awUserID, addedBy, projectID); err != nil {
+		return fmt.Errorf("notifyAWIfScopedAdd: notifikasi AW: %w", err)
 	}
 	return nil
 }
