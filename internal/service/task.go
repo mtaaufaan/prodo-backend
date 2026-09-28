@@ -352,10 +352,14 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 	return s.setStatusCore(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, true)
 }
 
-// isTaskInWorkableSprint (susulan domain.ErrTaskNotInSprint) -- true kalau
-// sprintID mengarah ke sprint yang statusnya 'backlog' atau 'active'.
-// sprintID kosong (task belum pernah ditarik dari product backlog sama
-// sekali) SELALU false -- tidak ada sprint untuk dicek statusnya.
+// isTaskInWorkableSprint (susulan domain.ErrTaskNotInSprint) -- true HANYA
+// kalau sprintID mengarah ke sprint yang SEDANG 'active' (bukan 'backlog'
+// sekalipun, koreksi setelah user menguji live: task Sprint 1 yang belum
+// dimulai -- Sprint 0 sedang aktif -- tetap ditolak, "sprint backlog" di
+// permintaan awal ternyata berarti task TANPA sprint sama sekali, BUKAN
+// sprint yang statusnya 'backlog'). sprintID kosong (task belum pernah
+// ditarik dari product backlog sama sekali) SELALU false -- tidak ada
+// sprint untuk dicek statusnya.
 func (s *TaskService) isTaskInWorkableSprint(ctx context.Context, exec db.Executor, sprintID *string) (bool, error) {
 	if sprintID == nil || *sprintID == "" {
 		return false, nil
@@ -364,7 +368,7 @@ func (s *TaskService) isTaskInWorkableSprint(ctx context.Context, exec db.Execut
 	if err != nil {
 		return false, fmt.Errorf("service.isTaskInWorkableSprint: %w", err)
 	}
-	return sprint.Status == "backlog" || sprint.Status == "active", nil
+	return sprint.Status == "active", nil
 }
 
 // setStatusCore -- isi asli SetStatus, sekarang dipakai BERSAMA

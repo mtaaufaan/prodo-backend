@@ -319,28 +319,36 @@ func TestTaskService_SetStatus_NoSprint_AllowsBlocked(t *testing.T) {
 	}
 }
 
-// TestTaskService_SetStatus_DoneSprint_Rejected -- task masih tertaut
-// sprint yang statusnya SUDAH 'done' (jarang sekali kejadian nyata --
-// SprintService.UnassignIncompleteTasks otomatis mengosongkan sprint_id
-// task non-DONE begitu sprint ditutup, tapi guard ini tetap ditulis
-// eksplisit untuk konsistensi + jaga-jaga race) juga ditolak, sama seperti
-// tanpa sprint sama sekali.
-func TestTaskService_SetStatus_DoneSprint_Rejected(t *testing.T) {
-	statuses := map[string]*repository.CustomStatus{
-		"done-status":    {ID: "done-status", Name: "DONE"},
-		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
-	}
-	sprintID := "s1"
-	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
-		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", StatusName: "BACKLOG", SprintID: &sprintID},
-	}}
-	doneSprints := &fakeTaskSprintsWithStatus{status: "done"}
-	svc := NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
-		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
-		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, doneSprints)
+// TestTaskService_SetStatus_NonActiveSprint_Rejected -- task masih tertaut
+// sprint yang BUKAN sprint aktif project ini ditolak, baik sprint itu
+// belum dimulai ('backlog' -- ditemukan user via pengujian live: task
+// Sprint 1 yang belum dimulai tetap ditolak selama Sprint 0 yang aktif,
+// mengoreksi asumsi awal "sprint backlog" berarti status sprint 'backlog'
+// boleh, padahal seharusnya HANYA sprint 'active') maupun sudah selesai
+// ('done' -- jarang sekali kejadian nyata karena SprintService.
+// UnassignIncompleteTasks otomatis mengosongkan sprint_id task non-DONE
+// begitu sprint ditutup, tapi guard tetap ditulis eksplisit untuk
+// konsistensi + jaga-jaga race).
+func TestTaskService_SetStatus_NonActiveSprint_Rejected(t *testing.T) {
+	for _, sprintStatus := range []string{"backlog", "done"} {
+		t.Run(sprintStatus, func(t *testing.T) {
+			statuses := map[string]*repository.CustomStatus{
+				"done-status":    {ID: "done-status", Name: "DONE"},
+				"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
+			}
+			sprintID := "s1"
+			repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+				"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", StatusName: "BACKLOG", SprintID: &sprintID},
+			}}
+			sprints := &fakeTaskSprintsWithStatus{status: sprintStatus}
+			svc := NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
+				&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+				&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, sprints)
 
-	err := svc.SetStatus(context.Background(), nil, "t1", "done-status", []string{"pic1"}, "user1", "member")
-	if !errors.Is(err, domain.ErrTaskNotInSprint) {
-		t.Errorf("err = %v, want domain.ErrTaskNotInSprint", err)
+			err := svc.SetStatus(context.Background(), nil, "t1", "done-status", []string{"pic1"}, "user1", "member")
+			if !errors.Is(err, domain.ErrTaskNotInSprint) {
+				t.Errorf("err = %v, want domain.ErrTaskNotInSprint", err)
+			}
+		})
 	}
 }

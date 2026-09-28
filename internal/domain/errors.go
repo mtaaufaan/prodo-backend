@@ -469,14 +469,16 @@ var (
 
 	// ErrTaskNotInSprint dikembalikan PUT /tasks/:id/status (susulan,
 	// diminta user "task board dengan status backlog yang bukan sprint
-	// backlog dan sprint berjalan tidak dapat dipindahkan statusnya") --
-	// task BACKLOG yang TIDAK tertaut sprint mana pun (sprint_id NULL,
-	// belum pernah ditarik dari product backlog) ATAU tertaut sprint yang
-	// statusnya bukan 'backlog'/'active' tidak boleh mulai dikerjakan
-	// (tujuan bukan BLOCKED) sampai ditarik ke sprint dulu lewat "Tarik
-	// Task dari Backlog" (AddSprintModal) atau assign-tasks (Kelola
-	// Sprint). Sama pola ErrTaskIncomplete -- guard bisnis, bukan RBAC.
-	ErrTaskNotInSprint = errors.New("task must be pulled into a backlog or active sprint before changing status")
+	// backlog dan sprint berjalan tidak dapat dipindahkan statusnya",
+	// dikoreksi setelah pengujian live: task Sprint 1 yang belum dimulai
+	// tetap harus ditolak selama Sprint 0 yang sedang aktif -- "sprint
+	// backlog" di permintaan awal ternyata berarti task TANPA sprint sama
+	// sekali, BUKAN sprint yang statusnya 'backlog') -- task BACKLOG yang
+	// TIDAK tertaut sprint mana pun (sprint_id NULL) ATAU tertaut sprint
+	// yang statusnya BUKAN 'active' tidak boleh mulai dikerjakan (tujuan
+	// bukan BLOCKED) sampai project-nya benar-benar memulai sprint itu.
+	// Sama pola ErrTaskIncomplete -- guard bisnis, bukan RBAC.
+	ErrTaskNotInSprint = errors.New("task must be in the project's currently active sprint before changing status")
 
 	// ErrCompletenessInvalid dikembalikan PUT /tasks/:id/completeness saat
 	// body bukan 'complete'/'incomplete'.
