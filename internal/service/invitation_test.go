@@ -250,6 +250,9 @@ type stubProjectMemberLinker struct {
 
 	addErr error
 	added  []recordedProjectMember
+
+	upsertErr error
+	upserted  []recordedProjectMember
 }
 
 func (l *stubProjectMemberLinker) GetWorkspaceID(_ context.Context, _ db.Executor, projectID string) (string, error) {
@@ -269,6 +272,14 @@ func (l *stubProjectMemberLinker) AddMember(_ context.Context, _ db.Executor, pr
 		return l.addErr
 	}
 	l.added = append(l.added, recordedProjectMember{projectID, workspaceID, userID, role, isScoped, addedBy, actorRole})
+	return nil
+}
+
+func (l *stubProjectMemberLinker) UpsertMember(_ context.Context, _ db.Executor, projectID, workspaceID, userID, role string, isScoped bool, addedBy, actorRole string) error {
+	if l.upsertErr != nil {
+		return l.upsertErr
+	}
+	l.upserted = append(l.upserted, recordedProjectMember{projectID, workspaceID, userID, role, isScoped, addedBy, actorRole})
 	return nil
 }
 
@@ -484,7 +495,13 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_ProjectManager_Set
 
 // TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProjectMember
 // -- varian di atas untuk role project-scoped (editor/approver/viewer):
-// AddMember ke project_members, BUKAN AddPM.
+// UpsertMember ke project_members, BUKAN AddPM. UpsertMember (bukan
+// AddMember) dipakai sejak susulan ditemukan user: target existing-user
+// bisa saja SUDAH punya baris project_members (mis. sebelumnya
+// ditambahkan PM sebagai project-scoped-only ke project yang sama) --
+// AddMember akan gagal "already exists" walau intent di jalur ini
+// selalu "pastikan role+scope ini", lihat
+// TestInvitationService_CreateBulkInvitations_ExistingUser_AlreadyProjectMember_Upserts.
 func TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProjectMember(t *testing.T) {
 	repo := &stubInvitationRepo{}
 	projects := &stubProjectPMAssigner{}
@@ -498,11 +515,41 @@ func TestInvitationService_CreateBulkInvitations_ExistingUser_Editor_AddsProject
 	if len(result.AddedDirectly) != 1 {
 		t.Fatalf("AddedDirectly = %v, want satu entri", result.AddedDirectly)
 	}
-	if len(pm.added) != 1 || pm.added[0].projectID != "proj-1" || pm.added[0].userID != "user-existing" || pm.added[0].role != "editor" || pm.added[0].isScoped {
-		t.Errorf("pm.added = %+v, want satu entri proj-1/user-existing/editor/isScoped=false", pm.added)
+	if len(pm.upserted) != 1 || pm.upserted[0].projectID != "proj-1" || pm.upserted[0].userID != "user-existing" || pm.upserted[0].role != "editor" || pm.upserted[0].isScoped {
+		t.Errorf("pm.upserted = %+v, want satu entri proj-1/user-existing/editor/isScoped=false", pm.upserted)
 	}
 	if len(projects.setPM) != 0 {
 		t.Errorf("projects.setPM = %+v, want kosong untuk role editor", projects.setPM)
+	}
+}
+
+// TestInvitationService_CreateBulkInvitations_ExistingUser_AlreadyProjectMember_Upserts
+// (susulan, ditemukan user: "menambahkan member dari member & roles AW ...
+// tapi gagal") -- target SUDAH punya baris project_members untuk project
+// ini (mis. sebelumnya ditambahkan PM sebagai project-scoped-only) --
+// AW mengundangnya lagi lewat "Undang Member ke Workspace" HARUS berhasil
+// (upsert role+scope), bukan gagal "project member already exists".
+// stubProjectMemberLinker.UpsertMember di sini SELALU sukses (fake tidak
+// mensimulasikan constraint asli) -- yang diuji adalah call routing (harus
+// lewat UpsertMember, bukan AddMember yang akan gagal di DB sungguhan).
+func TestInvitationService_CreateBulkInvitations_ExistingUser_AlreadyProjectMember_Upserts(t *testing.T) {
+	repo := &stubInvitationRepo{}
+	projects := &stubProjectPMAssigner{}
+	pm := &stubProjectMemberLinker{addErr: domain.ErrProjectMemberAlreadyExists}
+	svc := newTestInvitationService(repo, &stubInvitationEmailer{}, &fakeKeycloakClient{}, &stubExistingUserFinder{userID: "user-existing"}, &stubWorkspaceAssigner{}, projects, pm)
+
+	result, err := svc.CreateBulkInvitations(context.Background(), stubExecutor{}, []string{"sudah-project-member@x.com"}, "ws-1", "editor", "actor-1", "admin_workspace", "WS", "Actor", "proj-1", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("result.Errors = %+v, want kosong (UpsertMember, bukan AddMember yang gagal)", result.Errors)
+	}
+	if len(result.AddedDirectly) != 1 {
+		t.Fatalf("AddedDirectly = %v, want satu entri", result.AddedDirectly)
+	}
+	if len(pm.upserted) != 1 {
+		t.Errorf("pm.upserted = %+v, want satu entri (jalur ini tidak pernah memanggil AddMember)", pm.upserted)
 	}
 }
 

@@ -589,9 +589,14 @@ func TestRBACService_AssignRole_EmptyProjectID_SkipsProjectLogic(t *testing.T) {
 // setelah screenshot Fia/IT-Eldwin, "jika pm dan editor approver viewer,
 // hanya dikeluarkan dari project"): RemoveMember gains projectID. ---
 
-// Role project-scoped tapi cuma terkait SATU project -- hasilnya SAMA
-// seperti sebelumnya (dihapus total dari workspace_members), karena tidak
-// ada project lain yang jadi alasan dia tetap member workspace ini.
+// Role project-scoped tapi cuma terkait SATU project -- workspace_members
+// dihapus total (karena tidak ada project lain yang jadi alasan dia tetap
+// member workspace ini), TAPI baris project_members-nya WAJIB ikut
+// dilepas juga (IG-105, ditemukan user: sebelumnya baris ini nyangkut,
+// re-add ke project yang sama gagal "already exists" walau sudah
+// "dikeluarkan"). NotifyMemberRemoved TETAP tidak terpanggil -- notifikasi
+// itu khusus partial removal (member masih di workspace lewat project
+// lain), tidak relevan untuk full removal.
 func TestRBACService_RemoveMember_EditorSingleProjectTie_FullRemoval(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "editor"}
 	projectMembers := &stubProjectMembershipRepo{existingProjectIDs: []string{"proj-1"}}
@@ -603,8 +608,8 @@ func TestRBACService_RemoveMember_EditorSingleProjectTie_FullRemoval(t *testing.
 	if repo.removedUserID != "user-1" {
 		t.Error("repo.RemoveMember (DELETE workspace_members) harusnya tetap terpanggil -- cuma satu keterkaitan project")
 	}
-	if len(projectMembers.removedProjectIDs) != 0 {
-		t.Error("projectMembers.RemoveMember tidak boleh terpanggil terpisah -- DELETE workspace_members sudah cukup")
+	if len(projectMembers.removedProjectIDs) != 1 || projectMembers.removedProjectIDs[0] != "proj-1" {
+		t.Errorf("removedProjectIDs = %v, want [proj-1] -- project_members WAJIB ikut dilepas (IG-105)", projectMembers.removedProjectIDs)
 	}
 	if len(projectMembers.notifyMemberRemovedCalls) != 0 {
 		t.Error("NotifyMemberRemoved tidak boleh terpanggil -- full removal tidak butuh notifikasi terpisah")
@@ -634,8 +639,10 @@ func TestRBACService_RemoveMember_EditorMultiProjectTie_PartialOnly(t *testing.T
 	}
 }
 
-// PM cuma memimpin SATU project -- hasilnya SAMA seperti sebelumnya
-// (dihapus total dari workspace_members).
+// PM cuma memimpin SATU project -- workspace_members dihapus total, TAPI
+// baris project_managers-nya WAJIB ikut dilepas juga (IG-105, sama alasan
+// varian editor di atas). NotifyPMRemoved TETAP tidak terpanggil --
+// notifikasi itu khusus partial removal.
 func TestRBACService_RemoveMember_PMSingleProjectTie_FullRemoval(t *testing.T) {
 	repo := &stubWorkspaceMemberRepository{getRoleResult: "project_manager"}
 	projects := &stubProjectPMRepo{pmProjectsResult: []repository.PMProjectRef{{ID: "proj-1", Name: "Rilis Q4"}}}
@@ -647,8 +654,8 @@ func TestRBACService_RemoveMember_PMSingleProjectTie_FullRemoval(t *testing.T) {
 	if repo.removedUserID != "user-1" {
 		t.Error("repo.RemoveMember (DELETE workspace_members) harusnya tetap terpanggil -- cuma memimpin satu project")
 	}
-	if len(projects.removePMCalls) != 0 {
-		t.Error("RemovePM tidak boleh terpanggil terpisah -- DELETE workspace_members sudah cukup")
+	if len(projects.removePMCalls) != 1 || projects.removePMCalls[0] != "proj-1" {
+		t.Errorf("removePMCalls = %v, want [proj-1] -- project_managers WAJIB ikut dilepas (IG-105)", projects.removePMCalls)
 	}
 	if len(projects.notifyPMRemovedCalls) != 0 {
 		t.Error("NotifyPMRemoved tidak boleh terpanggil -- full removal tidak butuh notifikasi terpisah")
