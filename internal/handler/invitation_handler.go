@@ -297,6 +297,9 @@ func (h *InvitationHandler) CancelInvitation(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("INVITATION_NOT_FOUND",
 				"Undangan tidak ditemukan atau sudah diterima/dibatalkan.", nil))
 		}
+		if errors.Is(err, domain.ErrForbidden) {
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang mengelola undangan ini.", nil))
+		}
 		h.logger.Error("gagal membatalkan undangan", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal membatalkan undangan", nil))
 	}
@@ -306,7 +309,7 @@ func (h *InvitationHandler) CancelInvitation(c *fiber.Ctx) error {
 
 // ResendInvitation menangani POST /workspaces/:wsId/invitations/:invId/resend (S2-22).
 func (h *InvitationHandler) ResendInvitation(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		h.logger.Error("ResendInvitation dipanggil tanpa RequireRole -- actor belum diresolve")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
@@ -330,10 +333,13 @@ func (h *InvitationHandler) ResendInvitation(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memproses undangan", nil))
 	}
 
-	if err := h.invitations.ResendInvitation(c.Context(), exec, workspaceID, invitationID, workspaceName, inviterName); err != nil {
+	if err := h.invitations.ResendInvitation(c.Context(), exec, workspaceID, invitationID, actorUserID, actorRole, workspaceName, inviterName); err != nil {
 		if errors.Is(err, domain.ErrInvitationNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(response.Error("INVITATION_NOT_FOUND",
 				"Undangan tidak ditemukan atau sudah diterima/dibatalkan.", nil))
+		}
+		if errors.Is(err, domain.ErrForbidden) {
+			return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang mengelola undangan ini.", nil))
 		}
 		h.logger.Error("gagal mengirim ulang undangan", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengirim ulang undangan", nil))

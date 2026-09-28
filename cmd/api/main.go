@@ -547,8 +547,12 @@ func run() error {
 	// Data Retention: tautan unduhan ekspor dari email, TANPA jwtAuth/dbCtx
 	// sama pola AcceptInvitation -- otorisasi lewat kepemilikan token.
 	v1.Get("/retention-exports/:token", retentionHandler.DownloadExport)
-	v1.Delete("/workspaces/:wsId/invitations/:invId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.CancelInvitation)
-	v1.Post("/workspaces/:wsId/invitations/:invId/resend", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), invitationHandler.ResendInvitation)
+	// Cancel/Resend TANPA RequireRole (susulan, ditemukan user: PM tidak
+	// bisa mengelola undangan project-scoped-nya sendiri) -- admin_workspace
+	// ATAU PM-of-project ditegakkan di service (InvitationService.
+	// authorizeManage), sama pola project routes lain sesi ini.
+	v1.Delete("/workspaces/:wsId/invitations/:invId", jwtAuth, dbCtx, invitationHandler.CancelInvitation)
+	v1.Post("/workspaces/:wsId/invitations/:invId/resend", jwtAuth, dbCtx, invitationHandler.ResendInvitation)
 
 	// S3-02/03/04, US-007. RequirePlatformRole cuma gerbang kasar (PA atau
 	// GA lolos); scoping GA ke grup target ada di OrganizationService --
