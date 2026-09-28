@@ -161,10 +161,30 @@ type fakeTaskRules struct{}
 func (f *fakeTaskRules) Evaluate(_ context.Context, _ db.Executor, _, _ string, _ *repository.Task, _, _ string) {
 }
 
+// fakeTaskSprints -- permisif secara default (SELALU "active" apa pun
+// sprintID-nya) supaya test lama yang tidak berkaitan dengan
+// domain.ErrTaskNotInSprint tidak ikut kena guard baru ini -- setiap
+// fixture task yang keluar dari BACKLOG tetap WAJIB mengisi SprintID
+// (nil = tidak ada sprint untuk dicek sama sekali, langsung ditolak
+// SEBELUM fake ini sempat dipanggil).
+type fakeTaskSprints struct{}
+
+func (f *fakeTaskSprints) Get(_ context.Context, _ db.Executor, sprintID string) (*repository.Sprint, error) {
+	return &repository.Sprint{ID: sprintID, Status: "active"}, nil
+}
+
+// fakeTaskSprintsWithStatus -- variasi terkendali, dipakai test yang perlu
+// sprint BUKAN 'active' (mis. 'done').
+type fakeTaskSprintsWithStatus struct{ status string }
+
+func (f *fakeTaskSprintsWithStatus) Get(_ context.Context, _ db.Executor, sprintID string) (*repository.Sprint, error) {
+	return &repository.Sprint{ID: sprintID, Status: f.status}, nil
+}
+
 func newTaskServiceForTest(repo *fakeTaskRepo, statuses map[string]*repository.CustomStatus) *TaskService {
 	return NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
 		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
-		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{})
+		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
 }
 
 func TestTaskService_Reorder_MidpointBetweenNeighbors(t *testing.T) {
@@ -200,10 +220,11 @@ func TestTaskService_BulkSetStatus_PartialFailure(t *testing.T) {
 		"done-status":    {ID: "done-status", Name: "DONE"},
 		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
 	}
+	sprintID := "s1"
 	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
-		"ok1":  {ID: "ok1", ProjectID: "p1", StatusID: "backlog-status"},
-		"ok2":  {ID: "ok2", ProjectID: "p1", StatusID: "backlog-status"},
-		"real": {ID: "real", ProjectID: "p1", StatusID: "backlog-status"},
+		"ok1":  {ID: "ok1", ProjectID: "p1", StatusID: "backlog-status", SprintID: &sprintID},
+		"ok2":  {ID: "ok2", ProjectID: "p1", StatusID: "backlog-status", SprintID: &sprintID},
+		"real": {ID: "real", ProjectID: "p1", StatusID: "backlog-status", SprintID: &sprintID},
 	}}
 	svc := newTaskServiceForTest(repo, statuses)
 	results := svc.BulkSetStatus(context.Background(), nil, []string{"ok1", "missing", "ok2"}, "done-status", []string{"pic1"}, "user1", "member")
@@ -239,8 +260,9 @@ func TestTaskService_AuditUsesResolvedWorkspaceRole(t *testing.T) {
 		"done-status":    {ID: "done-status", Name: "DONE"},
 		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
 	}
+	sprintID := "s1"
 	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
-		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status"},
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", SprintID: &sprintID},
 	}}
 	svc := newTaskServiceForTest(repo, statuses)
 	// actorRole="" meniru parameter kosong yang benar-benar dikirim handler
@@ -251,5 +273,74 @@ func TestTaskService_AuditUsesResolvedWorkspaceRole(t *testing.T) {
 	}
 	if repo.setStatusAuditRole != "project_manager" {
 		t.Fatalf("expected audit actorRole 'project_manager' (resolved), got %q", repo.setStatusAuditRole)
+	}
+}
+
+// TestTaskService_SetStatus_NoSprint_Rejected -- susulan domain.
+// ErrTaskNotInSprint (diminta user: "task board dengan status backlog
+// yang bukan sprint backlog dan sprint berjalan tidak dapat dipindahkan
+// statusnya") -- task BACKLOG tanpa sprint_id sama sekali tidak boleh
+// pindah ke status lain SELAIN BLOCKED.
+func TestTaskService_SetStatus_NoSprint_Rejected(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"done-status":    {ID: "done-status", Name: "DONE"},
+		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
+	}
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", StatusName: "BACKLOG", SprintID: nil},
+	}}
+	svc := NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
+		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
+
+	err := svc.SetStatus(context.Background(), nil, "t1", "done-status", []string{"pic1"}, "user1", "member")
+	if !errors.Is(err, domain.ErrTaskNotInSprint) {
+		t.Errorf("err = %v, want domain.ErrTaskNotInSprint", err)
+	}
+}
+
+// TestTaskService_SetStatus_NoSprint_AllowsBlocked -- carve-out yang sama
+// seperti ErrTaskIncomplete: menandai BLOCKED tidak butuh sprint sama
+// sekali, konsisten dengan guard completeness di atasnya.
+func TestTaskService_SetStatus_NoSprint_AllowsBlocked(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"blocked-status": {ID: "blocked-status", Name: "BLOCKED"},
+		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
+	}
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", StatusName: "BACKLOG", SprintID: nil},
+	}}
+	svc := NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
+		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
+
+	if err := svc.SetStatus(context.Background(), nil, "t1", "blocked-status", []string{"pic1"}, "user1", "member"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestTaskService_SetStatus_DoneSprint_Rejected -- task masih tertaut
+// sprint yang statusnya SUDAH 'done' (jarang sekali kejadian nyata --
+// SprintService.UnassignIncompleteTasks otomatis mengosongkan sprint_id
+// task non-DONE begitu sprint ditutup, tapi guard ini tetap ditulis
+// eksplisit untuk konsistensi + jaga-jaga race) juga ditolak, sama seperti
+// tanpa sprint sama sekali.
+func TestTaskService_SetStatus_DoneSprint_Rejected(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"done-status":    {ID: "done-status", Name: "DONE"},
+		"backlog-status": {ID: "backlog-status", Name: "BACKLOG"},
+	}
+	sprintID := "s1"
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", StatusName: "BACKLOG", SprintID: &sprintID},
+	}}
+	doneSprints := &fakeTaskSprintsWithStatus{status: "done"}
+	svc := NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
+		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, doneSprints)
+
+	err := svc.SetStatus(context.Background(), nil, "t1", "done-status", []string{"pic1"}, "user1", "member")
+	if !errors.Is(err, domain.ErrTaskNotInSprint) {
+		t.Errorf("err = %v, want domain.ErrTaskNotInSprint", err)
 	}
 }
