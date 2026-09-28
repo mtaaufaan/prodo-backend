@@ -129,7 +129,7 @@ type fakeTaskStatuses struct {
 	byID map[string]*repository.CustomStatus
 }
 
-func (f *fakeTaskStatuses) GetBacklogStatus(_ context.Context, _ db.Executor, _ string) (*repository.CustomStatus, error) {
+func (f *fakeTaskStatuses) GetBacklogStatus(_ context.Context, _ db.Executor, _, _ string) (*repository.CustomStatus, error) {
 	return nil, nil
 }
 func (f *fakeTaskStatuses) Get(_ context.Context, _ db.Executor, statusID string) (*repository.CustomStatus, error) {
@@ -158,7 +158,7 @@ func (f *fakeTaskSessions) NotifyRegression(_ context.Context, _ db.Executor, _,
 
 type fakeTaskRules struct{}
 
-func (f *fakeTaskRules) Evaluate(_ context.Context, _ db.Executor, _, _ string, _ *repository.Task, _, _ string) {
+func (f *fakeTaskRules) Evaluate(_ context.Context, _ db.Executor, _, _, _ string, _ *repository.Task, _, _ string) {
 }
 
 // fakeTaskSprints -- permisif secara default (SELALU "active" apa pun

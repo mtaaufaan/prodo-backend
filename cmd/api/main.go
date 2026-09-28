@@ -252,9 +252,9 @@ func run() error {
 	groupPerformanceSvc := service.NewGroupPerformanceService(groupPerformanceRepo, organizationRepo, organizationRepo)
 	groupLocaleSvc := service.NewGroupLocaleService(groupRepo, organizationRepo)
 	groupSummarySvc := service.NewGroupSummaryService(organizationRepo, groupAuditRepo, retentionRepo, invitationRepo, organizationRepo)
-	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, accountRepo, invitationSvc, logger)
+	projectSvc := service.NewProjectService(projectRepo, organizationSvc, rbacSvc, webhookSvc, accountRepo, invitationSvc, customStatusRepo, logger)
 	ruleSvc := service.NewRuleService(ruleRepo, rbacSvc, customStatusRepo, projectRepo, accountRepo, emailSvc, taskRepo)
-	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc, ruleSvc)
+	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc, ruleSvc, projectRepo)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc, sprintRepo)
 	ruleSvc.SetTaskActions(taskSvc)
@@ -472,6 +472,14 @@ func run() error {
 	v1.Post("/statuses/:id/move", jwtAuth, dbCtx, customStatusHandler.Move)
 	v1.Post("/statuses/:id/undefine", jwtAuth, dbCtx, customStatusHandler.Undefine)
 	v1.Post("/statuses/:id/restore", jwtAuth, dbCtx, customStatusHandler.Restore)
+	// Track S5B, US-019 ("PM Custom Status.dc.html"/"PM Add Status.dc.html")
+	// -- CRUD status level project (PM-of-project + AW), sama pola project
+	// routes lain (members/sprints di atas): tanpa RequireRole, otorisasi
+	// presisi di service (authorizeScope). Mutasi selain Create reuse
+	// endpoint /statuses/:id/* di atas apa adanya (statusID sudah cukup
+	// meresolve scope-nya sendiri lewat CustomStatusRepository.Get).
+	v1.Get("/projects/:id/statuses", jwtAuth, dbCtx, customStatusHandler.ListForProject)
+	v1.Post("/projects/:id/statuses", jwtAuth, dbCtx, customStatusHandler.CreateForProject)
 	// S4W-14, US-054 ("AW Webhook.dc.html"+"AW Add Webhook.dc.html") -- reuse
 	// WebhookService (Track S4G), AW-only (ditegakkan service, sama pola
 	// customStatusHandler.Create -- /webhooks/:webhookId/* tidak punya :wsId).
@@ -503,6 +511,12 @@ func run() error {
 	v1.Get("/workspaces/:wsId/rules/executions", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), ruleHandler.ListExecutions)
 	v1.Patch("/rules/:id/toggle-active", jwtAuth, dbCtx, ruleHandler.ToggleActive)
 	v1.Delete("/rules/:id", jwtAuth, dbCtx, ruleHandler.Delete)
+	// Track S5B ("Rule Builder.dc.html") -- rule level project (PM+AW),
+	// tanpa RequireRole sama pola project routes lain (sprints/statuses di
+	// atas), otorisasi presisi di service (authorizeScope).
+	v1.Get("/projects/:id/rules", jwtAuth, dbCtx, ruleHandler.ListForProject)
+	v1.Post("/projects/:id/rules", jwtAuth, dbCtx, ruleHandler.CreateForProject)
+	v1.Get("/projects/:id/rules/executions", jwtAuth, dbCtx, ruleHandler.ListExecutionsForProject)
 	// S2-19/21/22, US-006. AcceptInvitation (S2-20) SENGAJA tanpa jwtAuth/
 	// dbCtx -- lihat komentar handler.InvitationHandler.AcceptInvitation.
 	// S4W-01: rate-limit 3x/menit PER-ROUTE, sama pola storage-allocation/

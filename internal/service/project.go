@@ -56,6 +56,16 @@ type projectPMInviter interface {
 	GetWorkspaceName(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 }
 
+// projectStatusCloner -- reuse CustomStatusRepository.CloneForProject
+// (Track S5B, US-019) -- dipanggil Create SETELAH project baru dibuat,
+// menyalin status AKTIF workspace pemilik project ini SAAT INI ke scope
+// project baru ("berdiri sendiri" sejak awal, "PM Custom Status.dc.html").
+// nil diterima (test lama yang tidak butuh status) -- Create skip
+// pemanggilan kalau nil, sama pola projectWebhookDispatcher yang boleh nil.
+type projectStatusCloner interface {
+	CloneForProject(ctx context.Context, exec db.Executor, workspaceID, projectID string) error
+}
+
 // projectWebhookDispatcher -- WebhookService.Dispatch (Track S4G + S4W-14),
 // 3 dari 10 event desain "GA/AW Add Webhook.dc.html" yang punya trigger
 // nyata sekarang -- lihat implementation_gaps.md IG-44. Kegagalan Dispatch
@@ -76,11 +86,12 @@ type ProjectService struct {
 	webhooks projectWebhookDispatcher
 	contacts projectUserFinder
 	invites  projectPMInviter
+	statuses projectStatusCloner
 	logger   *zap.Logger
 }
 
-func NewProjectService(repo projectRepository, orgs orgAuthorizer, rbac projectRoleChecker, webhooks projectWebhookDispatcher, contacts projectUserFinder, invites projectPMInviter, logger *zap.Logger) *ProjectService {
-	return &ProjectService{repo: repo, orgs: orgs, rbac: rbac, webhooks: webhooks, contacts: contacts, invites: invites, logger: logger}
+func NewProjectService(repo projectRepository, orgs orgAuthorizer, rbac projectRoleChecker, webhooks projectWebhookDispatcher, contacts projectUserFinder, invites projectPMInviter, statuses projectStatusCloner, logger *zap.Logger) *ProjectService {
+	return &ProjectService{repo: repo, orgs: orgs, rbac: rbac, webhooks: webhooks, contacts: contacts, invites: invites, statuses: statuses, logger: logger}
 }
 
 // dispatchWebhook -- best-effort: kegagalan HANYA di-log, TIDAK PERNAH
@@ -257,6 +268,15 @@ func (s *ProjectService) Create(ctx context.Context, exec db.Executor, workspace
 	p, err := s.repo.Create(ctx, exec, workspaceID, name, code, actorID, actorRole)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
+	}
+
+	// CloneForProject (Track S5B, US-019) -- project baru langsung punya
+	// salinan status sendiri sejak lahir, konsisten "PM Custom
+	// Status.dc.html" ("menyalin template workspace saat project dibuat").
+	if s.statuses != nil {
+		if err := s.statuses.CloneForProject(ctx, exec, workspaceID, p.ID); err != nil {
+			return nil, fmt.Errorf("service.Create: %w", err)
+		}
 	}
 
 	if pm.ResolvedUserID != "" {

@@ -18,8 +18,8 @@ import (
 )
 
 // RuleHandler -- Rule Automation (S4W-10/12, EPIC 7, desain "AW Rule
-// Automation.dc.html"+"AW Add Rule.dc.html"). AW-only, level workspace
-// saja -- lihat komentar package service.
+// Automation.dc.html"+"AW Add Rule.dc.html", level workspace; scope
+// project Track S5B, "Rule Builder.dc.html", PM+AW).
 type RuleHandler struct {
 	rules  *service.RuleService
 	logger *zap.Logger
@@ -113,6 +113,99 @@ func (h *RuleHandler) Create(c *fiber.Ctx) error {
 		return h.mapError(c, err, "Gagal membuat rule")
 	}
 	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": id}))
+}
+
+// ListForProject menangani GET /projects/:id/rules (Track S5B, "Rule
+// Builder.dc.html", tab "RULE MANAGEMENT").
+func (h *RuleHandler) ListForProject(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("RuleHandler.ListForProject dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("RuleHandler.ListForProject dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	list, err := h.rules.ListForProject(c.Context(), exec, projectID, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil daftar rule")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		data[i] = ruleJSON(&list[i])
+	}
+	return c.JSON(response.Success(data))
+}
+
+// CreateForProject menangani POST /projects/:id/rules (Track S5B).
+func (h *RuleHandler) CreateForProject(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("RuleHandler.CreateForProject dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("RuleHandler.CreateForProject dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	var body createRuleRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+
+	var condition *service.RuleConditionInput
+	if body.Condition != nil {
+		condition = &service.RuleConditionInput{
+			Type: body.Condition.Type, ProjectID: body.Condition.ProjectID, SprintID: body.Condition.SprintID,
+			Priority: body.Condition.Priority, UserID: body.Condition.UserID,
+		}
+	}
+
+	id, err := h.rules.CreateForProject(c.Context(), exec, projectID, body.Name,
+		service.RuleTriggerInput{Event: body.Trigger.Event, StatusID: body.Trigger.StatusID, Days: body.Trigger.Days},
+		condition,
+		service.RuleActionInput{Type: body.Action.Type, StatusID: body.Action.StatusID, TargetUserID: body.Action.TargetUserID},
+		actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal membuat rule")
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"id": id}))
+}
+
+// ListExecutionsForProject menangani GET /projects/:id/rules/executions
+// (Track S5B, tab "EXECUTION LOG").
+func (h *RuleHandler) ListExecutionsForProject(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("RuleHandler.ListExecutionsForProject dipanggil tanpa RequireRole -- actor belum diresolve")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("RuleHandler.ListExecutionsForProject dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	list, err := h.rules.ListExecutionsForProject(c.Context(), exec, projectID, c.Query("status"), actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil log eksekusi")
+	}
+	if c.Query("export") == "csv" {
+		return h.writeExecutionsCSV(c, list)
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		data[i] = ruleExecutionJSON(&list[i])
+	}
+	return c.JSON(response.Success(data))
 }
 
 type toggleRuleActiveRequest struct {
@@ -265,7 +358,7 @@ func (h *RuleHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 	case errors.Is(err, domain.ErrRuleNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Rule tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrForbidden):
-		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas workspace ini.", nil))
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang mengelola rule ini.", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))

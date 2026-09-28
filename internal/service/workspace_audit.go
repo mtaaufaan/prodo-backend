@@ -25,7 +25,7 @@ type workspaceAuditRepository interface {
 // Workspace, sesuai instruksi kickoff "gabung feed rule execution" --
 // SUMBER TERPISAH (automation_rule_executions), bukan baris audit_logs.
 type workspaceAuditRuleExecutions interface {
-	ListExecutions(ctx context.Context, exec db.Executor, workspaceID, statusFilter string) ([]repository.RuleExecution, error)
+	ListExecutions(ctx context.Context, exec db.Executor, scopeType, scopeID, statusFilter string) ([]repository.RuleExecution, error)
 }
 
 // WorkspaceAuditCSVExportLimit -- sama batas GroupAuditService.CSVExportLimit.
@@ -127,7 +127,7 @@ func (s *WorkspaceAuditService) RuleExecutions(ctx context.Context, exec db.Exec
 	if err := s.authorizeWorkspace(ctx, exec, workspaceID, actorID, actorRole); err != nil {
 		return nil, err
 	}
-	list, err := s.rules.ListExecutions(ctx, exec, workspaceID, "")
+	list, err := s.rules.ListExecutions(ctx, exec, "workspace", workspaceID, "")
 	if err != nil {
 		return nil, fmt.Errorf("service.RuleExecutions: %w", err)
 	}

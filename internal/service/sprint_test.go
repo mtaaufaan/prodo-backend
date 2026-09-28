@@ -115,7 +115,7 @@ func (f *fakeSprintProjects) GetWorkspaceID(_ context.Context, _ db.Executor, _ 
 
 type fakeSprintStatuses struct{ list []repository.CustomStatus }
 
-func (f *fakeSprintStatuses) ListForWorkspace(_ context.Context, _ db.Executor, _ string) ([]repository.CustomStatus, error) {
+func (f *fakeSprintStatuses) ListForScope(_ context.Context, _ db.Executor, _, _ string) ([]repository.CustomStatus, error) {
 	return f.list, nil
 }
 
