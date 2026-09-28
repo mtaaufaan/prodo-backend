@@ -28,8 +28,8 @@ type fakeRuleRepo struct {
 	}
 }
 
-func (f *fakeRuleRepo) Create(_ context.Context, _ db.Executor, workspaceID, name string, _, _, _ []byte, _, _ string) (string, error) {
-	f.createCalls = append(f.createCalls, struct{ workspaceID, name string }{workspaceID, name})
+func (f *fakeRuleRepo) Create(_ context.Context, _ db.Executor, _, scopeID, name string, _, _, _ []byte, _, _, _ string) (string, error) {
+	f.createCalls = append(f.createCalls, struct{ workspaceID, name string }{scopeID, name})
 	return "new-rule", nil
 }
 
@@ -41,19 +41,19 @@ func (f *fakeRuleRepo) Get(_ context.Context, _ db.Executor, ruleID string) (*re
 	return rl, nil
 }
 
-func (f *fakeRuleRepo) ListForWorkspace(_ context.Context, _ db.Executor, _ string) ([]repository.Rule, error) {
+func (f *fakeRuleRepo) ListForScope(_ context.Context, _ db.Executor, _, _ string) ([]repository.Rule, error) {
 	return nil, nil
 }
-func (f *fakeRuleRepo) SetActive(_ context.Context, _ db.Executor, _ string, _ bool, _, _ string, _ *repository.Rule) error {
+func (f *fakeRuleRepo) SetActive(_ context.Context, _ db.Executor, _ string, _ bool, _, _, _ string, _ *repository.Rule) error {
 	return nil
 }
-func (f *fakeRuleRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _ string, _ *repository.Rule) error {
+func (f *fakeRuleRepo) SoftDelete(_ context.Context, _ db.Executor, _, _, _, _ string, _ *repository.Rule) error {
 	return nil
 }
 func (f *fakeRuleRepo) DeactivateForStatus(_ context.Context, _ db.Executor, _, _, _, _ string) ([]repository.Rule, error) {
 	return f.deactivateResult, nil
 }
-func (f *fakeRuleRepo) ListExecutions(_ context.Context, _ db.Executor, _, _ string) ([]repository.RuleExecution, error) {
+func (f *fakeRuleRepo) ListExecutions(_ context.Context, _ db.Executor, _, _, _ string) ([]repository.RuleExecution, error) {
 	return nil, nil
 }
 func (f *fakeRuleRepo) ListActiveForEvent(_ context.Context, _ db.Executor, _, _, _ string) ([]repository.Rule, error) {
@@ -91,10 +91,17 @@ func (f *fakeRuleStatusChecker) Get(_ context.Context, _ db.Executor, statusID s
 	return s, nil
 }
 
-type fakeRuleProjectResolver struct{ workspaceID string }
+type fakeRuleProjectResolver struct {
+	workspaceID string
+	isPM        bool
+}
 
 func (f *fakeRuleProjectResolver) GetWorkspaceID(_ context.Context, _ db.Executor, _ string) (string, error) {
 	return f.workspaceID, nil
+}
+
+func (f *fakeRuleProjectResolver) IsPM(_ context.Context, _ db.Executor, _, _ string) (bool, error) {
+	return f.isPM, nil
 }
 
 type fakeRuleUserContactFinder struct {
@@ -145,6 +152,9 @@ type fakeRuleDueTaskLister struct {
 }
 
 func (f *fakeRuleDueTaskLister) ListDueForWorkspace(_ context.Context, _ db.Executor, _ string, _ int) ([]repository.Task, error) {
+	return f.tasks, nil
+}
+func (f *fakeRuleDueTaskLister) ListDueForProject(_ context.Context, _ db.Executor, _ string, _ int) ([]repository.Task, error) {
 	return f.tasks, nil
 }
 
@@ -321,7 +331,7 @@ func TestRuleService_Evaluate_ConditionMismatch_NoExecutionRecorded(t *testing.T
 	svc.SetTaskActions(actions)
 
 	task := &repository.Task{ID: "task-1", Priority: "low"}
-	svc.Evaluate(context.Background(), stubExecutor{}, "ws-1", "task_created", task, "user-1", "member")
+	svc.Evaluate(context.Background(), stubExecutor{}, "workspace", "ws-1", "task_created", task, "user-1", "member")
 
 	if len(repo.executionCalls) != 0 {
 		t.Errorf("executionCalls = %v, want kosong (condition tidak cocok)", repo.executionCalls)
@@ -341,7 +351,7 @@ func TestRuleService_Evaluate_ActionSuccess_RecordsCompleted(t *testing.T) {
 	svc.SetTaskActions(actions)
 
 	task := &repository.Task{ID: "task-1"}
-	svc.Evaluate(context.Background(), stubExecutor{}, "ws-1", "task_created", task, "user-1", "member")
+	svc.Evaluate(context.Background(), stubExecutor{}, "workspace", "ws-1", "task_created", task, "user-1", "member")
 
 	if len(actions.assignCalls) != 1 || actions.assignCalls[0].taskID != "task-1" || actions.assignCalls[0].userID != "user-2" {
 		t.Errorf("assignCalls = %+v, want satu entri task-1/user-2", actions.assignCalls)
@@ -354,14 +364,19 @@ func TestRuleService_Evaluate_ActionSuccess_RecordsCompleted(t *testing.T) {
 func TestRuleService_Evaluate_ActionFailure_RecordsFailed(t *testing.T) {
 	repo := &fakeRuleRepo{activeForEvent: []repository.Rule{{
 		ID: "r1", CreatedBy: "aw-1",
-		ActionConfig: mustMarshal(t, ruleActionConfig{Type: "change_status", StatusID: "s-done"}),
+		TriggerConfig: mustMarshal(t, ruleTriggerConfig{Event: "status_changed", StatusID: "s-done"}),
+		ActionConfig:  mustMarshal(t, ruleActionConfig{Type: "change_status", StatusID: "s-done"}),
 	}}}
+	// ruleStatusMatches (Track S5B, status-matching by nama) -- resolve
+	// status_id trigger "s-done" -> nama "DONE", dibandingkan ke
+	// task.StatusName di bawah.
+	statuses := map[string]*repository.CustomStatus{"s-done": {ID: "s-done", Name: "DONE"}}
 	actions := &fakeRuleTaskActions{setStatusErr: domain.ErrPicRequired}
-	svc := NewRuleService(repo, &fakeRuleRoleChecker{}, &fakeRuleStatusChecker{}, &fakeRuleProjectResolver{}, &fakeRuleUserContactFinder{}, nil, nil)
+	svc := NewRuleService(repo, &fakeRuleRoleChecker{}, &fakeRuleStatusChecker{byID: statuses}, &fakeRuleProjectResolver{}, &fakeRuleUserContactFinder{}, nil, nil)
 	svc.SetTaskActions(actions)
 
-	task := &repository.Task{ID: "task-1"}
-	svc.Evaluate(context.Background(), stubExecutor{}, "ws-1", "status_changed", task, "user-1", "member")
+	task := &repository.Task{ID: "task-1", StatusName: "DONE"}
+	svc.Evaluate(context.Background(), stubExecutor{}, "workspace", "ws-1", "status_changed", task, "user-1", "member")
 
 	if len(repo.executionCalls) != 1 || repo.executionCalls[0].status != "failed" {
 		t.Errorf("executionCalls = %+v, want satu entri status=failed", repo.executionCalls)

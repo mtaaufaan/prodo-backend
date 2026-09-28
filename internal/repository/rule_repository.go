@@ -1,14 +1,12 @@
 // Package repository -- RuleRepository (Rule Automation, S4W-10/12, EPIC 7,
-// desain "AW Rule Automation.dc.html"+"AW Add Rule.dc.html"). Tabel
+// desain "AW Rule Automation.dc.html"+"AW Add Rule.dc.html"; scope project
+// Track S5B, "Rule Builder.dc.html", US-019 berdampingan). Tabel
 // `automation_rules`+`automation_rule_executions` (migrasi 20261021090000)
 // -- lihat komentar migrasi untuk penyimpangan skema (deleted_at/
-// inactive_reason ditambah, status VARCHAR bukan enum job_status).
-//
-// Cakupan HANYA scope_type='workspace' -- rule level project (PM) adalah
-// track terpisah di luar Track S4W (dikonfirmasi user, pola sama batas
-// cakupan Custom Status/Cooldown Mention/Webhook sebelumnya). Kolom
-// scope_type tetap disimpan sesuai skema untuk kompatibilitas RLS/masa
-// depan, tapi Create di sini SELALU menulis 'workspace'.
+// inactive_reason ditambah, status VARCHAR bukan enum job_status). RLS
+// policy sudah mendukung scope_type='project' sejak migrasi itu (pola
+// PERSIS custom_statuses) -- generalisasi Track S5B ini murni application
+// layer, tidak ada migrasi skema baru.
 package repository
 
 import (
@@ -67,14 +65,17 @@ type RuleRepository struct{}
 
 func NewRuleRepository() *RuleRepository { return &RuleRepository{} }
 
-// Create -- scope_type SELALU 'workspace' (lihat komentar package).
-func (r *RuleRepository) Create(ctx context.Context, exec db.Executor, workspaceID, name string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole string) (string, error) {
+// Create -- scopeType salah satu "workspace"/"project" (Track S5B).
+// workspaceID dipakai audit SAJA (workspace pemilik project ini kalau
+// scopeType="project", BUKAN scopeID -- lihat RuleService.resolveWorkspaceID,
+// pola sama insertCustomStatusAudit).
+func (r *RuleRepository) Create(ctx context.Context, exec db.Executor, scopeType, scopeID, name string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole, workspaceID string) (string, error) {
 	var id string
 	err := exec.QueryRow(ctx, `
 		INSERT INTO automation_rules (scope_type, scope_id, name, trigger_config, condition_config, action_config, created_by)
-		VALUES ('workspace', $1, $2, $3, $4, $5, $6)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id
-	`, workspaceID, name, triggerConfig, conditionConfig, actionConfig, actorID).Scan(&id)
+	`, scopeType, scopeID, name, triggerConfig, conditionConfig, actionConfig, actorID).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
@@ -103,20 +104,21 @@ func (r *RuleRepository) Get(ctx context.Context, exec db.Executor, ruleID strin
 	return &rl, nil
 }
 
-// ListForWorkspace -- daftar rule untuk tab "Rule Aktif" + stats bar.
-func (r *RuleRepository) ListForWorkspace(ctx context.Context, exec db.Executor, workspaceID string) ([]Rule, error) {
+// ListForScope -- daftar rule untuk tab "Rule Aktif" + stats bar, scopeType
+// "workspace" (AW) atau "project" (Track S5B, PM).
+func (r *RuleRepository) ListForScope(ctx context.Context, exec db.Executor, scopeType, scopeID string) ([]Rule, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT ar.id, ar.scope_type, ar.scope_id, ar.name, ar.trigger_config, ar.condition_config, ar.action_config,
 		       ar.is_active, ar.inactive_reason, ar.is_template, ar.created_by, ar.created_at, ar.updated_at,
 		       COUNT(e.id)
 		FROM automation_rules ar
 		LEFT JOIN automation_rule_executions e ON e.rule_id = ar.id
-		WHERE ar.scope_type = 'workspace' AND ar.scope_id = $1 AND ar.deleted_at IS NULL
+		WHERE ar.scope_type = $1 AND ar.scope_id = $2 AND ar.deleted_at IS NULL
 		GROUP BY ar.id
 		ORDER BY ar.created_at DESC
-	`, workspaceID)
+	`, scopeType, scopeID)
 	if err != nil {
-		return nil, fmt.Errorf("repository.ListForWorkspace: %w", err)
+		return nil, fmt.Errorf("repository.ListForScope: %w", err)
 	}
 	defer rows.Close()
 
@@ -125,14 +127,14 @@ func (r *RuleRepository) ListForWorkspace(ctx context.Context, exec db.Executor,
 		var rl Rule
 		if err := rows.Scan(&rl.ID, &rl.ScopeType, &rl.ScopeID, &rl.Name, &rl.TriggerConfig, &rl.ConditionConfig, &rl.ActionConfig,
 			&rl.IsActive, &rl.InactiveReason, &rl.IsTemplate, &rl.CreatedBy, &rl.CreatedAt, &rl.UpdatedAt, &rl.Runs); err != nil {
-			return nil, fmt.Errorf("repository.ListForWorkspace: scan: %w", err)
+			return nil, fmt.Errorf("repository.ListForScope: scan: %w", err)
 		}
 		list = append(list, rl)
 	}
 	return list, rows.Err()
 }
 
-func (r *RuleRepository) SetActive(ctx context.Context, exec db.Executor, ruleID string, active bool, actorID, actorRole string, before *Rule) error {
+func (r *RuleRepository) SetActive(ctx context.Context, exec db.Executor, ruleID string, active bool, actorID, actorRole, workspaceID string, before *Rule) error {
 	tag, err := exec.Exec(ctx, `
 		UPDATE automation_rules SET is_active = $2, inactive_reason = NULL, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
@@ -147,7 +149,7 @@ func (r *RuleRepository) SetActive(ctx context.Context, exec db.Executor, ruleID
 	if !active {
 		action = "rule.deactivated"
 	}
-	if err := insertRuleAudit(ctx, exec, actorID, actorRole, action, ruleID, before.ScopeID, before.Name, nil); err != nil {
+	if err := insertRuleAudit(ctx, exec, actorID, actorRole, action, ruleID, workspaceID, before.Name, nil); err != nil {
 		return fmt.Errorf("repository.SetActive: %w", err)
 	}
 	return nil
@@ -156,7 +158,7 @@ func (r *RuleRepository) SetActive(ctx context.Context, exec db.Executor, ruleID
 // SoftDelete -- "HAPUS PERMANEN" di desain, tapi kebijakan standing project
 // ini soft-delete di semua tabel entitas (lihat komentar migrasi) -- UI
 // tetap terlihat permanen ke user (tidak ada tombol restore di desain).
-func (r *RuleRepository) SoftDelete(ctx context.Context, exec db.Executor, ruleID, actorID, actorRole string, before *Rule) error {
+func (r *RuleRepository) SoftDelete(ctx context.Context, exec db.Executor, ruleID, actorID, actorRole, workspaceID string, before *Rule) error {
 	tag, err := exec.Exec(ctx, `UPDATE automation_rules SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, ruleID)
 	if err != nil {
 		return fmt.Errorf("repository.SoftDelete: %w", err)
@@ -164,7 +166,7 @@ func (r *RuleRepository) SoftDelete(ctx context.Context, exec db.Executor, ruleI
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SoftDelete: %w", domain.ErrRuleNotFound)
 	}
-	if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.deleted", ruleID, before.ScopeID, before.Name, nil); err != nil {
+	if err := insertRuleAudit(ctx, exec, actorID, actorRole, "rule.deleted", ruleID, workspaceID, before.Name, nil); err != nil {
 		return fmt.Errorf("repository.SoftDelete: %w", err)
 	}
 	return nil
@@ -211,22 +213,20 @@ func (r *RuleRepository) DeactivateForStatus(ctx context.Context, exec db.Execut
 	return affected, nil
 }
 
-// ListExecutions -- tab "Log Eksekusi". Kosong sampai S4W-11 (execution
-// engine) benar-benar menulis baris ke automation_rule_executions -- method
-// ini tetap dibangun penuh sekarang supaya FE punya endpoint nyata untuk
-// tab-nya, bukan endpoint palsu yang menyusul.
-func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, workspaceID, statusFilter string) ([]RuleExecution, error) {
+// ListExecutions -- tab "Log Eksekusi", scopeType "workspace"/"project"
+// (Track S5B).
+func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, scopeType, scopeID, statusFilter string) ([]RuleExecution, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT e.id, e.rule_id, ar.name, e.trigger_event, e.triggered_by, e.executed_at, e.status, e.action_taken, e.error_message,
 		       t.task_code, t.title
 		FROM automation_rule_executions e
 		JOIN automation_rules ar ON ar.id = e.rule_id
 		LEFT JOIN tasks t ON t.id = NULLIF(e.trigger_event->>'task_id', '')::uuid
-		WHERE ar.scope_type = 'workspace' AND ar.scope_id = $1
-		  AND ($2 = '' OR e.status = $2)
+		WHERE ar.scope_type = $1 AND ar.scope_id = $2
+		  AND ($3 = '' OR e.status = $3)
 		ORDER BY e.executed_at DESC
 		LIMIT 500
-	`, workspaceID, statusFilter)
+	`, scopeType, scopeID, statusFilter)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListExecutions: %w", err)
 	}
@@ -244,19 +244,24 @@ func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, w
 	return list, rows.Err()
 }
 
-// ListActiveForEvent (S4W-11) -- rule aktif workspace ini yang trigger-nya
-// cocok event (+ statusID kalau event="status_changed", "" berarti tidak
-// difilter statusnya -- dipakai due-date/task_created yang tidak
-// mereferensi status tertentu di trigger).
-func (r *RuleRepository) ListActiveForEvent(ctx context.Context, exec db.Executor, workspaceID, event, statusID string) ([]Rule, error) {
+// ListActiveForEvent (S4W-11; status-matching by NAME susulan Track S5B) --
+// rule aktif scope ini yang trigger-nya cocok event. TIDAK LAGI memfilter
+// oleh status_id literal di SQL (dulu dipakai event="status_changed") --
+// begitu Custom Status jadi project-scoped, task.status_id yang sebenarnya
+// berubah jadi baris kloningan project (UUID baru), jadi status_id lama
+// yang tersimpan di trigger_config rule WORKSPACE tidak lagi cocok dengan
+// UUID manapun walau nama statusnya sama persis. RuleService.Evaluate
+// sekarang resolve status_id rule -> NAMA lalu bandingkan ke nama status
+// event yang sebenarnya (apa pun scope-nya) -- rule lama tidak perlu
+// migrasi data sama sekali.
+func (r *RuleRepository) ListActiveForEvent(ctx context.Context, exec db.Executor, scopeType, scopeID, event string) ([]Rule, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT id, scope_type, scope_id, name, trigger_config, condition_config, action_config,
 		       is_active, inactive_reason, is_template, created_by, created_at, updated_at
 		FROM automation_rules
-		WHERE scope_type = 'workspace' AND scope_id = $1 AND deleted_at IS NULL AND is_active = TRUE
-		  AND trigger_config->>'event' = $2
-		  AND ($3 = '' OR trigger_config->>'status_id' = $3)
-	`, workspaceID, event, statusID)
+		WHERE scope_type = $1 AND scope_id = $2 AND deleted_at IS NULL AND is_active = TRUE
+		  AND trigger_config->>'event' = $3
+	`, scopeType, scopeID, event)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListActiveForEvent: %w", err)
 	}
@@ -274,15 +279,16 @@ func (r *RuleRepository) ListActiveForEvent(ctx context.Context, exec db.Executo
 	return list, rows.Err()
 }
 
-// ListActiveDueDateRules (S4W-11) -- SEMUA rule workspace aktif dengan
-// trigger due_date_approaching, lintas workspace -- dipanggil job Asynq
-// harian (proses trusted background, bukan request per-workspace).
+// ListActiveDueDateRules (S4W-11; scope project ikut disertakan Track S5B)
+// -- SEMUA rule aktif (workspace MAUPUN project) dengan trigger
+// due_date_approaching, lintas scope -- dipanggil job Asynq harian (proses
+// trusted background, bukan request per-workspace/per-project).
 func (r *RuleRepository) ListActiveDueDateRules(ctx context.Context, exec db.Executor) ([]Rule, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT id, scope_type, scope_id, name, trigger_config, condition_config, action_config,
 		       is_active, inactive_reason, is_template, created_by, created_at, updated_at
 		FROM automation_rules
-		WHERE scope_type = 'workspace' AND deleted_at IS NULL AND is_active = TRUE
+		WHERE deleted_at IS NULL AND is_active = TRUE
 		  AND trigger_config->>'event' = 'due_date_approaching'
 	`)
 	if err != nil {

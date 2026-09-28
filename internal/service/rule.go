@@ -1,13 +1,17 @@
 // Package service -- RuleService (Rule Automation, S4W-10/12, EPIC 7, US-
 // 048/049/051/052/053, desain "AW Rule Automation.dc.html"+"AW Add Rule.
-// dc.html"). Lihat komentar RuleRepository untuk batas cakupan (workspace-
-// scope saja) dan penyimpangan skema.
+// dc.html"; scope project Track S5B, "Rule Builder.dc.html", dikonfirmasi
+// user berdampingan dengan Custom Status project-scope). Lihat komentar
+// RuleRepository untuk penyimpangan skema.
 //
-// TIDAK ADA trigger nyata di sini -- CRUD murni, execution engine (hook
-// status-change sinkron + job Asynq due-date) menyusul S4W-11 (H17-19),
-// sesuai kickoff plan ("log eksekusi diisi data uji manual" untuk task
-// ini). Tab Log Eksekusi karena itu akan kosong sampai S4W-11 selesai --
-// bukan bug, expected.
+// Status-matching by NAME (Track S5B, dikonfirmasi user) -- begitu Custom
+// Status jadi project-scoped, status_id yang tersimpan di trigger_config/
+// action_config rule LAMA (semua scope='workspace') tidak lagi cocok
+// dengan UUID status_id task manapun (task sekarang menunjuk baris
+// kloningan project). Evaluate meresolve status_id rule -> NAMA dulu,
+// baru dibandingkan ke nama status event yang sebenarnya -- rule existing
+// TIDAK PERLU migrasi data sama sekali, lihat komentar RuleRepository.
+// ListActiveForEvent.
 package service
 
 import (
@@ -91,14 +95,14 @@ type RuleActionInput struct {
 
 // ruleRepository -- interface didefinisikan di consumer, §3.9.
 type ruleRepository interface {
-	Create(ctx context.Context, exec db.Executor, workspaceID, name string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole string) (string, error)
+	Create(ctx context.Context, exec db.Executor, scopeType, scopeID, name string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole, workspaceID string) (string, error)
 	Get(ctx context.Context, exec db.Executor, ruleID string) (*repository.Rule, error)
-	ListForWorkspace(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Rule, error)
-	SetActive(ctx context.Context, exec db.Executor, ruleID string, active bool, actorID, actorRole string, before *repository.Rule) error
-	SoftDelete(ctx context.Context, exec db.Executor, ruleID, actorID, actorRole string, before *repository.Rule) error
+	ListForScope(ctx context.Context, exec db.Executor, scopeType, scopeID string) ([]repository.Rule, error)
+	SetActive(ctx context.Context, exec db.Executor, ruleID string, active bool, actorID, actorRole, workspaceID string, before *repository.Rule) error
+	SoftDelete(ctx context.Context, exec db.Executor, ruleID, actorID, actorRole, workspaceID string, before *repository.Rule) error
 	DeactivateForStatus(ctx context.Context, exec db.Executor, statusID, reason, actorID, actorRole string) ([]repository.Rule, error)
-	ListExecutions(ctx context.Context, exec db.Executor, workspaceID, statusFilter string) ([]repository.RuleExecution, error)
-	ListActiveForEvent(ctx context.Context, exec db.Executor, workspaceID, event, statusID string) ([]repository.Rule, error)
+	ListExecutions(ctx context.Context, exec db.Executor, scopeType, scopeID, statusFilter string) ([]repository.RuleExecution, error)
+	ListActiveForEvent(ctx context.Context, exec db.Executor, scopeType, scopeID, event string) ([]repository.Rule, error)
 	ListActiveDueDateRules(ctx context.Context, exec db.Executor) ([]repository.Rule, error)
 	CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string) error
 	HasExecutionForTask(ctx context.Context, exec db.Executor, ruleID, taskID string) (bool, error)
@@ -122,10 +126,12 @@ type ruleStatusChecker interface {
 	Get(ctx context.Context, exec db.Executor, statusID string) (*repository.CustomStatus, error)
 }
 
-// ruleProjectResolver -- reuse ProjectRepository.GetWorkspaceID, dipakai
-// validasi condition "project tertentu".
+// ruleProjectResolver -- reuse ProjectRepository.GetWorkspaceID (workspace
+// pemilik project, dipakai resolveWorkspaceID+validasi condition "project
+// tertentu") dan .IsPM (Track S5B, otorisasi PM-of-project).
 type ruleProjectResolver interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	IsPM(ctx context.Context, exec db.Executor, projectID, userID string) (bool, error)
 }
 
 // ruleUserContactFinder -- reuse AccountRepository.FindUserContactByID,
@@ -134,12 +140,14 @@ type ruleUserContactFinder interface {
 	FindUserContactByID(ctx context.Context, userID string) (*repository.UserContact, error)
 }
 
-// ruleDueTaskLister (S4W-11) -- reuse TaskRepository.ListDueForWorkspace
-// untuk RunDueDateCheck. Repository langsung (bukan lewat TaskService) --
-// tidak ada masalah dependency melingkar di level repository, cuma
+// ruleDueTaskLister (S4W-11; ListDueForProject susulan Track S5B) -- reuse
+// TaskRepository.ListDueForWorkspace/ListDueForProject untuk
+// RunDueDateCheck. Repository langsung (bukan lewat TaskService) -- tidak
+// ada masalah dependency melingkar di level repository, cuma
 // TaskService<->RuleService yang saling butuh (lihat ruleTaskActions).
 type ruleDueTaskLister interface {
 	ListDueForWorkspace(ctx context.Context, exec db.Executor, workspaceID string, days int) ([]repository.Task, error)
+	ListDueForProject(ctx context.Context, exec db.Executor, projectID string, days int) ([]repository.Task, error)
 }
 
 type RuleService struct {
@@ -167,25 +175,56 @@ func (s *RuleService) SetTaskActions(a ruleTaskActions) {
 	s.taskActions = a
 }
 
-// authorizeWorkspace -- AW-only, PERSIS pola CustomStatusService.
-// authorizeAdmin/WebhookService.authorizeWorkspace.
-func (s *RuleService) authorizeWorkspace(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) error {
+// resolveWorkspaceID -- workspace pemilik scope ini, dipakai audit log
+// (SELALU butuh workspace_id nyata, sama pola CustomStatusService) dan
+// otorisasi. scopeID langsung kalau scopeType="workspace".
+func (s *RuleService) resolveWorkspaceID(ctx context.Context, exec db.Executor, scopeType, scopeID string) (string, error) {
+	if scopeType == "workspace" {
+		return scopeID, nil
+	}
+	return s.projects.GetWorkspaceID(ctx, exec, scopeID)
+}
+
+// authorizeScope (Track S5B) -- generalisasi authorizeWorkspace: scope
+// workspace tetap Admin Workspace-only (+GA/PA bypass, perilaku existing
+// S4W-10 TIDAK diubah); scope project menambah PM-of-project sebagai
+// otorisasi kedua, PERSIS pola CustomStatusService.authorizeScope
+// ("AW Rule Automation" halaman admin workspace, "Rule Builder" project
+// dikelola PM+AW -- lihat footer desain "PENGELOLA: Project Manager ·
+// Admin Workspace").
+func (s *RuleService) authorizeScope(ctx context.Context, exec db.Executor, scopeType, scopeID, actorID, actorRole string) error {
 	if actorRole == "platform_admin" || actorRole == "group_admin" {
 		return nil
 	}
+	workspaceID, err := s.resolveWorkspaceID(ctx, exec, scopeType, scopeID)
+	if err != nil {
+		return fmt.Errorf("service.authorizeScope: %w", err)
+	}
 	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
 	if err != nil {
-		return fmt.Errorf("service.authorizeWorkspace: %w", err)
+		return fmt.Errorf("service.authorizeScope: %w", err)
 	}
-	if role != "admin_workspace" {
-		return fmt.Errorf("service.authorizeWorkspace: %w", domain.ErrForbidden)
+	if role == "admin_workspace" {
+		return nil
 	}
-	return nil
+	if scopeType == "project" {
+		isPM, err := s.projects.IsPM(ctx, exec, scopeID, actorID)
+		if err != nil {
+			return fmt.Errorf("service.authorizeScope: %w", err)
+		}
+		if isPM {
+			return nil
+		}
+	}
+	return fmt.Errorf("service.authorizeScope: %w", domain.ErrForbidden)
 }
 
 // validateStatusTarget -- status_id (trigger status_changed / action
-// change_status) wajib ada, milik workspace ini, dan tidak UNDEFINED.
-func (s *RuleService) validateStatusTarget(ctx context.Context, exec db.Executor, workspaceID, statusID string) error {
+// change_status) wajib ada, milik scope ini persis (workspace ATAU
+// project rule cuma boleh mereferensi status scope-nya sendiri -- "Rule
+// Builder.dc.html": "Daftar status mengacu status aktif project saat
+// ini"), dan tidak UNDEFINED.
+func (s *RuleService) validateStatusTarget(ctx context.Context, exec db.Executor, scopeType, scopeID, statusID string) error {
 	if statusID == "" {
 		return fmt.Errorf("service.validateStatusTarget: %w", domain.ErrInvalidInput)
 	}
@@ -193,7 +232,7 @@ func (s *RuleService) validateStatusTarget(ctx context.Context, exec db.Executor
 	if err != nil {
 		return fmt.Errorf("service.validateStatusTarget: %w", domain.ErrInvalidInput)
 	}
-	if status.ScopeType != "workspace" || status.ScopeID != workspaceID {
+	if status.ScopeType != scopeType || status.ScopeID != scopeID {
 		return fmt.Errorf("service.validateStatusTarget: %w", domain.ErrInvalidInput)
 	}
 	if status.IsUndefined {
@@ -205,14 +244,14 @@ func (s *RuleService) validateStatusTarget(ctx context.Context, exec db.Executor
 // buildConfigs -- validasi TCA lengkap + serialisasi ke JSONB. Dipakai
 // Create (Update sengaja tidak ada -- desain "AW Add Rule.dc.html" cuma
 // bikin rule baru, tidak ada mode edit).
-func (s *RuleService) buildConfigs(ctx context.Context, exec db.Executor, workspaceID string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput) (triggerJSON, conditionJSON, actionJSON []byte, err error) {
+func (s *RuleService) buildConfigs(ctx context.Context, exec db.Executor, scopeType, scopeID, workspaceID string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput) (triggerJSON, conditionJSON, actionJSON []byte, err error) {
 	if !inList(RuleTriggerEvents, trigger.Event) {
 		return nil, nil, nil, fmt.Errorf("service.buildConfigs: %w", domain.ErrInvalidInput)
 	}
 	tc := ruleTriggerConfig{Event: trigger.Event}
 	switch trigger.Event {
 	case "status_changed":
-		if err := s.validateStatusTarget(ctx, exec, workspaceID, trigger.StatusID); err != nil {
+		if err := s.validateStatusTarget(ctx, exec, scopeType, scopeID, trigger.StatusID); err != nil {
 			return nil, nil, nil, err
 		}
 		tc.StatusID = trigger.StatusID
@@ -270,7 +309,7 @@ func (s *RuleService) buildConfigs(ctx context.Context, exec db.Executor, worksp
 	ac := ruleActionConfig{Type: action.Type}
 	switch action.Type {
 	case "change_status":
-		if err := s.validateStatusTarget(ctx, exec, workspaceID, action.StatusID); err != nil {
+		if err := s.validateStatusTarget(ctx, exec, scopeType, scopeID, action.StatusID); err != nil {
 			return nil, nil, nil, err
 		}
 		ac.StatusID = action.StatusID
@@ -287,24 +326,40 @@ func (s *RuleService) buildConfigs(ctx context.Context, exec db.Executor, worksp
 	return triggerJSON, conditionJSON, actionJSON, nil
 }
 
-// Create -- POST /workspaces/:wsId/rules.
-func (s *RuleService) Create(ctx context.Context, exec db.Executor, workspaceID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
+// create -- inti Create/CreateForProject, scopeType eksplisit supaya
+// keduanya berbagi validasi+audit yang sama persis.
+func (s *RuleService) create(ctx context.Context, exec db.Executor, scopeType, scopeID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
 	name = strings.TrimSpace(name)
-	if workspaceID == "" || len(name) < 4 {
-		return "", fmt.Errorf("service.Create: %w", domain.ErrInvalidInput)
+	if scopeID == "" || len(name) < 4 {
+		return "", fmt.Errorf("service.create: %w", domain.ErrInvalidInput)
 	}
-	if err := s.authorizeWorkspace(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+	if err := s.authorizeScope(ctx, exec, scopeType, scopeID, actorID, actorRole); err != nil {
 		return "", err
 	}
-	triggerJSON, conditionJSON, actionJSON, err := s.buildConfigs(ctx, exec, workspaceID, trigger, condition, action)
+	workspaceID, err := s.resolveWorkspaceID(ctx, exec, scopeType, scopeID)
+	if err != nil {
+		return "", fmt.Errorf("service.create: %w", err)
+	}
+	triggerJSON, conditionJSON, actionJSON, err := s.buildConfigs(ctx, exec, scopeType, scopeID, workspaceID, trigger, condition, action)
 	if err != nil {
 		return "", err
 	}
-	id, err := s.repo.Create(ctx, exec, workspaceID, name, triggerJSON, conditionJSON, actionJSON, actorID, actorRole)
+	id, err := s.repo.Create(ctx, exec, scopeType, scopeID, name, triggerJSON, conditionJSON, actionJSON, actorID, actorRole, workspaceID)
 	if err != nil {
-		return "", fmt.Errorf("service.Create: %w", err)
+		return "", fmt.Errorf("service.create: %w", err)
 	}
 	return id, nil
+}
+
+// Create -- POST /workspaces/:wsId/rules.
+func (s *RuleService) Create(ctx context.Context, exec db.Executor, workspaceID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
+	return s.create(ctx, exec, "workspace", workspaceID, name, trigger, condition, action, actorID, actorRole)
+}
+
+// CreateForProject -- POST /projects/:id/rules (Track S5B, "Rule
+// Builder.dc.html").
+func (s *RuleService) CreateForProject(ctx context.Context, exec db.Executor, projectID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
+	return s.create(ctx, exec, "project", projectID, name, trigger, condition, action, actorID, actorRole)
 }
 
 // List -- GET /workspaces/:wsId/rules, tab "Rule Aktif".
@@ -312,12 +367,27 @@ func (s *RuleService) List(ctx context.Context, exec db.Executor, workspaceID, a
 	if workspaceID == "" {
 		return nil, fmt.Errorf("service.List: %w", domain.ErrInvalidInput)
 	}
-	if err := s.authorizeWorkspace(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+	if err := s.authorizeScope(ctx, exec, "workspace", workspaceID, actorID, actorRole); err != nil {
 		return nil, err
 	}
-	list, err := s.repo.ListForWorkspace(ctx, exec, workspaceID)
+	list, err := s.repo.ListForScope(ctx, exec, "workspace", workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.List: %w", err)
+	}
+	return list, nil
+}
+
+// ListForProject -- GET /projects/:id/rules (Track S5B).
+func (s *RuleService) ListForProject(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) ([]repository.Rule, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListForProject: %w", domain.ErrInvalidInput)
+	}
+	if err := s.authorizeScope(ctx, exec, "project", projectID, actorID, actorRole); err != nil {
+		return nil, err
+	}
+	list, err := s.repo.ListForScope(ctx, exec, "project", projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListForProject: %w", err)
 	}
 	return list, nil
 }
@@ -327,7 +397,7 @@ func (s *RuleService) loadForMutation(ctx context.Context, exec db.Executor, rul
 	if err != nil {
 		return nil, fmt.Errorf("service.loadForMutation: %w", err)
 	}
-	if err := s.authorizeWorkspace(ctx, exec, rl.ScopeID, actorID, actorRole); err != nil {
+	if err := s.authorizeScope(ctx, exec, rl.ScopeType, rl.ScopeID, actorID, actorRole); err != nil {
 		return nil, err
 	}
 	return rl, nil
@@ -338,7 +408,11 @@ func (s *RuleService) SetActive(ctx context.Context, exec db.Executor, ruleID st
 	if err != nil {
 		return err
 	}
-	if err := s.repo.SetActive(ctx, exec, ruleID, active, actorID, actorRole, before); err != nil {
+	workspaceID, err := s.resolveWorkspaceID(ctx, exec, before.ScopeType, before.ScopeID)
+	if err != nil {
+		return fmt.Errorf("service.SetActive: %w", err)
+	}
+	if err := s.repo.SetActive(ctx, exec, ruleID, active, actorID, actorRole, workspaceID, before); err != nil {
 		return fmt.Errorf("service.SetActive: %w", err)
 	}
 	return nil
@@ -349,24 +423,44 @@ func (s *RuleService) Delete(ctx context.Context, exec db.Executor, ruleID, acto
 	if err != nil {
 		return err
 	}
-	if err := s.repo.SoftDelete(ctx, exec, ruleID, actorID, actorRole, before); err != nil {
+	workspaceID, err := s.resolveWorkspaceID(ctx, exec, before.ScopeType, before.ScopeID)
+	if err != nil {
+		return fmt.Errorf("service.Delete: %w", err)
+	}
+	if err := s.repo.SoftDelete(ctx, exec, ruleID, actorID, actorRole, workspaceID, before); err != nil {
 		return fmt.Errorf("service.Delete: %w", err)
 	}
 	return nil
 }
 
 // ListExecutions -- GET /workspaces/:wsId/rules/executions, tab "Log
-// Eksekusi". Kosong sampai S4W-11 -- lihat komentar package.
+// Eksekusi".
 func (s *RuleService) ListExecutions(ctx context.Context, exec db.Executor, workspaceID, statusFilter, actorID, actorRole string) ([]repository.RuleExecution, error) {
 	if workspaceID == "" {
 		return nil, fmt.Errorf("service.ListExecutions: %w", domain.ErrInvalidInput)
 	}
-	if err := s.authorizeWorkspace(ctx, exec, workspaceID, actorID, actorRole); err != nil {
+	if err := s.authorizeScope(ctx, exec, "workspace", workspaceID, actorID, actorRole); err != nil {
 		return nil, err
 	}
-	list, err := s.repo.ListExecutions(ctx, exec, workspaceID, statusFilter)
+	list, err := s.repo.ListExecutions(ctx, exec, "workspace", workspaceID, statusFilter)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListExecutions: %w", err)
+	}
+	return list, nil
+}
+
+// ListExecutionsForProject -- GET /projects/:id/rules/executions (Track
+// S5B).
+func (s *RuleService) ListExecutionsForProject(ctx context.Context, exec db.Executor, projectID, statusFilter, actorID, actorRole string) ([]repository.RuleExecution, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListExecutionsForProject: %w", domain.ErrInvalidInput)
+	}
+	if err := s.authorizeScope(ctx, exec, "project", projectID, actorID, actorRole); err != nil {
+		return nil, err
+	}
+	list, err := s.repo.ListExecutions(ctx, exec, "project", projectID, statusFilter)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListExecutionsForProject: %w", err)
 	}
 	return list, nil
 }
@@ -503,32 +597,48 @@ func (s *RuleService) runRule(ctx context.Context, exec db.Executor, rl *reposit
 	_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "completed", actionTaken, nil)
 }
 
-// Evaluate (S4W-11) -- implementasi taskRuleEvaluator, dipanggil
-// TaskService.fireRules SETELAH task_created/status_changed berhasil
-// (best-effort, tidak pernah mengembalikan error ke caller). Cakupan
-// event nyata cuma status_changed & task_created -- assignee_changed &
-// comment_added TETAP DORMANT (tidak ada jalur firing nyata, lihat
-// komentar TaskService.AssignUserForRule), ListActiveForEvent untuk
-// keduanya akan selalu kosong.
-func (s *RuleService) Evaluate(ctx context.Context, exec db.Executor, workspaceID, event string, task *repository.Task, actorID, actorRole string) {
-	statusID := ""
-	if event == "status_changed" {
-		statusID = task.StatusID
+// ruleStatusMatches (Track S5B, status-matching by NAME -- lihat komentar
+// package) -- resolve status_id trigger rule ini ke NAMA, bandingkan ke
+// nama status task SAAT INI (apa pun scope status tersebut, workspace
+// ATAU project). Rule tanpa status_id di trigger (mis. Days-based) tidak
+// pernah lewat sini -- cuma dipanggil untuk event="status_changed".
+func (s *RuleService) ruleStatusMatches(ctx context.Context, exec db.Executor, rl *repository.Rule, taskStatusName string) bool {
+	var tc ruleTriggerConfig
+	if err := json.Unmarshal(rl.TriggerConfig, &tc); err != nil || tc.StatusID == "" {
+		return false
 	}
-	rules, err := s.repo.ListActiveForEvent(ctx, exec, workspaceID, event, statusID)
+	status, err := s.statuses.Get(ctx, exec, tc.StatusID)
+	if err != nil {
+		return false
+	}
+	return status.Name == taskStatusName
+}
+
+// Evaluate (S4W-11; status-matching by nama + dipanggil dua scope Track
+// S5B) -- implementasi taskRuleEvaluator, dipanggil TaskService.fireRules
+// SETELAH task_created/status_changed berhasil (best-effort, tidak pernah
+// mengembalikan error ke caller). Cakupan event nyata cuma status_changed
+// & task_created -- assignee_changed & comment_added TETAP DORMANT (tidak
+// ada jalur firing nyata, lihat komentar TaskService.AssignUserForRule),
+// ListActiveForEvent untuk keduanya akan selalu kosong.
+func (s *RuleService) Evaluate(ctx context.Context, exec db.Executor, scopeType, scopeID, event string, task *repository.Task, actorID, actorRole string) {
+	rules, err := s.repo.ListActiveForEvent(ctx, exec, scopeType, scopeID, event)
 	if err != nil {
 		return
 	}
 	for i := range rules {
+		if event == "status_changed" && !s.ruleStatusMatches(ctx, exec, &rules[i], task.StatusName) {
+			continue
+		}
 		s.runRule(ctx, exec, &rules[i], task, event, actorID)
 	}
 }
 
-// RunDueDateCheck (S4W-11) -- dipanggil job Asynq harian
-// (worker.RuleDueDateCheckHandler), trusted background process (RLS
-// context "platform_admin" diset caller, bukan per-request). Dedup lewat
-// HasExecutionForTask -- satu rule+task cuma boleh eksekusi sekali
-// walau job jalan tiap hari selama task masih dalam jendela hari.
+// RunDueDateCheck (S4W-11; scope project ikut Track S5B) -- dipanggil job
+// Asynq harian (worker.RuleDueDateCheckHandler), trusted background
+// process (RLS context "platform_admin" diset caller, bukan per-request).
+// Dedup lewat HasExecutionForTask -- satu rule+task cuma boleh eksekusi
+// sekali walau job jalan tiap hari selama task masih dalam jendela hari.
 func (s *RuleService) RunDueDateCheck(ctx context.Context, exec db.Executor) error {
 	rules, err := s.repo.ListActiveDueDateRules(ctx, exec)
 	if err != nil {
@@ -540,8 +650,14 @@ func (s *RuleService) RunDueDateCheck(ctx context.Context, exec db.Executor) err
 		if err := json.Unmarshal(rl.TriggerConfig, &tc); err != nil {
 			continue
 		}
-		tasks, err := s.tasks.ListDueForWorkspace(ctx, exec, rl.ScopeID, tc.Days)
-		if err != nil {
+		var tasks []repository.Task
+		var listErr error
+		if rl.ScopeType == "project" {
+			tasks, listErr = s.tasks.ListDueForProject(ctx, exec, rl.ScopeID, tc.Days)
+		} else {
+			tasks, listErr = s.tasks.ListDueForWorkspace(ctx, exec, rl.ScopeID, tc.Days)
+		}
+		if listErr != nil {
 			continue
 		}
 		for j := range tasks {

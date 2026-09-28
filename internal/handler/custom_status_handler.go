@@ -49,6 +49,28 @@ func (h *CustomStatusHandler) ListForWorkspace(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
+// ListForProject menangani GET /projects/:id/statuses (Track S5B, US-019,
+// "PM Custom Status.dc.html") -- salinan status independen project ini.
+func (h *CustomStatusHandler) ListForProject(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("CustomStatusHandler.ListForProject dipanggil tanpa DBContextMiddleware")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	list, err := h.statuses.ListForProject(c.Context(), exec, projectID)
+	if err != nil {
+		h.logger.Error("gagal mengambil daftar status project", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar status", nil))
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		data[i] = customStatusJSON(&list[i])
+	}
+	return c.JSON(response.Success(data))
+}
+
 type createStatusRequest struct {
 	Name       string `json:"name"`
 	ColorToken string `json:"color_token"`
@@ -74,6 +96,31 @@ func (h *CustomStatusHandler) Create(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
 	created, err := h.statuses.Create(c.Context(), exec, workspaceID, req.Name, req.ColorToken, req.Position, actorUserID, actorRole)
+	if err != nil {
+		return h.mapCustomStatusError(c, err, "Gagal menambah status")
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(customStatusJSON(created)))
+}
+
+// CreateForProject menangani POST /projects/:id/statuses (Track S5B,
+// US-019, "PM Add Status.dc.html") -- PM-of-project atau Admin Workspace.
+func (h *CustomStatusHandler) CreateForProject(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		h.logger.Error("CustomStatusHandler.CreateForProject dipanggil tanpa DBContextMiddleware")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	projectID := c.Params("id")
+
+	var req createStatusRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	created, err := h.statuses.CreateForProject(c.Context(), exec, projectID, req.Name, req.ColorToken, req.Position, actorUserID, actorRole)
 	if err != nil {
 		return h.mapCustomStatusError(c, err, "Gagal menambah status")
 	}
@@ -215,7 +262,7 @@ func (h *CustomStatusHandler) mapCustomStatusError(c *fiber.Ctx, err error, fall
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid", nil))
 	case errors.Is(err, domain.ErrForbidden):
-		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang mengubah status workspace ini.", nil))
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang mengubah status ini.", nil))
 	case errors.Is(err, domain.ErrCustomStatusNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Status tidak ditemukan", nil))
 	case errors.Is(err, domain.ErrCustomStatusNameTaken):

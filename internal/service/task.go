@@ -47,7 +47,7 @@ type taskRepository interface {
 // melingkar dipecah lewat setter, bukan constructor param, keduanya tetap
 // di package `service` yang sama jadi tidak ada import cycle.
 type taskRuleEvaluator interface {
-	Evaluate(ctx context.Context, exec db.Executor, workspaceID, event string, task *repository.Task, actorID, actorRole string)
+	Evaluate(ctx context.Context, exec db.Executor, scopeType, scopeID, event string, task *repository.Task, actorID, actorRole string)
 }
 
 // taskPicRepository -- reuse TaskPicRepository (Phase 2). Interface
@@ -74,9 +74,12 @@ type taskProjectResolver interface {
 	GetAllowEditorStoryPoints(ctx context.Context, exec db.Executor, projectID string) (bool, error)
 }
 
-// taskCustomStatuses -- reuse CustomStatusRepository.
+// taskCustomStatuses -- reuse CustomStatusRepository. GetBacklogStatus
+// (Track S5B) diresolve dari scope project -- setiap project sudah punya
+// salinan status sendiri (CloneForProject/migrasi backfill), TIDAK lagi
+// scope workspace.
 type taskCustomStatuses interface {
-	GetBacklogStatus(ctx context.Context, exec db.Executor, workspaceID string) (*repository.CustomStatus, error)
+	GetBacklogStatus(ctx context.Context, exec db.Executor, scopeType, scopeID string) (*repository.CustomStatus, error)
 	Get(ctx context.Context, exec db.Executor, statusID string) (*repository.CustomStatus, error)
 }
 
@@ -117,12 +120,16 @@ func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDepend
 }
 
 // fireRules -- best-effort, nil-safe (rules bisa nil di worker/test yang
-// tidak butuh execution engine).
+// tidak butuh execution engine). Track S5B: rule WORKSPACE dan rule
+// PROJECT (task.ProjectID) SAMA-SAMA dievaluasi, aditif -- rule workspace
+// tetap berlaku untuk semua project di dalamnya, rule project menambah
+// otomasi khusus project itu di atasnya (dikonfirmasi user).
 func (s *TaskService) fireRules(ctx context.Context, exec db.Executor, workspaceID, event string, task *repository.Task, actorID, actorRole string) {
 	if s.rules == nil {
 		return
 	}
-	s.rules.Evaluate(ctx, exec, workspaceID, event, task, actorID, actorRole)
+	s.rules.Evaluate(ctx, exec, "workspace", workspaceID, event, task, actorID, actorRole)
+	s.rules.Evaluate(ctx, exec, "project", task.ProjectID, event, task, actorID, actorRole)
 }
 
 // authorize -- identik SprintService.authorize (viewer/division_viewer
@@ -234,7 +241,7 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
-	backlog, err := s.statuses.GetBacklogStatus(ctx, exec, workspaceID)
+	backlog, err := s.statuses.GetBacklogStatus(ctx, exec, "project", projectID)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
@@ -644,7 +651,7 @@ func (s *TaskService) CreateSubtaskForRule(ctx context.Context, exec db.Executor
 	if err != nil {
 		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
-	backlog, err := s.statuses.GetBacklogStatus(ctx, exec, workspaceID)
+	backlog, err := s.statuses.GetBacklogStatus(ctx, exec, "project", projectID)
 	if err != nil {
 		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
