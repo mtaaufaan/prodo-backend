@@ -31,7 +31,7 @@ type fakeWorkspaceAuditRuleExecutions struct {
 	err  error
 }
 
-func (f *fakeWorkspaceAuditRuleExecutions) ListExecutions(_ context.Context, _ db.Executor, _, _ string) ([]repository.RuleExecution, error) {
+func (f *fakeWorkspaceAuditRuleExecutions) ListExecutions(_ context.Context, _ db.Executor, _, _, _ string) ([]repository.RuleExecution, error) {
 	return f.list, f.err
 }
 

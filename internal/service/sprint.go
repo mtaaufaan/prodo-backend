@@ -38,7 +38,7 @@ type sprintProjectResolver interface {
 // closeSprint untuk resolve status DONE (S4-09: task belum selesai
 // dipindah ke backlog).
 type sprintCustomStatuses interface {
-	ListForWorkspace(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.CustomStatus, error)
+	ListForScope(ctx context.Context, exec db.Executor, scopeType, scopeID string) ([]repository.CustomStatus, error)
 }
 
 // sprintWorkspaceRoleChecker -- reuse RBACService.GetMemberRole.
@@ -191,7 +191,10 @@ func (s *SprintService) Update(ctx context.Context, exec db.Executor, sprintID, 
 // "PM Sprint.dc.html" setSprintStatus(): task belum DONE dipindah ke
 // backlog, status -> 'done') -- satu chokepoint, bukan logic terduplikasi.
 func (s *SprintService) closeSprint(ctx context.Context, exec db.Executor, sprint *repository.Sprint, workspaceID, actorID, actorRole string) error {
-	statuses, err := s.statuses.ListForWorkspace(ctx, exec, workspaceID)
+	// ListForScope("project", ...) (Track S5B) -- task sprint ini menunjuk
+	// baris status kloningan PROJECT-nya sendiri, BUKAN lagi scope
+	// workspace (lihat komentar package CustomStatusRepository).
+	statuses, err := s.statuses.ListForScope(ctx, exec, "project", sprint.ProjectID)
 	if err != nil {
 		return fmt.Errorf("service.closeSprint: %w", err)
 	}

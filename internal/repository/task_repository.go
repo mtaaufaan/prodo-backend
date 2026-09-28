@@ -668,6 +668,68 @@ func (r *TaskRepository) ListDueForWorkspace(ctx context.Context, exec db.Execut
 	return list, nil
 }
 
+// ListDueForProject (Track S5B, job harian due-date rule level PROJECT) --
+// sama persis ListDueForWorkspace, scope dipersempit ke satu project (t.
+// project_id langsung, tidak perlu JOIN projects).
+func (r *TaskRepository) ListDueForProject(ctx context.Context, exec db.Executor, projectID string, days int) ([]Task, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT `+taskSelectColumns+`
+		FROM tasks t
+		JOIN custom_statuses cs ON cs.id = t.status_id
+		LEFT JOIN sprints s ON s.id = t.sprint_id
+		WHERE t.project_id = $1 AND t.deleted_at IS NULL AND t.due_date IS NOT NULL
+		  AND t.due_date >= CURRENT_DATE AND t.due_date <= CURRENT_DATE + make_interval(days => $2)
+		  AND cs.name != 'DONE'
+	`, projectID, days)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListDueForProject: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]Task, 0)
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repository.ListDueForProject: scan: %w", err)
+		}
+		list = append(list, *t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListDueForProject: %w", err)
+	}
+
+	if len(list) > 0 {
+		ids := make([]string, len(list))
+		byID := make(map[string]*Task, len(list))
+		for i := range list {
+			ids[i] = list[i].ID
+			byID[list[i].ID] = &list[i]
+		}
+		aRows, err := exec.Query(ctx, `
+			SELECT ta.task_id, ta.user_id, u.display_name, u.email, ta.assignee_role
+			FROM task_assignees ta
+			JOIN users u ON u.id = ta.user_id
+			WHERE ta.task_id = ANY($1)
+			ORDER BY ta.assigned_at
+		`, ids)
+		if err != nil {
+			return nil, fmt.Errorf("repository.ListDueForProject: assignees: %w", err)
+		}
+		defer aRows.Close()
+		for aRows.Next() {
+			var taskID string
+			var a TaskAssignee
+			if err := aRows.Scan(&taskID, &a.UserID, &a.DisplayName, &a.Email, &a.Role); err != nil {
+				return nil, fmt.Errorf("repository.ListDueForProject: assignees scan: %w", err)
+			}
+			if t, ok := byID[taskID]; ok {
+				t.Assignees = append(t.Assignees, a)
+			}
+		}
+	}
+	return list, nil
+}
+
 func (r *TaskRepository) GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error) {
 	var projectID string
 	err := exec.QueryRow(ctx, `SELECT project_id FROM tasks WHERE id = $1 AND deleted_at IS NULL`, taskID).Scan(&projectID)

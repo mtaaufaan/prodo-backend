@@ -161,7 +161,7 @@ func (f *fakeProjectPMInviter) GetWorkspaceName(_ context.Context, _ db.Executor
 // file ini, supaya menambah dependency baru (contacts/invites) cuma perlu
 // diubah SATU tempat.
 func newTestProjectService(repo *fakeProjectRepo, orgs *fakeOrgAuthorizer, rbac *fakeProjectRoleChecker, contacts *stubExistingUserFinder, invites *fakeProjectPMInviter) *ProjectService {
-	return NewProjectService(repo, orgs, rbac, nil, contacts, invites, nil)
+	return NewProjectService(repo, orgs, rbac, nil, contacts, invites, nil, nil)
 }
 
 func TestProjectService_Create_PlatformAdminBypass(t *testing.T) {
