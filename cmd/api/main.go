@@ -256,7 +256,7 @@ func run() error {
 	ruleSvc := service.NewRuleService(ruleRepo, rbacSvc, customStatusRepo, projectRepo, accountRepo, emailSvc, taskRepo)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc, ruleSvc)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
-	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc, sprintRepo)
 	ruleSvc.SetTaskActions(taskSvc)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)

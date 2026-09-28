@@ -108,8 +108,9 @@ func run() error {
 	taskPicRepo := repository.NewTaskPicRepository()
 	taskDependencyRepo := repository.NewTaskDependencyRepository()
 	taskStatusSessionRepo := repository.NewTaskStatusSessionRepository()
+	sprintRepo := repository.NewSprintRepository()
 	ruleSvc := service.NewRuleService(ruleRepo, rbacSvc, customStatusRepo, projectRepo, accountRepo, emailer, taskRepo)
-	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc, sprintRepo)
 	ruleSvc.SetTaskActions(taskSvc)
 	ruleDueDateCheckHandlerDeps := worker.NewRuleDueDateCheckHandler(pool, ruleSvc)
 

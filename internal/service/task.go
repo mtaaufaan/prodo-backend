@@ -80,6 +80,14 @@ type taskCustomStatuses interface {
 	Get(ctx context.Context, exec db.Executor, statusID string) (*repository.CustomStatus, error)
 }
 
+// taskSprintChecker -- reuse SprintRepository.Get (susulan
+// domain.ErrTaskNotInSprint) -- dipanggil setStatusCore untuk tahu status
+// sprint yang ditautkan task (kalau ada) sebelum mengizinkan task keluar
+// dari BACKLOG.
+type taskSprintChecker interface {
+	Get(ctx context.Context, exec db.Executor, sprintID string) (*repository.Sprint, error)
+}
+
 // taskStatusSessionRepository -- reuse TaskStatusSessionRepository (Phase
 // 4, US-018b/018c). Interface didefinisikan di consumer -- cuma method
 // yang dipakai TaskService.
@@ -101,10 +109,11 @@ type TaskService struct {
 	rbac         sprintWorkspaceRoleChecker
 	projectRoles sprintProjectRoleChecker
 	rules        taskRuleEvaluator
+	sprints      taskSprintChecker
 }
 
-func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, sessions taskStatusSessionRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker, rules taskRuleEvaluator) *TaskService {
-	return &TaskService{repo: repo, pics: pics, deps: deps, sessions: sessions, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles, rules: rules}
+func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, sessions taskStatusSessionRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker, rules taskRuleEvaluator, sprints taskSprintChecker) *TaskService {
+	return &TaskService{repo: repo, pics: pics, deps: deps, sessions: sessions, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles, rules: rules, sprints: sprints}
 }
 
 // fireRules -- best-effort, nil-safe (rules bisa nil di worker/test yang
@@ -343,6 +352,21 @@ func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, s
 	return s.setStatusCore(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, true)
 }
 
+// isTaskInWorkableSprint (susulan domain.ErrTaskNotInSprint) -- true kalau
+// sprintID mengarah ke sprint yang statusnya 'backlog' atau 'active'.
+// sprintID kosong (task belum pernah ditarik dari product backlog sama
+// sekali) SELALU false -- tidak ada sprint untuk dicek statusnya.
+func (s *TaskService) isTaskInWorkableSprint(ctx context.Context, exec db.Executor, sprintID *string) (bool, error) {
+	if sprintID == nil || *sprintID == "" {
+		return false, nil
+	}
+	sprint, err := s.sprints.Get(ctx, exec, *sprintID)
+	if err != nil {
+		return false, fmt.Errorf("service.isTaskInWorkableSprint: %w", err)
+	}
+	return sprint.Status == "backlog" || sprint.Status == "active", nil
+}
+
 // setStatusCore -- isi asli SetStatus, sekarang dipakai BERSAMA
 // SetStatusForRule (S4W-11) lewat parameter fireRules -- satu-satunya
 // pembeda: rule-triggered TIDAK memicu evaluasi rule lagi (mencegah
@@ -381,6 +405,15 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	}
 	if current.StatusName == "BACKLOG" && current.Completeness != nil && *current.Completeness == "incomplete" && status.Name != "BLOCKED" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskIncomplete)
+	}
+	if current.StatusName == "BACKLOG" && status.Name != "BLOCKED" {
+		workable, err := s.isTaskInWorkableSprint(ctx, exec, current.SprintID)
+		if err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+		if !workable {
+			return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskNotInSprint)
+		}
 	}
 	if status.Name != "BACKLOG" && status.Name != "BLOCKED" {
 		blocking, err := s.deps.ListIncompletePredecessors(ctx, exec, taskID)
