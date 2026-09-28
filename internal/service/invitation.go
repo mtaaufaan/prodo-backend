@@ -35,6 +35,7 @@ type invitationRepository interface {
 	AcceptExecutiveInvitation(ctx context.Context, exec db.Executor, invitationID, email, displayName, title, keycloakUserID, groupID string) (string, error)
 	Cancel(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error
 	Resend(ctx context.Context, exec db.Executor, workspaceID, invitationID, newTokenHash string, newExpiresAt time.Time) (*repository.ResendTarget, error)
+	GetProjectID(ctx context.Context, exec db.Executor, invitationID string) (string, error)
 	CancelExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, actorID string) error
 	ResendExecutive(ctx context.Context, exec db.Executor, groupID, invitationID, newTokenHash string, newExpiresAt time.Time) (string, error)
 	UpdateExecutiveIdentity(ctx context.Context, exec db.Executor, groupID, invitationID, actorID, displayName, title string) error
@@ -81,6 +82,9 @@ type workspaceAssigner interface {
 type projectPMAssigner interface {
 	AssignPendingPM(ctx context.Context, exec db.Executor, projectID, userID string) error
 	AddPM(ctx context.Context, exec db.Executor, projectID, userID, actorID, actorRole string) error
+	// IsPM (susulan, otorisasi Cancel/Resend -- lihat authorizeManage) --
+	// reuse ProjectRepository.IsPM apa adanya, sudah ada sejak multi-PM.
+	IsPM(ctx context.Context, exec db.Executor, projectID, userID string) (bool, error)
 }
 
 // projectMemberLinker -- interface didefinisikan di consumer, diimplementasikan
@@ -486,10 +490,50 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, exec db.Execut
 	return &AcceptedInvitation{UserID: userID, Email: target.Email, WorkspaceID: target.WorkspaceID, Role: target.Role}, nil
 }
 
+// authorizeManage (susulan, ditemukan user: PM tidak bisa batalkan/kirim
+// ulang undangan project-scoped-nya sendiri, cuma bisa lihat "PENDING"
+// tanpa aksi apa pun) -- Cancel/Resend sebelumnya CUMA digerbangi
+// RequireRole admin_workspace di level route (lihat komentar route di
+// main.go), jadi PM SELALU 403 walau invitation itu miliknya. Sekarang:
+// admin_workspace pemilik workspace (+GA/PA bypass) BOLEH untuk undangan
+// apa pun; PM-of-project BOLEH kalau undangan ini tertaut project yang
+// dia kelola (invitation.project_id) -- undangan workspace biasa (tanpa
+// project_id, selalu berarti undangan role admin_workspace/division_viewer
+// dari halaman AW) TETAP admin_workspace-only.
+func (s *InvitationService) authorizeManage(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error {
+	if actorRole == "platform_admin" || actorRole == "group_admin" {
+		return nil
+	}
+	role, err := s.assigner.GetMemberRole(ctx, exec, workspaceID, actorID)
+	if err != nil {
+		return fmt.Errorf("service.authorizeManage: %w", err)
+	}
+	if role == "admin_workspace" {
+		return nil
+	}
+	projectID, err := s.repo.GetProjectID(ctx, exec, invitationID)
+	if err != nil {
+		return err
+	}
+	if projectID != "" {
+		isPM, err := s.projects.IsPM(ctx, exec, projectID, actorID)
+		if err != nil {
+			return fmt.Errorf("service.authorizeManage: %w", err)
+		}
+		if isPM {
+			return nil
+		}
+	}
+	return fmt.Errorf("service.authorizeManage: %w", domain.ErrForbidden)
+}
+
 // CancelInvitation (S2-21) membatalkan undangan pending -- baris tidak
 // dihapus (audit trail tetap ada). domain.ErrInvitationNotFound kalau
 // sudah accepted/cancelled/tidak ada di workspace ini.
 func (s *InvitationService) CancelInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole string) error {
+	if err := s.authorizeManage(ctx, exec, workspaceID, invitationID, actorID, actorRole); err != nil {
+		return err
+	}
 	if err := s.repo.Cancel(ctx, exec, workspaceID, invitationID, actorID, actorRole); err != nil {
 		return fmt.Errorf("service.CancelInvitation: %w", err)
 	}
@@ -499,7 +543,10 @@ func (s *InvitationService) CancelInvitation(ctx context.Context, exec db.Execut
 // ResendInvitation (S2-22) menerbitkan token baru untuk undangan pending
 // dan mengirim ulang email -- token lama otomatis invalid (hash-nya
 // ditimpa). domain.ErrInvitationNotFound kalau sudah accepted/cancelled.
-func (s *InvitationService) ResendInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, workspaceName, inviterName string) error {
+func (s *InvitationService) ResendInvitation(ctx context.Context, exec db.Executor, workspaceID, invitationID, actorID, actorRole, workspaceName, inviterName string) error {
+	if err := s.authorizeManage(ctx, exec, workspaceID, invitationID, actorID, actorRole); err != nil {
+		return err
+	}
 	rawToken, tokenHash, err := generateActivationToken()
 	if err != nil {
 		return fmt.Errorf("service.ResendInvitation: %w", err)
