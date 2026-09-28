@@ -607,6 +607,8 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusConflict).JSON(response.Error("CIRCULAR_DEPENDENCY", "Menambahkan dependency ini akan membuat circular dependency.", fiber.Map{"cycle_path": cycleErr.CyclePath}))
 	case errors.Is(err, domain.ErrTaskIncomplete):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TASK_INCOMPLETE", "Task ini masih ditandai Belum Lengkap -- selesaikan kelengkapannya dulu sebelum mengubah status.", nil))
+	case errors.Is(err, domain.ErrTaskNotInSprint):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TASK_NOT_IN_SPRINT", "Task ini belum ditarik ke sprint mana pun -- pindahkan ke sprint dulu sebelum mengubah status.", nil))
 	case errors.Is(err, domain.ErrCompletenessInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "completeness harus 'complete' atau 'incomplete'", nil))
 	case errors.Is(err, domain.ErrDependencySelfReference):
