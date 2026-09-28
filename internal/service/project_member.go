@@ -59,6 +59,13 @@ type projectRoleChecker interface {
 	GetMemberRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole, projectID string) (*RoleChangeResult, error)
+	// RemoveMember (susulan, ditemukan user: simetris IG-105 -- PM
+	// keluarkan member dari project ini, kalau ini satu-satunya
+	// keterkaitan project-nya di workspace, HARUS ikut keluar dari
+	// workspace juga) -- reuse *RBACService.RemoveMember APA ADANYA,
+	// yang sejak IG-105 sudah punya logika single-vs-multi-project
+	// cascading yang benar. Lihat ProjectMemberService.RemoveMember.
+	RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole, projectID string) error
 }
 
 // ProjectMemberService -- S3-21/22/23/25/26/27, US-009b. Route
@@ -224,16 +231,38 @@ func (s *ProjectMemberService) UpdateMemberRole(ctx context.Context, exec db.Exe
 	return nil
 }
 
-// RemoveMember mengeluarkan member dari project (S3-23) -- TIDAK
-// menyentuh workspace_members.
+// RemoveMember mengeluarkan member dari project (S3-23). Simetris dengan
+// RBACService.RemoveMember (IG-105, arah sebaliknya -- AW keluarkan dari
+// WORKSPACE ikut melepas project kalau cuma terkait satu) -- dikonfirmasi
+// user: keluarkan dari PROJECT di sini juga harus ikut melepas dari
+// WORKSPACE kalau project ini satu-satunya keterkaitan project target di
+// workspace ini. Target project-scoped-only (TIDAK PERNAH py
+// workspace_members sejak awal, is_scoped=true) dikecualikan -- tidak ada
+// apa pun di level workspace untuk dibersihkan, cukup hapus project_members
+// (perilaku lama) -- delegasi ke RBACService.RemoveMember untuk target ini
+// akan gagal ErrMemberNotFound (GetRole tidak menemukan baris
+// workspace_members sama sekali).
 func (s *ProjectMemberService) RemoveMember(ctx context.Context, exec db.Executor, projectID, targetUserID, actorID, actorRole string) error {
 	if projectID == "" || targetUserID == "" {
 		return fmt.Errorf("service.RemoveMember: %w", domain.ErrInvalidInput)
 	}
-	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return err
 	}
-	if err := s.repo.RemoveMember(ctx, exec, projectID, targetUserID, actorID, actorRole); err != nil {
+
+	workspaceRole, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, targetUserID)
+	if err != nil {
+		return fmt.Errorf("service.RemoveMember: %w", err)
+	}
+	if workspaceRole == "" {
+		if err := s.repo.RemoveMember(ctx, exec, projectID, targetUserID, actorID, actorRole); err != nil {
+			return fmt.Errorf("service.RemoveMember: %w", err)
+		}
+		return nil
+	}
+
+	if err := s.rbac.RemoveMember(ctx, exec, workspaceID, targetUserID, actorID, actorRole, projectID); err != nil {
 		return fmt.Errorf("service.RemoveMember: %w", err)
 	}
 	return nil

@@ -18,6 +18,7 @@ type fakeProjectMemberRepo struct {
 	addErr         error
 	updateErr      error
 	removeErr      error
+	removeCalls    []string
 	listResult     []repository.ProjectMember
 	crossOrgResult []repository.CrossOrgMembership
 	revokeCount    int64
@@ -46,8 +47,12 @@ func (f *fakeProjectMemberRepo) UpdateRole(_ context.Context, _ db.Executor, _, 
 	return f.updateErr
 }
 
-func (f *fakeProjectMemberRepo) RemoveMember(_ context.Context, _ db.Executor, _, _, _, _ string) error {
-	return f.removeErr
+func (f *fakeProjectMemberRepo) RemoveMember(_ context.Context, _ db.Executor, _, userID, _, _ string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	f.removeCalls = append(f.removeCalls, userID)
+	return nil
 }
 
 func (f *fakeProjectMemberRepo) ListMembers(_ context.Context, _ db.Executor, _ string) ([]repository.ProjectMember, error) {
@@ -109,12 +114,19 @@ func (f *fakeCandidateLister) ListProjectMemberCandidates(_ context.Context, _ d
 	return f.result, f.err
 }
 
+type recordedRBACRemoveMember struct {
+	workspaceID, userID, actorID, actorRole, projectID string
+}
+
 type fakeProjectRoleChecker struct {
 	role      string
 	roleErr   error
 	orgID     string
 	orgErr    error
 	assignErr error
+
+	removeMemberErr   error
+	removeMemberCalls []recordedRBACRemoveMember
 }
 
 func (f *fakeProjectRoleChecker) GetMemberRole(_ context.Context, _ db.Executor, _, _ string) (string, error) {
@@ -130,6 +142,14 @@ func (f *fakeProjectRoleChecker) AssignRole(_ context.Context, _ db.Executor, _,
 		return nil, f.assignErr
 	}
 	return &RoleChangeResult{NewRole: role}, nil
+}
+
+func (f *fakeProjectRoleChecker) RemoveMember(_ context.Context, _ db.Executor, workspaceID, userID, actorID, actorRole, projectID string) error {
+	if f.removeMemberErr != nil {
+		return f.removeMemberErr
+	}
+	f.removeMemberCalls = append(f.removeMemberCalls, recordedRBACRemoveMember{workspaceID, userID, actorID, actorRole, projectID})
+	return nil
 }
 
 func TestProjectMemberService_AddMember_PlatformAdminBypass(t *testing.T) {
@@ -211,6 +231,51 @@ func TestProjectMemberService_RemoveMember_Forbidden(t *testing.T) {
 	err := svc.RemoveMember(context.Background(), nil, "proj-1", "user-1", "editor-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want wrapped domain.ErrForbidden", err)
+	}
+}
+
+// TestProjectMemberService_RemoveMember_ScopedOnly_RemovesProjectRowOnly --
+// target project-scoped-only (TIDAK PERNAH py workspace_members,
+// GetMemberRole mengembalikan "") -- cukup hapus project_members lewat
+// repo langsung, TIDAK didelegasikan ke RBACService.RemoveMember (yang
+// akan gagal ErrMemberNotFound untuk target seperti ini).
+func TestProjectMemberService_RemoveMember_ScopedOnly_RemovesProjectRowOnly(t *testing.T) {
+	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	rbac := &fakeProjectRoleChecker{role: ""}
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, rbac, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{}, &fakeCandidateLister{})
+
+	if err := svc.RemoveMember(context.Background(), nil, "proj-1", "user-1", "pm-1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.removeCalls) != 1 || repo.removeCalls[0] != "user-1" {
+		t.Errorf("repo.removeCalls = %v, want [user-1]", repo.removeCalls)
+	}
+	if len(rbac.removeMemberCalls) != 0 {
+		t.Errorf("rbac.removeMemberCalls = %+v, want kosong (scoped-only tidak didelegasikan)", rbac.removeMemberCalls)
+	}
+}
+
+// TestProjectMemberService_RemoveMember_RealWorkspaceMember_DelegatesToRBAC
+// (susulan, ditemukan user: simetris IG-105) -- target SUDAH jadi
+// workspace member sungguhan (GetMemberRole mengembalikan role nyata) --
+// didelegasikan penuh ke RBACService.RemoveMember, yang menentukan
+// sendiri apakah ini full removal (workspace ikut lepas) atau partial
+// (cuma project ini) berdasarkan berapa banyak project lain yang masih
+// terkait -- ProjectMemberService.repo.RemoveMember TIDAK dipanggil
+// langsung di sini (RBACService yang menanganinya).
+func TestProjectMemberService_RemoveMember_RealWorkspaceMember_DelegatesToRBAC(t *testing.T) {
+	repo := &fakeProjectMemberRepo{workspaceID: map[string]string{"proj-1": "ws-1"}}
+	rbac := &fakeProjectRoleChecker{role: "editor"}
+	svc := NewProjectMemberService(repo, &fakeOrgAuthorizer{}, rbac, &fakeBulkMemberInviter{}, &fakeDisplayNameGetter{}, &fakeCandidateLister{})
+
+	if err := svc.RemoveMember(context.Background(), nil, "proj-1", "user-1", "pm-1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.removeCalls) != 0 {
+		t.Errorf("repo.removeCalls = %v, want kosong (RBACService yang menghapus project_members)", repo.removeCalls)
+	}
+	if len(rbac.removeMemberCalls) != 1 || rbac.removeMemberCalls[0] != (recordedRBACRemoveMember{"ws-1", "user-1", "pm-1", "member", "proj-1"}) {
+		t.Errorf("rbac.removeMemberCalls = %+v, want satu entri ws-1/user-1/pm-1/member/proj-1", rbac.removeMemberCalls)
 	}
 }
 
