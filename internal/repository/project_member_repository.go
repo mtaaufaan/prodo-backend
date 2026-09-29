@@ -39,6 +39,13 @@ type ProjectMember struct {
 	AddedAt       time.Time
 	IsPM          bool
 	WorkspaceRole *string
+	// Title (susulan, diminta user setelah menanyakan arti keterangan
+	// sekunder "ditambahkan PM"/"ikut role workspace" -- dinilai kurang
+	// informatif) -- jabatan user (`users.title`), ditampilkan FE
+	// menggantikan teks itu untuk baris PROJECT-SCOPED (editor/approver/
+	// viewer); kosong kalau user belum mengisi jabatan (FE tampilkan
+	// kosong, TIDAK ada fallback lain -- dikonfirmasi user).
+	Title *string
 	// IsPending (IG-100 susulan lanjutan) -- baris sintetis dari
 	// user_invitations yang belum accepted/cancelled, lihat
 	// listPendingInvitations. UserID untuk baris ini BUKAN id user asli
@@ -321,7 +328,7 @@ func (r *ProjectMemberRepository) GetRole(ctx context.Context, exec db.Executor,
 
 func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]ProjectMember, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at, wm.role
+		SELECT pm.project_id, pm.user_id, u.email, u.display_name, pm.role, pm.is_scoped, pm.added_at, wm.role, u.title
 		FROM project_members pm
 		JOIN users u ON u.id = pm.user_id
 		JOIN projects p ON p.id = pm.project_id
@@ -337,7 +344,7 @@ func (r *ProjectMemberRepository) ListMembers(ctx context.Context, exec db.Execu
 	members := make([]ProjectMember, 0)
 	for rows.Next() {
 		var m ProjectMember
-		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Email, &m.Name, &m.Role, &m.IsScoped, &m.AddedAt, &m.WorkspaceRole); err != nil {
+		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Email, &m.Name, &m.Role, &m.IsScoped, &m.AddedAt, &m.WorkspaceRole, &m.Title); err != nil {
 			return nil, fmt.Errorf("repository.ListMembers: scan: %w", err)
 		}
 		members = append(members, m)
@@ -372,7 +379,7 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 	}
 
 	rows, err := exec.Query(ctx, `
-		SELECT pmg.user_id, u.email, u.display_name
+		SELECT pmg.user_id, u.email, u.display_name, u.title
 		FROM project_managers pmg
 		JOIN users u ON u.id = pmg.user_id
 		WHERE pmg.project_id = $1
@@ -388,7 +395,8 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 	}
 	for rows.Next() {
 		var userID, email, name string
-		if err := rows.Scan(&userID, &email, &name); err != nil {
+		var title *string
+		if err := rows.Scan(&userID, &email, &name, &title); err != nil {
 			return nil, fmt.Errorf("repository.ListAssignableMembers: pm scan: %w", err)
 		}
 		if existing[userID] {
@@ -401,6 +409,7 @@ func (r *ProjectMemberRepository) ListAssignableMembers(ctx context.Context, exe
 			Name:      name,
 			Role:      "project_manager",
 			IsPM:      true,
+			Title:     title,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -438,7 +447,7 @@ func (r *ProjectMemberRepository) ListMembersView(ctx context.Context, exec db.E
 	}
 
 	rows, err := exec.Query(ctx, `
-		SELECT wm.user_id, u.email, u.display_name, wm.role, wm.joined_at
+		SELECT wm.user_id, u.email, u.display_name, wm.role, wm.joined_at, u.title
 		FROM workspace_members wm
 		JOIN users u ON u.id = wm.user_id
 		WHERE wm.workspace_id = $1 AND wm.role IN ('admin_workspace', 'division_viewer')
@@ -456,7 +465,8 @@ func (r *ProjectMemberRepository) ListMembersView(ctx context.Context, exec db.E
 	for rows.Next() {
 		var userID, email, name, role string
 		var joinedAt time.Time
-		if err := rows.Scan(&userID, &email, &name, &role, &joinedAt); err != nil {
+		var title *string
+		if err := rows.Scan(&userID, &email, &name, &role, &joinedAt, &title); err != nil {
 			return nil, fmt.Errorf("repository.ListMembersView: scan: %w", err)
 		}
 		if existing[userID] {
@@ -472,6 +482,7 @@ func (r *ProjectMemberRepository) ListMembersView(ctx context.Context, exec db.E
 			IsScoped:      false,
 			AddedAt:       joinedAt,
 			WorkspaceRole: &wsRole,
+			Title:         title,
 		})
 	}
 	if err := rows.Err(); err != nil {
