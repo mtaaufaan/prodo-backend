@@ -54,10 +54,10 @@ func NewContextService(memberships membershipLister, c cache.Cache) *ContextServ
 // UserContext -- hasil GET /me/context. ProjectScopedProjects (susulan) --
 // lihat komentar repository.ProjectScopedMembership.
 type UserContext struct {
-	PlatformRole         string
-	GAConsoleEnabled     bool
-	ActiveContext        string
-	Workspaces           []repository.MembershipRow
+	PlatformRole          string
+	GAConsoleEnabled      bool
+	ActiveContext         string
+	Workspaces            []repository.MembershipRow
 	ProjectScopedProjects []repository.ProjectScopedMembership
 }
 
