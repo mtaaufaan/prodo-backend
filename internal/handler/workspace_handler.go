@@ -639,9 +639,19 @@ func (h *WorkspaceHandler) mapWorkspaceError(c *fiber.Ctx, err error, fallbackMe
 }
 
 // ListMembers menangani GET /workspaces/:wsId/members (S2-07/08 prasyarat,
-// dimajukan dari S3-14 -- lihat implementation_gaps.md IG-09). Cuma
-// mengembalikan `workspace_members`; array `project_scoped_members` yang
-// diminta S3-14 asli menyusul S3 (konsepnya butuh tabel yang belum ada).
+// dimajukan dari S3-14 -- lihat implementation_gaps.md IG-09). Array kedua
+// `project_scoped_members` yang diminta S3-14 asli (waktu itu ditunda,
+// konsepnya butuh tabel yang belum ada) sekarang diisi: member
+// project-scoped-only (PM/editor/approver/viewer TANPA baris
+// workspace_members, ditambahkan lewat halaman Kelola Member Project PM,
+// bukan panel AW ini) -- dikonfirmasi user "tampil dan bisa dikelola penuh
+// dari sini juga". Bentuk objeknya SAMA dengan workspace_members (FE reuse
+// tipe WorkspaceMember apa adanya) supaya bisa digabung satu grid, TAPI
+// Kelola/Keluarkan baris ini di FE WAJIB lewat endpoint
+// /projects/:id/members/:userId (ProjectMemberService) -- endpoint
+// /workspaces/:wsId/members/:userId di bawah (UpdateMemberRole/RemoveMember)
+// mengasumsikan baris workspace_members SUDAH ada (GetRole/RemoveMember di
+// RBACService gagal ErrMemberNotFound untuk target ini).
 func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
@@ -653,6 +663,11 @@ func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 	members, err := h.rbac.ListMembers(c.Context(), exec, workspaceID)
 	if err != nil {
 		h.logger.Error("gagal ambil daftar member", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar member", nil))
+	}
+	scopedMembers, err := h.rbac.ListProjectScopedMembers(c.Context(), exec, workspaceID)
+	if err != nil {
+		h.logger.Error("gagal ambil daftar member project-scoped", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil daftar member", nil))
 	}
 
@@ -670,8 +685,22 @@ func (h *WorkspaceHandler) ListMembers(c *fiber.Ctx) error {
 			"project_id":    m.ProjectID,
 		}
 	}
+	scopedData := make([]fiber.Map, len(scopedMembers))
+	for i := range scopedMembers {
+		m := &scopedMembers[i]
+		scopedData[i] = fiber.Map{
+			"user_id":       m.UserID,
+			"email":         m.Email,
+			"display_name":  m.DisplayName,
+			"title":         m.Title,
+			"role":          m.Role,
+			"joined_at":     m.AddedAt,
+			"project_names": m.ProjectName,
+			"project_id":    m.ProjectID,
+		}
+	}
 
-	return c.JSON(response.Success(fiber.Map{"workspace_members": data}))
+	return c.JSON(response.Success(fiber.Map{"workspace_members": data, "project_scoped_members": scopedData}))
 }
 
 // ListMemberCandidates menangani GET /workspaces/:wsId/member-candidates

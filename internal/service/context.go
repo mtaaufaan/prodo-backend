@@ -31,9 +31,12 @@ func contextCacheKey(jti string) string {
 }
 
 // membershipLister -- interface didefinisikan di consumer, diimplementasikan
-// *WorkspaceMemberRepository.
+// *WorkspaceMemberRepository. ListProjectScopedMembershipsForUser (susulan,
+// lihat komentar repository.ProjectScopedMembership) -- daftar TERPISAH,
+// tidak menyalakan switcher multi-workspace.
 type membershipLister interface {
 	ListMembershipsForUser(ctx context.Context, exec db.Executor, userID string) ([]repository.MembershipRow, error)
+	ListProjectScopedMembershipsForUser(ctx context.Context, exec db.Executor, userID string) ([]repository.ProjectScopedMembership, error)
 }
 
 // ContextService menangani switcher context dual-role GA (S16-01/02/03,
@@ -48,12 +51,14 @@ func NewContextService(memberships membershipLister, c cache.Cache) *ContextServ
 	return &ContextService{memberships: memberships, cache: c}
 }
 
-// UserContext -- hasil GET /me/context.
+// UserContext -- hasil GET /me/context. ProjectScopedProjects (susulan) --
+// lihat komentar repository.ProjectScopedMembership.
 type UserContext struct {
-	PlatformRole     string
-	GAConsoleEnabled bool
-	ActiveContext    string
-	Workspaces       []repository.MembershipRow
+	PlatformRole          string
+	GAConsoleEnabled      bool
+	ActiveContext         string
+	Workspaces            []repository.MembershipRow
+	ProjectScopedProjects []repository.ProjectScopedMembership
 }
 
 // Get mengembalikan context aktif user saat ini + daftar workspace yang dia
@@ -62,6 +67,10 @@ type UserContext struct {
 // dengan perilaku SEBELUM fitur ini ada (RoleGuard platform_role saja).
 func (s *ContextService) Get(ctx context.Context, exec db.Executor, userID, jti, platformRole string) (*UserContext, error) {
 	memberships, err := s.memberships.ListMembershipsForUser(ctx, exec, userID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ContextService.Get: %w", err)
+	}
+	projectScoped, err := s.memberships.ListProjectScopedMembershipsForUser(ctx, exec, userID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ContextService.Get: %w", err)
 	}
@@ -81,10 +90,11 @@ func (s *ContextService) Get(ctx context.Context, exec db.Executor, userID, jti,
 	}
 
 	return &UserContext{
-		PlatformRole:     platformRole,
-		GAConsoleEnabled: gaEnabled,
-		ActiveContext:    active,
-		Workspaces:       memberships,
+		PlatformRole:          platformRole,
+		GAConsoleEnabled:      gaEnabled,
+		ActiveContext:         active,
+		Workspaces:            memberships,
+		ProjectScopedProjects: projectScoped,
 	}, nil
 }
 

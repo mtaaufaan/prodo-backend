@@ -62,6 +62,10 @@ func (f *stubWorkspaceMemberRepository) ListMembers(_ context.Context, _ db.Exec
 	return f.listMembersResult, f.listMembersErr
 }
 
+func (f *stubWorkspaceMemberRepository) ListProjectScopedMembers(_ context.Context, _ db.Executor, _ string) ([]repository.ProjectScopedMember, error) {
+	return nil, nil
+}
+
 func (f *stubWorkspaceMemberRepository) ListOrgCandidates(_ context.Context, _ db.Executor, _ string) ([]repository.Member, error) {
 	return f.listMembersResult, f.listMembersErr
 }
