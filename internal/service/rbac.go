@@ -21,6 +21,7 @@ type workspaceMemberRepository interface {
 	GetRole(ctx context.Context, exec db.Executor, workspaceID, userID string) (string, error)
 	AssignRole(ctx context.Context, exec db.Executor, workspaceID, userID, role string, invitedBy *string, actorID, actorRole string, before, after map[string]string, notifTitle, notifBody string) error
 	ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Member, error)
+	ListProjectScopedMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.ProjectScopedMember, error)
 	ListOrgCandidates(ctx context.Context, exec db.Executor, orgID string) ([]repository.Member, error)
 	ListWorkspaceMemberCandidates(ctx context.Context, exec db.Executor, orgID, workspaceID string) ([]repository.Member, error)
 	GetWorkspaceOrgID(ctx context.Context, exec db.Executor, workspaceID string) (string, error)
@@ -261,6 +262,16 @@ func (s *RBACService) ListMembers(ctx context.Context, exec db.Executor, workspa
 	members, err := s.repo.ListMembers(ctx, exec, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListMembers: %w", err)
+	}
+	return members, nil
+}
+
+// ListProjectScopedMembers -- pass-through tipis ke repo, lihat komentar
+// WorkspaceMemberRepository.ListProjectScopedMembers.
+func (s *RBACService) ListProjectScopedMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.ProjectScopedMember, error) {
+	members, err := s.repo.ListProjectScopedMembers(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListProjectScopedMembers: %w", err)
 	}
 	return members, nil
 }

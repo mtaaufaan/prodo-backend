@@ -129,6 +129,10 @@ func (r stubMemberRepo) ListMembers(context.Context, db.Executor, string) ([]rep
 	return []repository.Member{{UserID: testMemberID, Role: r.role}}, nil
 }
 
+func (stubMemberRepo) ListProjectScopedMembers(context.Context, db.Executor, string) ([]repository.ProjectScopedMember, error) {
+	return nil, nil
+}
+
 func (stubMemberRepo) ListOrgCandidates(context.Context, db.Executor, string) ([]repository.Member, error) {
 	return nil, nil
 }
