@@ -288,10 +288,20 @@ func (s *RBACService) ListOrgCandidates(ctx context.Context, exec db.Executor, o
 // terkait ke LEBIH dari satu project (jarang, mis. PM di 2 project),
 // "Keluarkan" cuma melepas keterkaitan project yang ditampilkan di panel
 // (projectID), member TETAP jadi member workspace ini lewat project
-// lainnya. Kalau cuma terkait SATU project (kasus umum) atau projectID
-// kosong (role workspace-scoped: admin_workspace/division_viewer, atau 8
-// pemanggil lama), hasilnya SAMA seperti sebelumnya -- dihapus total dari
-// workspace_members.
+// lainnya.
+//
+// Kalau cuma terkait SATU project (kasus umum) atau projectID kosong
+// (role workspace-scoped: admin_workspace/division_viewer, atau pemanggil
+// lama), workspace_members dihapus total DI BAWAH -- TAPI baris
+// project_managers/project_members untuk project yang masih terkait itu
+// WAJIB ikut dilepas juga di sini (susulan, implementation_gaps.md IG-105,
+// ditemukan user lewat pengujian live: "AW mengeluarkan Joyse, tercatat
+// keluar dari project DAN workspace, tapi menambahkannya lagi ke project
+// yang sama gagal 'already exists'" -- ternyata baris project_members-nya
+// TIDAK PERNAH ikut terhapus, cuma workspace_members yang hilang,
+// meninggalkan baris nyangkut yang baru ketahuan saat re-add). Kalau tidak
+// dilepas di sini, baris itu jadi nyangkut selamanya -- tidak ada jalur
+// lain yang membersihkannya.
 func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, workspaceID, userID, actorID, actorRole, projectID string) error {
 	// S4W-01: workspace tidak boleh ditinggalkan tanpa admin_workspace --
 	// cek role target LEBIH DULU (dalam transaksi request-scoped yang sama,
@@ -329,6 +339,14 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 				}
 				return nil
 			}
+			// PM cuma di SATU project (kasus umum) -- workspace_members
+			// dihapus total di bawah, project_managers project itu WAJIB
+			// ikut dilepas di sini juga (IG-105, lihat komentar fungsi).
+			if len(pmProjects) == 1 {
+				if err := s.projects.RemovePM(ctx, exec, pmProjects[0].ID, userID, actorID, actorRole); err != nil {
+					return fmt.Errorf("service.RemoveMember: lepas PM dari project: %w", err)
+				}
+			}
 		case "editor", "approver", "viewer":
 			projectIDs, err := s.projectMembers.ListProjectIDsForUserInWorkspace(ctx, exec, workspaceID, userID)
 			if err != nil {
@@ -342,6 +360,14 @@ func (s *RBACService) RemoveMember(ctx context.Context, exec db.Executor, worksp
 					return fmt.Errorf("service.RemoveMember: notifikasi dilepas dari project: %w", err)
 				}
 				return nil
+			}
+			// Cuma terkait SATU project (kasus umum) -- workspace_members
+			// dihapus total di bawah, project_members project itu WAJIB
+			// ikut dilepas di sini juga (IG-105, lihat komentar fungsi).
+			if len(projectIDs) == 1 {
+				if err := s.projectMembers.RemoveMember(ctx, exec, projectIDs[0], userID, actorID, actorRole); err != nil {
+					return fmt.Errorf("service.RemoveMember: lepas dari project: %w", err)
+				}
 			}
 		}
 	}
