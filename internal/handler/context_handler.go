@@ -64,11 +64,27 @@ func (h *ContextHandler) Get(c *fiber.Ctx) error {
 		})
 	}
 
+	// project_scoped_projects (susulan, lihat komentar repository.
+	// ProjectScopedMembership) -- SENGAJA daftar terpisah dari
+	// workspace_memberships, tidak menyalakan switcher multi-workspace.
+	projectScoped := make([]fiber.Map, 0, len(uc.ProjectScopedProjects))
+	for _, p := range uc.ProjectScopedProjects {
+		projectScoped = append(projectScoped, fiber.Map{
+			"project_id":     p.ProjectID,
+			"project_name":   p.ProjectName,
+			"workspace_id":   p.WorkspaceID,
+			"workspace_name": p.WorkspaceName,
+			"org_name":       p.OrgName,
+			"role":           p.Role,
+		})
+	}
+
 	return c.JSON(response.Success(fiber.Map{
-		"platform_role":         uc.PlatformRole,
-		"ga_console_enabled":    uc.GAConsoleEnabled,
-		"active_context":        uc.ActiveContext,
-		"workspace_memberships": workspaces,
+		"platform_role":           uc.PlatformRole,
+		"ga_console_enabled":      uc.GAConsoleEnabled,
+		"active_context":          uc.ActiveContext,
+		"workspace_memberships":   workspaces,
+		"project_scoped_projects": projectScoped,
 	}))
 }
 

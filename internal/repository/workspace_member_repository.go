@@ -67,6 +67,66 @@ func (r *WorkspaceMemberRepository) ListMembershipsForUser(ctx context.Context, 
 	return result, nil
 }
 
+// ProjectScopedMembership -- satu project tempat user ini jadi member
+// project-scoped (project_members ATAU project_managers), TANPA baris
+// workspace_members untuk workspace pemiliknya (susulan, ditemukan user
+// lewat gap-check: project-scoped member tidak pernah muncul di
+// ListMembershipsForUser di atas, bikin Home.tsx/WorkspaceLayout dead-end
+// buat mereka -- lihat migrasi 20261105090000). SENGAJA daftar TERPISAH
+// dari MembershipRow, TIDAK menyalakan switcher multi-workspace
+// (dikonfirmasi user) -- cuma dipakai landing (Home.tsx, kalau
+// MembershipRow kosong) dan fallback resolusi role (WorkspaceLayout,
+// dicocokkan ke project aktif di URL).
+type ProjectScopedMembership struct {
+	ProjectID     string
+	ProjectName   string
+	WorkspaceID   string
+	WorkspaceName string
+	OrgName       string
+	Role          string
+}
+
+// ListProjectScopedMembershipsForUser -- lihat komentar ProjectScopedMembership.
+// PM TIDAK PERNAH project-scoped-only (AddMembersBulk/CreateBulkInvitations
+// selalu mewajibkan workspace_members untuk role project_manager, lihat
+// komentar projectScopedBulkRoles) -- klausa project_managers di sini
+// murni jaga-jaga struktural (skema polymorphic yang sama), bukan jalur
+// yang benar-benar dipakai hari ini.
+func (r *WorkspaceMemberRepository) ListProjectScopedMembershipsForUser(ctx context.Context, exec db.Executor, userID string) ([]ProjectScopedMembership, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT DISTINCT p.id, p.name, p.workspace_id, w.name, o.name,
+		  CASE WHEN pmg.user_id IS NOT NULL THEN 'project_manager' ELSE pm.role::text END
+		FROM projects p
+		JOIN workspaces w ON w.id = p.workspace_id
+		JOIN organizations o ON o.id = w.org_id
+		LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $1
+		LEFT JOIN project_managers pmg ON pmg.project_id = p.id AND pmg.user_id = $1
+		WHERE (pm.user_id = $1 OR pmg.user_id = $1)
+		  AND p.deleted_at IS NULL
+		  AND NOT EXISTS (
+		    SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = p.workspace_id AND wm.user_id = $1
+		  )
+		ORDER BY o.name, w.name, p.name
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListProjectScopedMembershipsForUser: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]ProjectScopedMembership, 0)
+	for rows.Next() {
+		var m ProjectScopedMembership
+		if err := rows.Scan(&m.ProjectID, &m.ProjectName, &m.WorkspaceID, &m.WorkspaceName, &m.OrgName, &m.Role); err != nil {
+			return nil, fmt.Errorf("repository.ListProjectScopedMembershipsForUser: scan: %w", err)
+		}
+		result = append(result, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListProjectScopedMembershipsForUser: rows: %w", err)
+	}
+	return result, nil
+}
+
 // GetRole mengembalikan role user saat ini di workspace -- pgx.ErrNoRows
 // (tidak di-wrap ke domain error di sini, dicek via errors.Is oleh
 // caller) kalau user belum jadi member.
@@ -188,9 +248,8 @@ type Member struct {
 
 // ListMembers mengembalikan seluruh member LANGSUNG workspace (S2-07/08
 // prasyarat -- S3-14 asli minta dua array workspace_members+
-// project_scoped_members, tapi konsep project-scoped member butuh tabel
-// yang belum ada di S2; cuma workspace_members dulu, cukup untuk
-// RolePickerModal S2-07/08).
+// project_scoped_members; array kedua itu sekarang ListProjectScopedMembers
+// di bawah, dipanggil terpisah oleh WorkspaceHandler.ListMembers).
 func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]Member, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT wm.user_id, u.email, u.display_name, u.title, wm.role, wm.joined_at,
@@ -225,6 +284,63 @@ func (r *WorkspaceMemberRepository) ListMembers(ctx context.Context, exec db.Exe
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("repository.ListMembers: rows: %w", err)
+	}
+	return members, nil
+}
+
+// ProjectScopedMember -- satu baris member project-scoped-only
+// (project_members, TANPA baris workspace_members) di SATU project
+// workspace ini -- ditampilkan di halaman Member & Roles AW-facing
+// (WorkspaceMembersPage) berdampingan dengan ListMembers di atas,
+// dikonfirmasi user "tampil dan bisa dikelola penuh dari sini juga". Satu
+// baris per (project, user) -- kalau user scoped di >1 project workspace
+// ini, muncul >1 baris; Kelola/Keluarkan FE tetap lewat endpoint
+// /projects/:id/members/:userId yang sudah ada (ProjectMemberService),
+// BUKAN endpoint /workspaces/:wsId/members/:userId (yang butuh baris
+// workspace_members) -- lihat komentar WorkspaceHandler.ListMembers.
+type ProjectScopedMember struct {
+	UserID      string
+	Email       string
+	DisplayName string
+	Title       *string
+	Role        string
+	ProjectID   string
+	ProjectName string
+	AddedAt     time.Time
+}
+
+// ListProjectScopedMembers mengembalikan seluruh project_members (BUKAN
+// project_managers -- PM tidak pernah project-scoped-only, lihat komentar
+// ListProjectScopedMembershipsForUser) di project-project milik
+// workspaceID yang usernya TIDAK punya baris workspace_members sama
+// sekali.
+func (r *WorkspaceMemberRepository) ListProjectScopedMembers(ctx context.Context, exec db.Executor, workspaceID string) ([]ProjectScopedMember, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT u.id, u.email, u.display_name, u.title, pm.role, p.id, p.name, pm.added_at
+		FROM project_members pm
+		JOIN projects p ON p.id = pm.project_id
+		JOIN users u ON u.id = pm.user_id
+		WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
+		  AND NOT EXISTS (
+		    SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.user_id = pm.user_id
+		  )
+		ORDER BY pm.added_at ASC
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListProjectScopedMembers: %w", err)
+	}
+	defer rows.Close()
+
+	members := make([]ProjectScopedMember, 0)
+	for rows.Next() {
+		var m ProjectScopedMember
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Title, &m.Role, &m.ProjectID, &m.ProjectName, &m.AddedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListProjectScopedMembers: scan: %w", err)
+		}
+		members = append(members, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository.ListProjectScopedMembers: rows: %w", err)
 	}
 	return members, nil
 }

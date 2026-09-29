@@ -452,14 +452,21 @@ func run() error {
 	// IG-09) -- lihat komentar WorkspaceHandler.ListMembers. Semua 5 role
 	// workspace boleh lihat daftar member workspace mereka sendiri.
 	v1.Get("/workspaces/:wsId/members", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.ListMembers)
-	// S4-04 prasyarat: nama workspace untuk header WorkspaceLayout, sama
-	// gate seperti ListMembers (semua role workspace boleh lihat).
-	v1.Get("/workspaces/:wsId", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), workspaceHandler.Get)
+	// S4-04 prasyarat: nama workspace untuk header WorkspaceLayout. TANPA
+	// RequireRole (susulan, ditemukan user: project-scoped member -- TANPA
+	// baris workspace_members -- tidak bisa masuk ke workspace tempat
+	// project-nya berada sama sekali, lihat migrasi 20261105090000) --
+	// data yang dikembalikan tidak sensitif (nama workspace/org), RLS
+	// workspaces_select yang menegakkan siapa boleh lihat baris apa (sudah
+	// mencakup project-scoped lewat prodo_is_project_member_of_workspace).
+	v1.Get("/workspaces/:wsId", jwtAuth, dbCtx, workspaceHandler.Get)
 	// S4-02/03/04, US-012 (AW Add Project.dc.html/AW Projects.dc.html):
-	// create dibatasi AW/PM (pemilik menu "Project" di Master UI User),
-	// list boleh seluruh role workspace (sama pola ListMembers di atas).
+	// create TETAP dibatasi AW/PM (pemilik menu "Project" di Master UI
+	// User). List TANPA RequireRole (sama alasan GET /workspaces/:wsId di
+	// atas) -- RLS projects_select sudah membatasi ke project yang relevan
+	// (prodo_is_workspace_member ATAU prodo_is_project_member) sejak awal.
 	v1.Post("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager"), projectHandler.Create)
-	v1.Get("/workspaces/:wsId/projects", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace", "project_manager", "editor", "approver", "viewer"), projectHandler.List)
+	v1.Get("/workspaces/:wsId/projects", jwtAuth, dbCtx, projectHandler.List)
 	// Task Management Core Phase 1 (forward-pull, desain "PM Board.dc.html"):
 	// kolom papan Kanban -- status sistem di-seed otomatis saat workspace
 	// dibuat (WorkspaceRepository.Create), sama gate ListMembers.
