@@ -99,6 +99,7 @@ type taskStatusSessionRepository interface {
 	CloseActiveSession(ctx context.Context, exec db.Executor, taskID string) error
 	StartWork(ctx context.Context, exec db.Executor, taskID string) error
 	ListForTask(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskStatusSession, error)
+	ListForProject(ctx context.Context, exec db.Executor, projectID string) ([]repository.TaskStatusSession, error)
 	NotifyRegression(ctx context.Context, exec db.Executor, taskID, projectID string) error
 }
 
@@ -720,6 +721,21 @@ func (s *TaskService) ListStatusSessions(ctx context.Context, exec db.Executor, 
 	list, err := s.sessions.ListForTask(ctx, exec, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListStatusSessions: %w", err)
+	}
+	return list, nil
+}
+
+// ListStatusSessionsForProject menangani GET /projects/:id/status-sessions
+// (menu Board tab Gantt, bar ACTUAL -- US-039/H22-24): SEMUA sesi status
+// SELURUH task project ini sekaligus, pola sama List (tasks) -- TIDAK ada
+// pengecekan otorisasi tambahan, scoping lewat RLS tasks/task_status_sessions.
+func (s *TaskService) ListStatusSessionsForProject(ctx context.Context, exec db.Executor, projectID string) ([]repository.TaskStatusSession, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListStatusSessionsForProject: %w", domain.ErrInvalidInput)
+	}
+	list, err := s.sessions.ListForProject(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListStatusSessionsForProject: %w", err)
 	}
 	return list, nil
 }

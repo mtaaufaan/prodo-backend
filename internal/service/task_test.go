@@ -152,6 +152,9 @@ func (f *fakeTaskSessions) StartWork(_ context.Context, _ db.Executor, _ string)
 func (f *fakeTaskSessions) ListForTask(_ context.Context, _ db.Executor, _ string) ([]repository.TaskStatusSession, error) {
 	return nil, nil
 }
+func (f *fakeTaskSessions) ListForProject(_ context.Context, _ db.Executor, _ string) ([]repository.TaskStatusSession, error) {
+	return nil, nil
+}
 func (f *fakeTaskSessions) NotifyRegression(_ context.Context, _ db.Executor, _, _ string) error {
 	return nil
 }

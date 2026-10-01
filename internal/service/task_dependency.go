@@ -18,6 +18,7 @@ import (
 type taskDependencyRepository interface {
 	ListPredecessors(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskDependency, error)
 	ListSuccessors(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskDependency, error)
+	ListForProject(ctx context.Context, exec db.Executor, projectID string) ([]repository.TaskDependency, error)
 	WouldCreateCycle(ctx context.Context, exec db.Executor, predecessorID, successorID string) ([]string, error)
 	Create(ctx context.Context, exec db.Executor, predecessorID, successorID string, createdBy *string, actorRole, workspaceID string) error
 	Delete(ctx context.Context, exec db.Executor, predecessorID, successorID, actorID, actorRole, workspaceID string) error
@@ -84,6 +85,21 @@ func (s *TaskDependencyService) List(ctx context.Context, exec db.Executor, task
 		return nil, nil, fmt.Errorf("service.List: %w", err)
 	}
 	return predecessors, successors, nil
+}
+
+// ListForProject menangani GET /projects/:id/dependencies (menu Board tab
+// Gantt, panah dependency -- US-039/S7-13): SEMUA dependency project ini
+// sekaligus, pola sama TaskService.List -- TIDAK ada pengecekan otorisasi
+// tambahan, scoping lewat RLS task_dependencies/tasks.
+func (s *TaskDependencyService) ListForProject(ctx context.Context, exec db.Executor, projectID string) ([]repository.TaskDependency, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("service.ListForProject: %w", domain.ErrInvalidInput)
+	}
+	list, err := s.repo.ListForProject(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListForProject: %w", err)
+	}
+	return list, nil
 }
 
 // Add menangani POST /tasks/:id/dependencies (US-018, S4-47/51) -- taskID
