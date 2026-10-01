@@ -19,7 +19,7 @@ type fakeTaskRepo struct {
 	setStatusAuditRole string
 }
 
-func (f *fakeTaskRepo) Create(_ context.Context, _ db.Executor, _ string, _, _ *string, _, _ string, _ json.RawMessage, _ string, _ *time.Time, _ *float64, _ *int, _ string, _ []string, _, _ string) (*repository.Task, error) {
+func (f *fakeTaskRepo) Create(_ context.Context, _ db.Executor, _ string, _, _ *string, _, _ string, _ json.RawMessage, _ string, _, _ *time.Time, _ *float64, _ *int, _ string, _ []string, _, _ string) (*repository.Task, error) {
 	return nil, nil
 }
 func (f *fakeTaskRepo) Get(_ context.Context, _ db.Executor, taskID string) (*repository.Task, error) {
@@ -50,7 +50,7 @@ func (f *fakeTaskRepo) List(_ context.Context, _ db.Executor, projectID string, 
 	}
 	return out, nil
 }
-func (f *fakeTaskRepo) Update(_ context.Context, _ db.Executor, _, _ string, _ json.RawMessage, _ string, _ *time.Time, _ *float64, _ *int, _ *string, _, _, _ string) error {
+func (f *fakeTaskRepo) Update(_ context.Context, _ db.Executor, _, _ string, _ json.RawMessage, _ string, _, _ *time.Time, _ *float64, _ *int, _ *string, _, _, _ string) error {
 	return nil
 }
 func (f *fakeTaskRepo) SetStatus(_ context.Context, _ db.Executor, taskID, statusID string, _ bool, _, actorRole, _, _, _ string) error {

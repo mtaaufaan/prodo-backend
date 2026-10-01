@@ -23,10 +23,10 @@ var validTaskPriority = map[string]bool{"critical": true, "high": true, "medium"
 
 // taskRepository -- interface didefinisikan di consumer, §3.9.
 type taskRepository interface {
-	Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string, actorRole, workspaceID string) (*repository.Task, error)
+	Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string, actorRole, workspaceID string) (*repository.Task, error)
 	Get(ctx context.Context, exec db.Executor, taskID string) (*repository.Task, error)
 	List(ctx context.Context, exec db.Executor, projectID string, f repository.TaskFilter) ([]repository.Task, error)
-	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error
+	Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error
 	SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, isDone bool, actorID, actorRole, workspaceID, statusBefore, statusAfter string) error
 	SetPosition(ctx context.Context, exec db.Executor, taskID string, position float64) error
 	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole, workspaceID string) error
@@ -217,7 +217,7 @@ func equalIntPtr(a, b *int) bool {
 // (opsional, NULL = belum diestimasi). Memicu rule trigger "task_created"
 // (S4W-11, US-049) setelah berhasil -- best-effort, tidak menggagalkan
 // pembuatan task.
-func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, assigneeUserIDs []string, actorID, actorRole string) (*repository.Task, error) {
+func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, assigneeUserIDs []string, actorID, actorRole string) (*repository.Task, error) {
 	title = strings.TrimSpace(title)
 	if projectID == "" || len(title) < 3 {
 		return nil, fmt.Errorf("service.Create: %w", domain.ErrInvalidInput)
@@ -246,7 +246,7 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
 
-	task, err := s.repo.Create(ctx, exec, projectID, sprintID, nil, backlog.ID, title, description, priority, dueDate, estimatedHours, storyPoints, actorID, assigneeUserIDs, auditRole, workspaceID)
+	task, err := s.repo.Create(ctx, exec, projectID, sprintID, nil, backlog.ID, title, description, priority, startDate, dueDate, estimatedHours, storyPoints, actorID, assigneeUserIDs, auditRole, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
@@ -281,7 +281,7 @@ func (s *TaskService) List(ctx context.Context, exec db.Executor, projectID stri
 // tersimpan (FE selalu mengirim story_points current di form edit, bukan
 // cuma saat sengaja diubah -- gate literal "field dikirim" akan salah
 // menolak edit judul/priority biasa untuk Editor tanpa izin SP).
-func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole string) error {
+func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole string) error {
 	title = strings.TrimSpace(title)
 	if taskID == "" || len(title) < 3 {
 		return fmt.Errorf("service.Update: %w", domain.ErrInvalidInput)
@@ -329,7 +329,7 @@ func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, titl
 			return fmt.Errorf("service.Update: %w", err)
 		}
 	}
-	if err := s.repo.Update(ctx, exec, taskID, title, description, priority, dueDate, estimatedHours, storyPoints, sprintID, actorID, role, workspaceID); err != nil {
+	if err := s.repo.Update(ctx, exec, taskID, title, description, priority, startDate, dueDate, estimatedHours, storyPoints, sprintID, actorID, role, workspaceID); err != nil {
 		return fmt.Errorf("service.Update: %w", err)
 	}
 	return nil
@@ -655,7 +655,7 @@ func (s *TaskService) CreateSubtaskForRule(ctx context.Context, exec db.Executor
 	if err != nil {
 		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
-	if _, err := s.repo.Create(ctx, exec, projectID, nil, &parentTaskID, backlog.ID, title, nil, "medium", nil, nil, nil, actorID, nil, "", workspaceID); err != nil {
+	if _, err := s.repo.Create(ctx, exec, projectID, nil, &parentTaskID, backlog.ID, title, nil, "medium", nil, nil, nil, nil, actorID, nil, "", workspaceID); err != nil {
 		return fmt.Errorf("service.CreateSubtaskForRule: %w", err)
 	}
 	return nil
