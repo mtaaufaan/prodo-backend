@@ -126,6 +126,38 @@ func (r *TaskStatusSessionRepository) ListForTask(ctx context.Context, exec db.E
 	return list, rows.Err()
 }
 
+// ListForProject -- SEMUA sesi status SELURUH task dalam satu project
+// sekaligus (menu Board tab Gantt, bar ACTUAL -- US-039, H22-24), supaya FE
+// tidak perlu fetch per-task (N+1) untuk hitung ACTUAL start/end semua
+// baris Gantt dalam satu layar -- pola sama TaskDependencyRepository.
+// ListForProject.
+func (r *TaskStatusSessionRepository) ListForProject(ctx context.Context, exec db.Executor, projectID string) ([]TaskStatusSession, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT tss.id, tss.task_id, tss.status_id, cs.name, tss.session_no, tss.entered_at,
+		       tss.work_started_at, tss.is_auto_start, tss.exited_at, tss.is_regression, tss.triggered_by
+		FROM task_status_sessions tss
+		JOIN custom_statuses cs ON cs.id = tss.status_id
+		JOIN tasks t ON t.id = tss.task_id
+		WHERE t.project_id = $1 AND t.deleted_at IS NULL
+		ORDER BY tss.task_id, tss.entered_at ASC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListForProject: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]TaskStatusSession, 0)
+	for rows.Next() {
+		var s TaskStatusSession
+		if err := rows.Scan(&s.ID, &s.TaskID, &s.StatusID, &s.StatusName, &s.SessionNo, &s.EnteredAt,
+			&s.WorkStartedAt, &s.IsAutoStart, &s.ExitedAt, &s.IsRegression, &s.TriggeredBy); err != nil {
+			return nil, fmt.Errorf("repository.ListForProject: scan: %w", err)
+		}
+		list = append(list, s)
+	}
+	return list, rows.Err()
+}
+
 // NotifyRegression -- S4-68: notify SEMUA PM project (project_managers,
 // susulan multi-PM -- dulu satu dari projects.pm_user_id) + seluruh Admin
 // Workspace begitu regresi terjadi. Satu INSERT...SELECT, bukan loop

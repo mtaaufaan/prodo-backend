@@ -85,6 +85,16 @@ func (r *TaskDependencyRepository) ListSuccessors(ctx context.Context, exec db.E
 	return r.queryDependencies(ctx, exec, "td.predecessor_id = $1", taskID)
 }
 
+// ListForProject -- SEMUA dependency antar task dalam satu project sekaligus
+// (menu Board tab Gantt, panah dependency -- US-039/S7-13), supaya FE tidak
+// perlu fetch per-task (N+1) untuk gambar semua panah dalam satu layar.
+// predecessor dan successor DIJAMIN sama project (ErrDependencyCrossProject
+// menolak pembentukan lintas-project sejak awal), jadi filter SATU sisi saja
+// (tp.project_id) sudah cukup -- tp dan ts otomatis project yang sama.
+func (r *TaskDependencyRepository) ListForProject(ctx context.Context, exec db.Executor, projectID string) ([]TaskDependency, error) {
+	return r.queryDependencies(ctx, exec, "tp.project_id = $1", projectID)
+}
+
 // ListIncompletePredecessors -- predecessor taskID yang BELUM berstatus
 // DONE (US-018, S4-48 HARD-BLOCK: dicek sebelum status task ini berubah).
 func (r *TaskDependencyRepository) ListIncompletePredecessors(ctx context.Context, exec db.Executor, taskID string) ([]TaskDependency, error) {
