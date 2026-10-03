@@ -226,12 +226,27 @@ func (h *AccountSettingsHandler) RegenerateBackupCodes(c *fiber.Ctx) error {
 }
 
 // ListNotificationPreferences menangani GET /users/me/notification-preferences.
+//
+// ?scope=group|workspace memilih daftar jenis notifikasi (konsol Group Admin
+// vs kerangka workspace) -- akun dual-role (GA + role workspace) membuka
+// keduanya. Tanpa scope: group untuk group_admin/platform_admin, selain itu
+// workspace.
 func (h *AccountSettingsHandler) ListNotificationPreferences(c *fiber.Ctx) error {
-	_, userID, done := h.resolveSelf(c)
+	claims, userID, done := h.resolveSelf(c)
 	if done {
 		return nil
 	}
-	prefs, err := h.profile.ListNotificationPreferences(c.Context(), userID)
+	scope := c.Query("scope")
+	if scope == "" {
+		scope = repository.NotificationScopeWorkspace
+		if claims.PlatformRole == "group_admin" || claims.PlatformRole == "platform_admin" {
+			scope = repository.NotificationScopeGroup
+		}
+	}
+	prefs, err := h.profile.ListNotificationPreferences(c.Context(), userID, scope)
+	if errors.Is(err, domain.ErrInvalidInput) {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "scope harus group atau workspace", nil))
+	}
 	if err != nil {
 		h.logger.Error("gagal mengambil preferensi notifikasi", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengambil preferensi notifikasi", nil))
@@ -259,14 +274,7 @@ func (h *AccountSettingsHandler) UpdateNotificationPreference(c *fiber.Ctx) erro
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
-	valid := false
-	for _, ev := range repository.GroupAdminNotificationEvents {
-		if ev.Key == req.EventType {
-			valid = true
-			break
-		}
-	}
-	if !valid {
+	if !repository.IsKnownNotificationEvent(req.EventType) {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "event_type tidak dikenal", nil))
 	}
 

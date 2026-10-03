@@ -31,6 +31,47 @@ var GroupAdminNotificationEvents = []NotificationEventType{
 	{Key: "account.security_activity", Label: "Aktivitas keamanan akun", Note: "Login perangkat baru, ganti password, reset MFA"},
 }
 
+// WorkspaceNotificationEvents -- daftar jenis notifikasi untuk role workspace
+// (Admin Workspace/PM/Editor/Approver/Viewer), desain "User Pengaturan
+// Akun.dc.html" (NOTIF_DEFS). `account.security_activity` SENGAJA sama dengan
+// milik Group Admin -- satu preferensi tersimpan per (user, event_type).
+var WorkspaceNotificationEvents = []NotificationEventType{
+	{Key: "comment.mention", Label: "Mention pada komentar", Note: "Saat nama Anda di-tag @; tunduk pada cooldown mention workspace"},
+	{Key: "task.pic_assigned", Label: "Penunjukan PIC & permintaan acknowledge", Note: "Saat Anda dipilih sebagai PIC fase berikutnya"},
+	{Key: "task.assigned", Label: "Task ditugaskan ke saya", Note: "Assignee baru atau perubahan assignee pada task Anda"},
+	{Key: "task.due_date", Label: "Due date & keterlambatan", Note: "Pengingat H-1 dan saat task melewati due date"},
+	{Key: "approval.pending", Label: "Antrean approval", Note: "Task masuk ke tahap yang menunggu keputusan Anda"},
+	{Key: "account.security_activity", Label: "Aktivitas keamanan akun", Note: "Login perangkat baru, ganti password, perubahan MFA"},
+}
+
+const (
+	NotificationScopeGroup     = "group"
+	NotificationScopeWorkspace = "workspace"
+)
+
+// NotificationEventsForScope -- ok=false untuk scope yang tidak dikenal.
+func NotificationEventsForScope(scope string) (events []NotificationEventType, ok bool) {
+	switch scope {
+	case NotificationScopeGroup:
+		return GroupAdminNotificationEvents, true
+	case NotificationScopeWorkspace:
+		return WorkspaceNotificationEvents, true
+	}
+	return nil, false
+}
+
+// IsKnownNotificationEvent -- event_type valid kalau ada di salah satu daftar.
+func IsKnownNotificationEvent(key string) bool {
+	for _, list := range [][]NotificationEventType{GroupAdminNotificationEvents, WorkspaceNotificationEvents} {
+		for _, ev := range list {
+			if ev.Key == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NotificationPreference adalah satu baris hasil gabungan preferensi
 // tersimpan + default (§5.35: "Jika tidak ada record ... in_app=TRUE,
 // push=TRUE, email=FALSE").
@@ -49,17 +90,17 @@ func NewNotificationPreferenceRepository(db *pgxpool.Pool) *NotificationPreferen
 	return &NotificationPreferenceRepository{db: db}
 }
 
-// ListForGroupAdmin mengembalikan GroupAdminNotificationEvents lengkap,
-// disi dari notification_preferences kalau sudah pernah diatur, atau
-// default skema kalau belum -- GET /users/me/notification-preferences
-// selalu mengembalikan SEMUA 5 event (bukan cuma yang sudah ada baris-nya)
-// supaya FE tidak perlu tahu perbedaan "belum diatur" vs "default".
-func (r *NotificationPreferenceRepository) ListForGroupAdmin(ctx context.Context, userID string) ([]NotificationPreference, error) {
+// List mengembalikan SEMUA `events` (daftar milik scope pemanggil), diisi dari
+// notification_preferences kalau sudah pernah diatur, atau default skema kalau
+// belum -- GET /users/me/notification-preferences selalu mengembalikan semua
+// event (bukan cuma yang sudah ada baris-nya) supaya FE tidak perlu tahu
+// perbedaan "belum diatur" vs "default".
+func (r *NotificationPreferenceRepository) List(ctx context.Context, userID string, events []NotificationEventType) ([]NotificationPreference, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT event_type, in_app, push, email FROM notification_preferences WHERE user_id = $1
 	`, userID)
 	if err != nil {
-		return nil, fmt.Errorf("repository.ListForGroupAdmin: %w", err)
+		return nil, fmt.Errorf("repository.List: %w", err)
 	}
 	defer rows.Close()
 
@@ -67,16 +108,16 @@ func (r *NotificationPreferenceRepository) ListForGroupAdmin(ctx context.Context
 	for rows.Next() {
 		var p NotificationPreference
 		if err := rows.Scan(&p.EventType, &p.InApp, &p.Push, &p.Email); err != nil {
-			return nil, fmt.Errorf("repository.ListForGroupAdmin: scan: %w", err)
+			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		saved[p.EventType] = p
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("repository.ListForGroupAdmin: %w", err)
+		return nil, fmt.Errorf("repository.List: %w", err)
 	}
 
-	result := make([]NotificationPreference, len(GroupAdminNotificationEvents))
-	for i, ev := range GroupAdminNotificationEvents {
+	result := make([]NotificationPreference, len(events))
+	for i, ev := range events {
 		if p, ok := saved[ev.Key]; ok {
 			result[i] = p
 			continue
