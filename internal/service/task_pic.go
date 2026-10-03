@@ -23,8 +23,17 @@ type taskPicHistoryRepository interface {
 	HandoffPic(ctx context.Context, exec db.Executor, taskID, statusID, statusName string, fromUserIDs []string, toUserID, actorID, actorRole, workspaceID string) error
 	ListGroupForStatus(ctx context.Context, exec db.Executor, projectID, statusID string) ([]repository.PicGroupMember, error)
 	ListGroupForProject(ctx context.Context, exec db.Executor, projectID string) ([]repository.PicGroupMember, error)
-	AddGroupMember(ctx context.Context, exec db.Executor, projectID, statusID, userID string, addedBy string) error
-	RemoveGroupMember(ctx context.Context, exec db.Executor, projectID, statusID, userID string) error
+	ReplaceGroup(ctx context.Context, exec db.Executor, projectID, statusID string, userIDs []string, actorID, actorRole, workspaceID string) ([]repository.PicGroupMember, error)
+}
+
+// picGroupStatusResolver / picGroupMemberLister -- validasi PUT PIC Group:
+// status harus milik project ini, user harus member project yang boleh jadi PIC.
+type picGroupStatusResolver interface {
+	Get(ctx context.Context, exec db.Executor, statusID string) (*repository.CustomStatus, error)
+}
+
+type picGroupMemberLister interface {
+	ListAssignableMembers(ctx context.Context, exec db.Executor, projectID string) ([]repository.ProjectMember, error)
 }
 
 // taskPicTaskResolver -- reuse TaskRepository.Get (IG-97 susulan) supaya
@@ -41,6 +50,8 @@ type TaskPicService struct {
 	projects     taskProjectResolver
 	rbac         sprintWorkspaceRoleChecker
 	projectRoles sprintProjectRoleChecker
+	statuses     picGroupStatusResolver
+	members      picGroupMemberLister
 }
 
 // NewTaskPicService -- ListActive/ListHistory/Acknowledge SENGAJA tidak
@@ -48,8 +59,8 @@ type TaskPicService struct {
 // RemoveGroupMember) -- RLS task_pic_phases_all sudah menyaring lewat
 // project membership task induk, dan Acknowledge sendiri cuma bisa
 // menyentuh baris milik actor sendiri (WHERE user_id = actor di query).
-func NewTaskPicService(repo taskPicHistoryRepository, tasks taskPicTaskResolver, projects taskProjectResolver, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TaskPicService {
-	return &TaskPicService{repo: repo, tasks: tasks, projects: projects, rbac: rbac, projectRoles: projectRoles}
+func NewTaskPicService(repo taskPicHistoryRepository, tasks taskPicTaskResolver, projects taskProjectResolver, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker, statuses picGroupStatusResolver, members picGroupMemberLister) *TaskPicService {
+	return &TaskPicService{repo: repo, tasks: tasks, projects: projects, rbac: rbac, projectRoles: projectRoles, statuses: statuses, members: members}
 }
 
 // authorizeProject -- identik TaskService.resolveRole (viewer/
@@ -160,30 +171,58 @@ func (s *TaskPicService) ListGroup(ctx context.Context, exec db.Executor, projec
 	return list, nil
 }
 
-func (s *TaskPicService) AddGroupMember(ctx context.Context, exec db.Executor, projectID, statusID, userID, actorID, actorRole string) error {
-	if projectID == "" || statusID == "" || userID == "" {
-		return fmt.Errorf("service.AddGroupMember: %w", domain.ErrInvalidInput)
+// ReplaceGroup -- PUT /projects/:id/pic-groups/:statusId. Mengganti seluruh
+// anggota PIC Group status ini (kosong = Full handoff). Validasi (semuanya
+// SEBELUM menulis apa pun): hanya PM/AW (authorizePicGroupManage); status
+// harus status PROJECT ini; setiap user harus member project (termasuk PM)
+// dengan role yang boleh jadi PIC -- Viewer dan Admin Workspace/Division
+// Viewer ditolak. user_id ganda dibuang (set).
+func (s *TaskPicService) ReplaceGroup(ctx context.Context, exec db.Executor, projectID, statusID string, userIDs []string, actorID, actorRole string) ([]repository.PicGroupMember, error) {
+	if projectID == "" || statusID == "" {
+		return nil, fmt.Errorf("service.ReplaceGroup: %w", domain.ErrInvalidInput)
 	}
 	if err := s.authorizePicGroupManage(ctx, exec, projectID, actorID, actorRole); err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.repo.AddGroupMember(ctx, exec, projectID, statusID, userID, actorID); err != nil {
-		return fmt.Errorf("service.AddGroupMember: %w", err)
+	status, err := s.statuses.Get(ctx, exec, statusID)
+	if err != nil || status == nil || status.ScopeType != "project" || status.ScopeID != projectID {
+		return nil, fmt.Errorf("service.ReplaceGroup: %w", domain.ErrInvalidInput)
 	}
-	return nil
-}
 
-func (s *TaskPicService) RemoveGroupMember(ctx context.Context, exec db.Executor, projectID, statusID, userID, actorID, actorRole string) error {
-	if projectID == "" || statusID == "" || userID == "" {
-		return fmt.Errorf("service.RemoveGroupMember: %w", domain.ErrInvalidInput)
+	eligible := map[string]bool{}
+	if len(userIDs) > 0 {
+		members, err := s.members.ListAssignableMembers(ctx, exec, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("service.ReplaceGroup: %w", err)
+		}
+		for i := range members {
+			if members[i].Role != "viewer" && members[i].Role != "admin_workspace" && members[i].Role != "division_viewer" {
+				eligible[members[i].UserID] = true
+			}
+		}
 	}
-	if err := s.authorizePicGroupManage(ctx, exec, projectID, actorID, actorRole); err != nil {
-		return err
+	unique := make([]string, 0, len(userIDs))
+	seen := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if !eligible[id] {
+			return nil, fmt.Errorf("service.ReplaceGroup: %w", domain.ErrPicGroupIneligibleMember)
+		}
+		unique = append(unique, id)
 	}
-	if err := s.repo.RemoveGroupMember(ctx, exec, projectID, statusID, userID); err != nil {
-		return fmt.Errorf("service.RemoveGroupMember: %w", err)
+
+	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ReplaceGroup: %w", err)
 	}
-	return nil
+	list, err := s.repo.ReplaceGroup(ctx, exec, projectID, statusID, unique, actorID, actorRole, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ReplaceGroup: %w", err)
+	}
+	return list, nil
 }
 
 // checkPicGroupAllowed -- reuse EXACT sama guard Full vs Terbatas dipakai

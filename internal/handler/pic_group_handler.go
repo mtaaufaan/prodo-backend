@@ -45,13 +45,14 @@ func (h *PicGroupHandler) List(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
-type picGroupRequest struct {
-	StatusID string `json:"status_id"`
-	UserID   string `json:"user_id"`
+type picGroupReplaceRequest struct {
+	UserIDs []string `json:"user_ids"`
 }
 
-// Add menangani POST /projects/:id/pic-groups.
-func (h *PicGroupHandler) Add(c *fiber.Ctx) error {
+// Replace menangani PUT /projects/:id/pic-groups/:statusId -- mengganti
+// SELURUH anggota PIC Group status ini (user_ids kosong = Full handoff,
+// tombol KOSONGKAN). Satu operasi atomik + satu entri audit.
+func (h *PicGroupHandler) Replace(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
@@ -60,33 +61,19 @@ func (h *PicGroupHandler) Add(c *fiber.Ctx) error {
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
-	projectID := c.Params("id")
-
-	var body picGroupRequest
+	var body picGroupReplaceRequest
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	if err := h.pics.AddGroupMember(c.Context(), exec, projectID, body.StatusID, body.UserID, actorUserID, actorRole); err != nil {
-		return h.mapError(c, err, "Gagal menambah anggota PIC Group")
+	list, err := h.pics.ReplaceGroup(c.Context(), exec, c.Params("id"), c.Params("statusId"), body.UserIDs, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal menyimpan PIC Group")
 	}
-	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{"project_id": projectID, "status_id": body.StatusID, "user_id": body.UserID}))
-}
-
-// Remove menangani DELETE /projects/:id/pic-groups/:statusId/:userId.
-func (h *PicGroupHandler) Remove(c *fiber.Ctx) error {
-	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
-	if !ok {
-		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		data[i] = picGroupMemberJSON(&list[i])
 	}
-	exec, ok := middleware.DBTxFromContext(c)
-	if !ok {
-		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
-	}
-	projectID := c.Params("id")
-	if err := h.pics.RemoveGroupMember(c.Context(), exec, projectID, c.Params("statusId"), c.Params("userId"), actorUserID, actorRole); err != nil {
-		return h.mapError(c, err, "Gagal menghapus anggota PIC Group")
-	}
-	return c.JSON(response.Success(fiber.Map{"project_id": projectID}))
+	return c.JSON(response.Success(data))
 }
 
 func picGroupMemberJSON(m *repository.PicGroupMember) fiber.Map {
@@ -100,6 +87,8 @@ func (h *PicGroupHandler) mapError(c *fiber.Ctx, err error, fallbackMessage stri
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid", nil))
+	case errors.Is(err, domain.ErrPicGroupIneligibleMember):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("PIC_GROUP_MEMBER_INELIGIBLE", "Hanya member project dengan role Editor, Approver, atau Project Manager yang dapat menjadi anggota PIC Group.", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Hanya Project Manager atau Admin Workspace yang dapat mengelola PIC Group.", nil))
 	default:

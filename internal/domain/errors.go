@@ -444,6 +444,13 @@ var (
 	// Approver) memilih PIC di luar PIC Group status tujuan (§5.34).
 	ErrPicNotInGroup = errors.New("selected pic is not in the pic group for this status")
 
+	// ErrPicGroupIneligibleMember dikembalikan PUT /projects/:id/pic-groups/
+	// :statusId saat salah satu user bukan member project, atau role-nya
+	// tidak dapat menjadi PIC (Viewer/Admin Workspace) -- desain "PM PIC
+	// Group.dc.html": Admin Workspace tidak tampil, Viewer "TIDAK DAPAT
+	// MENJADI PIC".
+	ErrPicGroupIneligibleMember = errors.New("user cannot be a member of this pic group")
+
 	// ErrNotActivePic dikembalikan POST /tasks/:id/pic/acknowledge saat
 	// actor bukan PIC aktif task ini, atau sudah acknowledge sebelumnya.
 	// Direuse juga oleh HAPUS PIC/SERAHKAN PIC FASE (IG-97 susulan) saat

@@ -121,6 +121,9 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Role member project %q diubah`, target)
 	case "project_member.removed":
 		return fmt.Sprintf(`Member %q dikeluarkan dari project`, target)
+	case "pic_group.updated":
+		return fmt.Sprintf(`PIC Group status %q pada project %q diperbarui`,
+			workspaceAuditMetaString(meta, "status_name", "tidak diketahui"), workspaceAuditMetaString(meta, "project_name", target))
 	case "sprint.created":
 		return fmt.Sprintf(`Sprint %q dibuat`, target)
 	case "sprint.updated":
