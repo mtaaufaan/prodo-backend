@@ -637,6 +637,17 @@ func (h *TaskHandler) Delete(c *fiber.Ctx) error {
 	return c.JSON(response.Success(fiber.Map{"id": taskID}))
 }
 
+// dateOnly -- start_date/due_date adalah kolom DATE; kontrak API (§Task) dan
+// <input type="date"> FE mengharapkan "YYYY-MM-DD", bukan timestamp RFC3339
+// hasil serialisasi time.Time default ("2026-10-06T00:00:00Z").
+func dateOnly(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format("2006-01-02")
+	return &s
+}
+
 func taskJSON(t *repository.Task) fiber.Map {
 	assignees := make([]fiber.Map, len(t.Assignees))
 	for i, a := range t.Assignees {
@@ -646,7 +657,7 @@ func taskJSON(t *repository.Task) fiber.Map {
 		"id": t.ID, "project_id": t.ProjectID, "sprint_id": t.SprintID, "sprint_name": t.SprintName,
 		"parent_task_id": t.ParentTaskID, "status_id": t.StatusID, "status_name": t.StatusName, "status_color": t.StatusColor,
 		"title": t.Title, "description": t.Description, "priority": t.Priority, "completeness": t.Completeness,
-		"start_date": t.StartDate, "due_date": t.DueDate, "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
+		"start_date": dateOnly(t.StartDate), "due_date": dateOnly(t.DueDate), "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
 		"task_code": t.TaskCode, "created_by": t.CreatedBy, "created_at": t.CreatedAt, "updated_at": t.UpdatedAt,
 		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "regression_count": t.RegressionCount, "position": t.Position, "assignees": assignees,
 	}
