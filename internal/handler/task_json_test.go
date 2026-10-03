@@ -24,3 +24,16 @@ func TestTaskJSONDatesAreDateOnly(t *testing.T) {
 		t.Errorf("start_date kosong harus nil, got %v", *s)
 	}
 }
+
+func TestSprintJSONDatesAreDateOnly(t *testing.T) {
+	start := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	got := sprintJSON(&repository.Sprint{StartDate: &start, EndDate: &end})
+
+	if s := got["start_date"].(*string); s == nil || *s != "2026-09-28" {
+		t.Errorf("start_date = %v, want 2026-09-28", got["start_date"])
+	}
+	if e := got["end_date"].(*string); e == nil || *e != "2026-10-05" {
+		t.Errorf("end_date = %v, want 2026-10-05", got["end_date"])
+	}
+}
