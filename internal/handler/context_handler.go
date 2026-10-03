@@ -56,11 +56,13 @@ func (h *ContextHandler) Get(c *fiber.Ctx) error {
 
 	workspaces := make([]fiber.Map, 0, len(uc.Workspaces))
 	for _, w := range uc.Workspaces {
+		joined := w.JoinedAt.UTC()
 		workspaces = append(workspaces, fiber.Map{
 			"workspace_id": w.WorkspaceID,
 			"name":         w.Name,
 			"org_name":     w.OrgName,
 			"role":         w.Role,
+			"joined_at":    dateOnly(&joined),
 		})
 	}
 
