@@ -136,8 +136,14 @@ func (s *ProfileService) RegenerateBackupCodes(ctx context.Context, userID, plat
 }
 
 // ListNotificationPreferences -- GET /users/me/notification-preferences.
-func (s *ProfileService) ListNotificationPreferences(ctx context.Context, userID string) ([]repository.NotificationPreference, error) {
-	return s.notif.ListForGroupAdmin(ctx, userID)
+// scope ("group" | "workspace") menentukan daftar jenis notifikasi; scope
+// tidak dikenal -> ErrInvalidInput.
+func (s *ProfileService) ListNotificationPreferences(ctx context.Context, userID, scope string) ([]repository.NotificationPreference, error) {
+	events, ok := repository.NotificationEventsForScope(scope)
+	if !ok {
+		return nil, fmt.Errorf("service.ListNotificationPreferences: %w", domain.ErrInvalidInput)
+	}
+	return s.notif.List(ctx, userID, events)
 }
 
 // UpdateNotificationPreference -- PATCH /users/me/notification-preferences,
