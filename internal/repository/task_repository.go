@@ -29,6 +29,7 @@ type Task struct {
 	Description     json.RawMessage
 	Priority        string
 	Completeness    *string
+	StartDate       *time.Time
 	DueDate         *time.Time
 	EstimatedHours  *float64
 	StoryPoints     *int
@@ -91,7 +92,7 @@ func (r *TaskRepository) nextTaskCode(ctx context.Context, exec db.Executor, pro
 // PERNAH diisi Create manapun sampai sekarang -- satu-satunya konsumen saat
 // ini adalah RuleService lewat TaskService.CreateSubtaskForRule, nil untuk
 // alur create task manusia biasa.
-func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string, actorRole, workspaceID string) (*Task, error) {
+func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID string, sprintID, parentTaskID *string, statusID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, createdBy string, assigneeUserIDs []string, actorRole, workspaceID string) (*Task, error) {
 	taskCode, err := r.nextTaskCode(ctx, exec, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", err)
@@ -100,11 +101,11 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 	var id string
 	var createdAt, updatedAt time.Time
 	err = exec.QueryRow(ctx, `
-		INSERT INTO tasks (project_id, sprint_id, parent_task_id, status_id, title, description, priority, completeness, due_date, estimated_hours, story_points, task_code, created_by, position)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'incomplete', $8, $9, $10, $11, $12,
+		INSERT INTO tasks (project_id, sprint_id, parent_task_id, status_id, title, description, priority, completeness, start_date, due_date, estimated_hours, story_points, task_code, created_by, position)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'incomplete', $8, $9, $10, $11, $12, $13,
 			COALESCE((SELECT MAX(position) FROM tasks WHERE project_id = $1 AND status_id = $4), 0) + 1)
 		RETURNING id, created_at, updated_at
-	`, projectID, sprintID, parentTaskID, statusID, title, description, priority, dueDate, estimatedHours, storyPoints, taskCode, createdBy).Scan(&id, &createdAt, &updatedAt)
+	`, projectID, sprintID, parentTaskID, statusID, title, description, priority, startDate, dueDate, estimatedHours, storyPoints, taskCode, createdBy).Scan(&id, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("repository.Create: %w", err)
 	}
@@ -167,7 +168,7 @@ const regressionCountSubquery = `
 
 const taskSelectColumns = `
 	t.id, t.project_id, t.sprint_id, s.name, t.parent_task_id, t.status_id, cs.name, cs.color_token,
-	t.title, t.description, t.priority, t.completeness, t.due_date, t.estimated_hours, t.story_points,
+	t.title, t.description, t.priority, t.completeness, t.start_date, t.due_date, t.estimated_hours, t.story_points,
 	t.task_code, t.created_by, t.created_at, t.updated_at, t.completed_at, ` + isBlockedSubquery + `,
 	` + regressionCountSubquery + `, t.position
 `
@@ -175,7 +176,7 @@ const taskSelectColumns = `
 func scanTask(row interface{ Scan(dest ...any) error }) (*Task, error) {
 	var t Task
 	if err := row.Scan(&t.ID, &t.ProjectID, &t.SprintID, &t.SprintName, &t.ParentTaskID, &t.StatusID, &t.StatusName, &t.StatusColor,
-		&t.Title, &t.Description, &t.Priority, &t.Completeness, &t.DueDate, &t.EstimatedHours, &t.StoryPoints,
+		&t.Title, &t.Description, &t.Priority, &t.Completeness, &t.StartDate, &t.DueDate, &t.EstimatedHours, &t.StoryPoints,
 		&t.TaskCode, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.IsBlocked, &t.RegressionCount, &t.Position); err != nil {
 		return nil, err
 	}
@@ -322,12 +323,12 @@ func (r *TaskRepository) List(ctx context.Context, exec db.Executor, projectID s
 	return list, nil
 }
 
-func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error {
+func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error {
 	tag, err := exec.Exec(ctx, `
-		UPDATE tasks SET title = $2, description = $3, priority = $4, due_date = $5,
-		       estimated_hours = $6, story_points = $7, sprint_id = $8, updated_at = NOW()
+		UPDATE tasks SET title = $2, description = $3, priority = $4, start_date = $5, due_date = $6,
+		       estimated_hours = $7, story_points = $8, sprint_id = $9, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
-	`, taskID, title, description, priority, dueDate, estimatedHours, storyPoints, sprintID)
+	`, taskID, title, description, priority, startDate, dueDate, estimatedHours, storyPoints, sprintID)
 	if err != nil {
 		return fmt.Errorf("repository.Update: %w", err)
 	}

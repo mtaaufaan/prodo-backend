@@ -35,6 +35,7 @@ type taskRequest struct {
 	Title          string          `json:"title"`
 	Description    json.RawMessage `json:"description"`
 	Priority       string          `json:"priority"`
+	StartDate      *string         `json:"start_date"`
 	DueDate        *string         `json:"due_date"`
 	EstimatedHours *float64        `json:"estimated_hours"`
 	StoryPoints    *int            `json:"story_points"`
@@ -55,6 +56,26 @@ func parseDateOnly(raw *string) (*time.Time, error) {
 	return &t, nil
 }
 
+// parseTaskDateRange (susulan, start_date) -- diminta user: start_date
+// (perkiraan mulai) dipasangkan dengan due_date (perkiraan selesai) di FE
+// (AddTaskModal/TaskDetailModal). Validasi urutan tanggal di sini, sebelum
+// masuk service -- CHECK constraint DB (migrasi 20261106090000) tetap jadi
+// jaring pengaman terakhir, pesan error generik; di sini pesannya jelas.
+func parseTaskDateRange(rawStart, rawDue *string) (startDate, dueDate *time.Time, err error) {
+	startDate, err = parseDateOnly(rawStart)
+	if err != nil {
+		return nil, nil, errors.New("Format start_date harus YYYY-MM-DD")
+	}
+	dueDate, err = parseDateOnly(rawDue)
+	if err != nil {
+		return nil, nil, errors.New("Format due_date harus YYYY-MM-DD")
+	}
+	if startDate != nil && dueDate != nil && startDate.After(*dueDate) {
+		return nil, nil, errors.New("start_date tidak boleh setelah due_date")
+	}
+	return startDate, dueDate, nil
+}
+
 // Create menangani POST /projects/:id/tasks.
 func (h *TaskHandler) Create(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
@@ -71,12 +92,12 @@ func (h *TaskHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	dueDate, err := parseDateOnly(body.DueDate)
+	startDate, dueDate, err := parseTaskDateRange(body.StartDate, body.DueDate)
 	if err != nil {
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format due_date harus YYYY-MM-DD", nil))
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", err.Error(), nil))
 	}
 
-	task, err := h.tasks.Create(c.Context(), exec, projectID, body.Title, body.Description, body.Priority, dueDate, body.EstimatedHours, body.StoryPoints, body.SprintID, body.AssigneeIDs, actorUserID, actorRole)
+	task, err := h.tasks.Create(c.Context(), exec, projectID, body.Title, body.Description, body.Priority, startDate, dueDate, body.EstimatedHours, body.StoryPoints, body.SprintID, body.AssigneeIDs, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal membuat task")
 	}
@@ -150,12 +171,12 @@ func (h *TaskHandler) Update(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	dueDate, err := parseDateOnly(body.DueDate)
+	startDate, dueDate, err := parseTaskDateRange(body.StartDate, body.DueDate)
 	if err != nil {
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format due_date harus YYYY-MM-DD", nil))
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", err.Error(), nil))
 	}
 
-	if err := h.tasks.Update(c.Context(), exec, taskID, body.Title, body.Description, body.Priority, dueDate, body.EstimatedHours, body.StoryPoints, body.SprintID, actorUserID, actorRole); err != nil {
+	if err := h.tasks.Update(c.Context(), exec, taskID, body.Title, body.Description, body.Priority, startDate, dueDate, body.EstimatedHours, body.StoryPoints, body.SprintID, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal memperbarui task")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": taskID}))
@@ -400,6 +421,58 @@ func (h *TaskHandler) StatusSessions(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
+// ProjectStatusSessions menangani GET /projects/:id/status-sessions (menu
+// Board tab Gantt, bar ACTUAL -- US-039/H22-24) -- lihat komentar
+// TaskStatusSessionRepository.ListForProject.
+func (h *TaskHandler) ProjectStatusSessions(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	list, err := h.tasks.ListStatusSessionsForProject(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil sesi status project")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		s := &list[i]
+		data[i] = fiber.Map{
+			"id": s.ID, "task_id": s.TaskID, "status_id": s.StatusID, "status_name": s.StatusName,
+			"session_no": s.SessionNo, "entered_at": s.EnteredAt, "work_started_at": s.WorkStartedAt,
+			"is_auto_start": s.IsAutoStart, "exited_at": s.ExitedAt, "is_regression": s.IsRegression,
+			"triggered_by": s.TriggeredBy,
+		}
+	}
+	return c.JSON(response.Success(data))
+}
+
+// ProjectDependencies menangani GET /projects/:id/dependencies (menu Board
+// tab Gantt, panah dependency -- US-039/S7-13) -- lihat komentar
+// TaskDependencyRepository.ListForProject. Beda dari `Dependencies` di atas
+// (satu task, dipecah predecessors/successors): di sini SETIAP edge tampil
+// SEKALI dengan kedua sisinya, dipakai FE menggambar SEMUA panah sekaligus.
+func (h *TaskHandler) ProjectDependencies(c *fiber.Ctx) error {
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	list, err := h.deps.ListForProject(c.Context(), exec, c.Params("id"))
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil dependency project")
+	}
+	data := make([]fiber.Map, len(list))
+	for i := range list {
+		d := &list[i]
+		data[i] = fiber.Map{
+			"predecessor_id": d.PredecessorID, "predecessor_code": d.PredecessorCode,
+			"predecessor_title": d.PredecessorTitle, "predecessor_status": d.PredecessorStatusName,
+			"successor_id": d.SuccessorID, "successor_code": d.SuccessorCode,
+			"successor_title": d.SuccessorTitle, "successor_status": d.SuccessorStatusName,
+		}
+	}
+	return c.JSON(response.Success(data))
+}
+
 // Versions menangani GET /tasks/:id/versions (IG-97, tab RIWAYAT VERSI).
 func (h *TaskHandler) Versions(c *fiber.Ctx) error {
 	exec, ok := middleware.DBTxFromContext(c)
@@ -573,7 +646,7 @@ func taskJSON(t *repository.Task) fiber.Map {
 		"id": t.ID, "project_id": t.ProjectID, "sprint_id": t.SprintID, "sprint_name": t.SprintName,
 		"parent_task_id": t.ParentTaskID, "status_id": t.StatusID, "status_name": t.StatusName, "status_color": t.StatusColor,
 		"title": t.Title, "description": t.Description, "priority": t.Priority, "completeness": t.Completeness,
-		"due_date": t.DueDate, "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
+		"start_date": t.StartDate, "due_date": t.DueDate, "estimated_hours": t.EstimatedHours, "story_points": t.StoryPoints,
 		"task_code": t.TaskCode, "created_by": t.CreatedBy, "created_at": t.CreatedAt, "updated_at": t.UpdatedAt,
 		"completed_at": t.CompletedAt, "is_blocked": t.IsBlocked, "regression_count": t.RegressionCount, "position": t.Position, "assignees": assignees,
 	}

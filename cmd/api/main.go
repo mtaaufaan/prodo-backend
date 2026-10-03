@@ -800,6 +800,10 @@ func run() error {
 	v1.Put("/tasks/:id/reorder", jwtAuth, dbCtx, taskHandler.Reorder)
 	v1.Post("/projects/:id/tasks/bulk-status", jwtAuth, dbCtx, taskHandler.BulkSetStatus)
 	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
+	// Menu Board tab Gantt (US-039/H22-24): bulk per-project, bukan per-task
+	// (N+1) -- lihat komentar handler ProjectStatusSessions/ProjectDependencies.
+	v1.Get("/projects/:id/status-sessions", jwtAuth, dbCtx, taskHandler.ProjectStatusSessions)
+	v1.Get("/projects/:id/dependencies", jwtAuth, dbCtx, taskHandler.ProjectDependencies)
 
 	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
 	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
