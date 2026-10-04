@@ -7,6 +7,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
@@ -310,22 +311,77 @@ func scanPicGroupMembers(rows interface {
 	return list, rows.Err()
 }
 
-func (r *TaskPicRepository) AddGroupMember(ctx context.Context, exec db.Executor, projectID, statusID, userID, addedBy string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO pic_group_configs (project_id, status_id, user_id, added_by)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (project_id, status_id, user_id) DO NOTHING
-	`, projectID, statusID, userID, addedBy)
+// ReplaceGroup mengganti SELURUH anggota PIC Group (projectID, statusID)
+// dengan userIDs -- kosong = Full handoff (tidak ada pembatasan). Satu
+// operasi atomik (transaksi request) dan SATU entri audit "pic_group.updated"
+// dengan state_before/state_after berisi nama anggota (snapshot, bukan
+// JOIN langsung -- pola audit trail IG-26/IG-29: nama user bisa berubah/
+// dihapus kemudian). Tidak ada perubahan -> tidak ada entri audit.
+// workspaceID menjadikan baris terlihat di Audit Trail Workspace.
+func (r *TaskPicRepository) ReplaceGroup(ctx context.Context, exec db.Executor, projectID, statusID string, userIDs []string, actorID, actorRole, workspaceID string) ([]PicGroupMember, error) {
+	before, err := r.ListGroupForStatus(ctx, exec, projectID, statusID)
 	if err != nil {
-		return fmt.Errorf("repository.AddGroupMember: %w", err)
+		return nil, err
 	}
-	return nil
+	if _, err := exec.Exec(ctx, `DELETE FROM pic_group_configs WHERE project_id = $1 AND status_id = $2`, projectID, statusID); err != nil {
+		return nil, fmt.Errorf("repository.ReplaceGroup: delete: %w", err)
+	}
+	for _, userID := range userIDs {
+		if _, err := exec.Exec(ctx, `
+			INSERT INTO pic_group_configs (project_id, status_id, user_id, added_by)
+			VALUES ($1, $2, $3, $4)
+		`, projectID, statusID, userID, actorID); err != nil {
+			return nil, fmt.Errorf("repository.ReplaceGroup: insert: %w", err)
+		}
+	}
+	after, err := r.ListGroupForStatus(ctx, exec, projectID, statusID)
+	if err != nil {
+		return nil, err
+	}
+	if sameGroupMembers(before, after) {
+		return after, nil
+	}
+
+	var projectName, statusName string
+	if err := exec.QueryRow(ctx, `
+		SELECT p.name, cs.name FROM projects p, custom_statuses cs WHERE p.id = $1 AND cs.id = $2
+	`, projectID, statusID).Scan(&projectName, &statusName); err != nil {
+		return nil, fmt.Errorf("repository.ReplaceGroup: snapshot nama: %w", err)
+	}
+	if err := insertProjectAudit(ctx, exec, actorID, actorRole, "pic_group.updated", projectID, workspaceID,
+		map[string]any{"members": picGroupNames(before)}, map[string]any{"members": picGroupNames(after)},
+		map[string]any{"project_name": projectName, "status_id": statusID, "status_name": statusName}); err != nil {
+		return nil, fmt.Errorf("repository.ReplaceGroup: audit: %w", err)
+	}
+	return after, nil
 }
 
-func (r *TaskPicRepository) RemoveGroupMember(ctx context.Context, exec db.Executor, projectID, statusID, userID string) error {
-	_, err := exec.Exec(ctx, `DELETE FROM pic_group_configs WHERE project_id = $1 AND status_id = $2 AND user_id = $3`, projectID, statusID, userID)
-	if err != nil {
-		return fmt.Errorf("repository.RemoveGroupMember: %w", err)
+func sameGroupMembers(a, b []PicGroupMember) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return nil
+	seen := make(map[string]bool, len(a))
+	for _, m := range a {
+		seen[m.UserID] = true
+	}
+	for _, m := range b {
+		if !seen[m.UserID] {
+			return false
+		}
+	}
+	return true
+}
+
+// picGroupNames -- nama tampil (fallback email), terurut supaya diff stabil.
+func picGroupNames(list []PicGroupMember) []string {
+	names := make([]string, 0, len(list))
+	for _, m := range list {
+		if m.UserName != "" {
+			names = append(names, m.UserName)
+		} else {
+			names = append(names, m.UserEmail)
+		}
+	}
+	sort.Strings(names)
+	return names
 }

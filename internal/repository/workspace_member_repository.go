@@ -32,6 +32,7 @@ type MembershipRow struct {
 	Name        string
 	OrgName     string
 	Role        string
+	JoinedAt    time.Time
 }
 
 // ListMembershipsForUser mengembalikan seluruh workspace tempat user ini
@@ -41,7 +42,7 @@ type MembershipRow struct {
 // bernilai true untuknya (lihat wm_select).
 func (r *WorkspaceMemberRepository) ListMembershipsForUser(ctx context.Context, exec db.Executor, userID string) ([]MembershipRow, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT wm.workspace_id, w.name, o.name, wm.role
+		SELECT wm.workspace_id, w.name, o.name, wm.role, wm.joined_at
 		FROM workspace_members wm
 		JOIN workspaces w ON w.id = wm.workspace_id
 		JOIN organizations o ON o.id = w.org_id
@@ -56,7 +57,7 @@ func (r *WorkspaceMemberRepository) ListMembershipsForUser(ctx context.Context, 
 	var result []MembershipRow
 	for rows.Next() {
 		var m MembershipRow
-		if err := rows.Scan(&m.WorkspaceID, &m.Name, &m.OrgName, &m.Role); err != nil {
+		if err := rows.Scan(&m.WorkspaceID, &m.Name, &m.OrgName, &m.Role, &m.JoinedAt); err != nil {
 			return nil, fmt.Errorf("repository.ListMembershipsForUser: scan: %w", err)
 		}
 		result = append(result, m)

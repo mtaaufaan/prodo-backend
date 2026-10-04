@@ -232,7 +232,7 @@ func (h *SprintHandler) Summary(c *fiber.Ctx) error {
 func sprintJSON(s *repository.Sprint) fiber.Map {
 	return fiber.Map{
 		"id": s.ID, "project_id": s.ProjectID, "name": s.Name,
-		"start_date": s.StartDate, "end_date": s.EndDate, "goal": s.Goal, "status": s.Status, "created_at": s.CreatedAt,
+		"start_date": dateOnly(s.StartDate), "end_date": dateOnly(s.EndDate), "goal": s.Goal, "status": s.Status, "created_at": s.CreatedAt,
 	}
 }
 
