@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -38,8 +39,9 @@ type ruleConditionRequest struct {
 }
 
 type createRuleRequest struct {
-	Name    string `json:"name"`
-	Trigger struct {
+	Name        string `json:"name"`
+	TemplateKey string `json:"template_key"`
+	Trigger     struct {
 		Event    string `json:"event"`
 		StatusID string `json:"status_id"`
 		Days     int    `json:"days"`
@@ -104,7 +106,7 @@ func (h *RuleHandler) Create(c *fiber.Ctx) error {
 		}
 	}
 
-	id, err := h.rules.Create(c.Context(), exec, workspaceID, body.Name,
+	id, err := h.rules.Create(c.Context(), exec, workspaceID, body.Name, body.TemplateKey,
 		service.RuleTriggerInput{Event: body.Trigger.Event, StatusID: body.Trigger.StatusID, Days: body.Trigger.Days},
 		condition,
 		service.RuleActionInput{Type: body.Action.Type, StatusID: body.Action.StatusID, TargetUserID: body.Action.TargetUserID},
@@ -168,7 +170,7 @@ func (h *RuleHandler) CreateForProject(c *fiber.Ctx) error {
 		}
 	}
 
-	id, err := h.rules.CreateForProject(c.Context(), exec, projectID, body.Name,
+	id, err := h.rules.CreateForProject(c.Context(), exec, projectID, body.Name, body.TemplateKey,
 		service.RuleTriggerInput{Event: body.Trigger.Event, StatusID: body.Trigger.StatusID, Days: body.Trigger.Days},
 		condition,
 		service.RuleActionInput{Type: body.Action.Type, StatusID: body.Action.StatusID, TargetUserID: body.Action.TargetUserID},
@@ -259,8 +261,8 @@ func (h *RuleHandler) Delete(c *fiber.Ctx) error {
 
 // ListExecutions menangani GET /workspaces/:wsId/rules/executions?status=,
 // atau ?export=csv untuk unduh (kolom persis "AW Rule Automation.dc.html":
-// rule, trigger, task, action, hasil, timestamp, durasi -- durasi tidak
-// diukur di backend ini, selalu kosong, lihat komentar writeExecutionsCSV).
+// rule, trigger, task, action, hasil, timestamp, durasi -- durasi dalam ms,
+// kosong untuk baris sebelum kolom duration_ms ada).
 func (h *RuleHandler) ListExecutions(c *fiber.Ctx) error {
 	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
@@ -288,10 +290,8 @@ func (h *RuleHandler) ListExecutions(c *fiber.Ctx) error {
 	return c.JSON(response.Success(data))
 }
 
-// writeExecutionsCSV -- pola PERSIS GroupAuditHandler.writeCSV. "durasi"
-// (kolom desain) selalu string kosong -- RuleService tidak mengukur waktu
-// eksekusi rule sama sekali (tidak ada requirement AC untuk itu), beda
-// dari desain yang punya field `ms` di data dummy prototipe.
+// writeExecutionsCSV -- pola PERSIS GroupAuditHandler.writeCSV. "durasi" =
+// duration_ms (ms) hasil pengukuran RuleService.runRule; kosong untuk baris lama.
 func (h *RuleHandler) writeExecutionsCSV(c *fiber.Ctx, list []repository.RuleExecution) error {
 	c.Set("Content-Type", "text/csv; charset=utf-8")
 	c.Set("Content-Disposition", `attachment; filename="rule-execution-log.csv"`)
@@ -321,7 +321,7 @@ func (h *RuleHandler) writeExecutionsCSV(c *fiber.Ctx, list []repository.RuleExe
 			action.Type,
 			e.Status,
 			e.ExecutedAt.UTC().Format(time.RFC3339),
-			"",
+			durationOrEmpty(e.DurationMS),
 		}); err != nil {
 			return fmt.Errorf("handler.writeExecutionsCSV: row: %w", err)
 		}
@@ -330,11 +330,19 @@ func (h *RuleHandler) writeExecutionsCSV(c *fiber.Ctx, list []repository.RuleExe
 	return w.Error()
 }
 
+func durationOrEmpty(ms *int) string {
+	if ms == nil {
+		return ""
+	}
+	return strconv.Itoa(*ms)
+}
+
 func ruleJSON(rl *repository.Rule) fiber.Map {
 	return fiber.Map{
 		"id": rl.ID, "name": rl.Name, "trigger_config": rl.TriggerConfig, "condition_config": rl.ConditionConfig,
 		"action_config": rl.ActionConfig, "is_active": rl.IsActive, "inactive_reason": rl.InactiveReason,
 		"is_template": rl.IsTemplate, "created_by": rl.CreatedBy, "created_at": rl.CreatedAt, "runs": rl.Runs,
+		"scope_type": rl.ScopeType, "scope_id": rl.ScopeID, "template_key": rl.TemplateKey, "created_by_name": rl.CreatedByName,
 	}
 }
 
@@ -343,7 +351,7 @@ func ruleExecutionJSON(e *repository.RuleExecution) fiber.Map {
 		"id": e.ID, "rule_id": e.RuleID, "rule_name": e.RuleName, "trigger_event": e.TriggerEvent,
 		"triggered_by": e.TriggeredBy, "executed_at": e.ExecutedAt, "status": e.Status,
 		"action_taken": e.ActionTaken, "error_message": e.ErrorMessage,
-		"task_code": e.TaskCode, "task_title": e.TaskTitle,
+		"task_code": e.TaskCode, "task_title": e.TaskTitle, "duration_ms": e.DurationMS,
 	}
 }
 
