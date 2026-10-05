@@ -226,6 +226,7 @@ func run() error {
 	customStatusRepo := repository.NewCustomStatusRepository()
 	ruleRepo := repository.NewRuleRepository()
 	sprintRepo := repository.NewSprintRepository()
+	projectImportRepo := repository.NewProjectImportRepository()
 	taskRepo := repository.NewTaskRepository()
 	taskPicRepo := repository.NewTaskPicRepository()
 	taskDependencyRepo := repository.NewTaskDependencyRepository()
@@ -256,6 +257,7 @@ func run() error {
 	ruleSvc := service.NewRuleService(ruleRepo, rbacSvc, customStatusRepo, projectRepo, accountRepo, emailSvc, taskRepo)
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc, ruleSvc, projectRepo)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
+	projectImportSvc := service.NewProjectImportService(projectImportRepo, sprintRepo, projectRepo, rbacSvc)
 	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc, sprintRepo)
 	ruleSvc.SetTaskActions(taskSvc)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo, customStatusRepo, projectMemberRepo)
@@ -323,6 +325,7 @@ func run() error {
 	customStatusHandler := handler.NewCustomStatusHandler(customStatusSvc, logger)
 	ruleHandler := handler.NewRuleHandler(ruleSvc, logger)
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
+	projectImportHandler := handler.NewProjectImportHandler(projectImportSvc, logger)
 	timeEntryHandler := handler.NewTimeEntryHandler(timeEntrySvc, logger)
 	checklistItemHandler := handler.NewTaskChecklistItemHandler(checklistItemSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, timeEntrySvc, logger)
@@ -783,6 +786,26 @@ func run() error {
 	// middleware role (route tidak punya :wsId) -- otorisasi penuh di
 	// SprintService/TaskService.authorize (viewer/division_viewer ditolak
 	// untuk tulis, RLS project membership jadi lapisan pertama).
+	// Import CSV PM (IG-120, "PM Import CSV.dc.html") -- level project,
+	// otorisasi PM/Admin Workspace di service (rute project tanpa RequireRole).
+	v1.Get("/projects/:id/data-import/template", jwtAuth, dbCtx, projectImportHandler.Template)
+	v1.Post("/projects/:id/data-import/validate", jwtAuth, dbCtx, projectImportHandler.Validate)
+	v1.Get("/projects/:id/data-import/history", jwtAuth, dbCtx, projectImportHandler.History)
+	v1.Get("/projects/:id/data-import/:importId", jwtAuth, dbCtx, projectImportHandler.Get)
+	v1.Get("/projects/:id/data-import/:importId/report", jwtAuth, dbCtx, projectImportHandler.Report)
+	// Rate-limit 2x/menit sesuai AC desain (sama dengan import Group Admin).
+	v1.Post("/projects/:id/data-import/:importId/execute", jwtAuth, dbCtx,
+		limiter.New(limiter.Config{
+			Max:        2,
+			Expiration: time.Minute,
+			LimitReached: func(c *fiber.Ctx) error {
+				retryAfter, _ := strconv.Atoi(c.GetRespHeader("Retry-After"))
+				return c.Status(fiber.StatusTooManyRequests).JSON(response.Error("RATE_LIMITED",
+					"Terlalu banyak eksekusi import dalam waktu singkat (maks 2 permintaan/menit).",
+					fiber.Map{"retry_after": retryAfter}))
+			},
+		}),
+		projectImportHandler.Execute)
 	v1.Post("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.Create)
 	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.List)
 	v1.Put("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Update)

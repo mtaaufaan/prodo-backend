@@ -140,6 +140,12 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Task ditarik ke sprint %q`, target)
 	case "sprint.deleted":
 		return fmt.Sprintf(`Sprint %q dihapus`, target)
+	case "project_import.created":
+		return fmt.Sprintf(`Import %s %q: %s berhasil, %s dilewati`,
+			workspaceAuditMetaString(meta, "kind", "data"), target,
+			workspaceAuditMetaNumber(meta, "success_count"), workspaceAuditMetaNumber(meta, "failed_count"))
+	case "project_import.report_downloaded":
+		return fmt.Sprintf(`Laporan import %q diunduh`, target)
 	case "user.login":
 		return "Login berhasil"
 	case "user.backup_code_used":
@@ -182,4 +188,13 @@ func workspaceAuditTargetOf(e *repository.WorkspaceAuditLogEntry) string {
 		return s
 	}
 	return "tidak diketahui"
+}
+
+// workspaceAuditMetaNumber -- angka metadata (JSON float64) sebagai string
+// bulat; "0" kalau tidak ada.
+func workspaceAuditMetaNumber(meta map[string]any, key string) string {
+	if v, ok := meta[key].(float64); ok {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return "0"
 }
