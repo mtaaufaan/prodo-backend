@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -95,16 +96,17 @@ type RuleActionInput struct {
 
 // ruleRepository -- interface didefinisikan di consumer, §3.9.
 type ruleRepository interface {
-	Create(ctx context.Context, exec db.Executor, scopeType, scopeID, name string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole, workspaceID string) (string, error)
+	Create(ctx context.Context, exec db.Executor, scopeType, scopeID, name, templateKey string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole, workspaceID string) (string, error)
 	Get(ctx context.Context, exec db.Executor, ruleID string) (*repository.Rule, error)
 	ListForScope(ctx context.Context, exec db.Executor, scopeType, scopeID string) ([]repository.Rule, error)
+	ListForProjectWithWorkspace(ctx context.Context, exec db.Executor, projectID, workspaceID string) ([]repository.Rule, error)
 	SetActive(ctx context.Context, exec db.Executor, ruleID string, active bool, actorID, actorRole, workspaceID string, before *repository.Rule) error
 	SoftDelete(ctx context.Context, exec db.Executor, ruleID, actorID, actorRole, workspaceID string, before *repository.Rule) error
 	DeactivateForStatus(ctx context.Context, exec db.Executor, statusID, reason, actorID, actorRole string) ([]repository.Rule, error)
 	ListExecutions(ctx context.Context, exec db.Executor, scopeType, scopeID, statusFilter string) ([]repository.RuleExecution, error)
 	ListActiveForEvent(ctx context.Context, exec db.Executor, scopeType, scopeID, event string) ([]repository.Rule, error)
 	ListActiveDueDateRules(ctx context.Context, exec db.Executor) ([]repository.Rule, error)
-	CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string) error
+	CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string, durationMS int) error
 	HasExecutionForTask(ctx context.Context, exec db.Executor, ruleID, taskID string) (bool, error)
 }
 
@@ -328,9 +330,9 @@ func (s *RuleService) buildConfigs(ctx context.Context, exec db.Executor, scopeT
 
 // create -- inti Create/CreateForProject, scopeType eksplisit supaya
 // keduanya berbagi validasi+audit yang sama persis.
-func (s *RuleService) create(ctx context.Context, exec db.Executor, scopeType, scopeID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
+func (s *RuleService) create(ctx context.Context, exec db.Executor, scopeType, scopeID, name, templateKey string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
 	name = strings.TrimSpace(name)
-	if scopeID == "" || len(name) < 4 {
+	if scopeID == "" || len(name) < 4 || (templateKey != "" && !validRuleTemplateKey(templateKey)) {
 		return "", fmt.Errorf("service.create: %w", domain.ErrInvalidInput)
 	}
 	if err := s.authorizeScope(ctx, exec, scopeType, scopeID, actorID, actorRole); err != nil {
@@ -344,7 +346,7 @@ func (s *RuleService) create(ctx context.Context, exec db.Executor, scopeType, s
 	if err != nil {
 		return "", err
 	}
-	id, err := s.repo.Create(ctx, exec, scopeType, scopeID, name, triggerJSON, conditionJSON, actionJSON, actorID, actorRole, workspaceID)
+	id, err := s.repo.Create(ctx, exec, scopeType, scopeID, name, templateKey, triggerJSON, conditionJSON, actionJSON, actorID, actorRole, workspaceID)
 	if err != nil {
 		return "", fmt.Errorf("service.create: %w", err)
 	}
@@ -352,14 +354,14 @@ func (s *RuleService) create(ctx context.Context, exec db.Executor, scopeType, s
 }
 
 // Create -- POST /workspaces/:wsId/rules.
-func (s *RuleService) Create(ctx context.Context, exec db.Executor, workspaceID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
-	return s.create(ctx, exec, "workspace", workspaceID, name, trigger, condition, action, actorID, actorRole)
+func (s *RuleService) Create(ctx context.Context, exec db.Executor, workspaceID, name, templateKey string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
+	return s.create(ctx, exec, "workspace", workspaceID, name, templateKey, trigger, condition, action, actorID, actorRole)
 }
 
 // CreateForProject -- POST /projects/:id/rules (Track S5B, "Rule
 // Builder.dc.html").
-func (s *RuleService) CreateForProject(ctx context.Context, exec db.Executor, projectID, name string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
-	return s.create(ctx, exec, "project", projectID, name, trigger, condition, action, actorID, actorRole)
+func (s *RuleService) CreateForProject(ctx context.Context, exec db.Executor, projectID, name, templateKey string, trigger RuleTriggerInput, condition *RuleConditionInput, action RuleActionInput, actorID, actorRole string) (string, error) {
+	return s.create(ctx, exec, "project", projectID, name, templateKey, trigger, condition, action, actorID, actorRole)
 }
 
 // List -- GET /workspaces/:wsId/rules, tab "Rule Aktif".
@@ -377,7 +379,18 @@ func (s *RuleService) List(ctx context.Context, exec db.Executor, workspaceID, a
 	return list, nil
 }
 
-// ListForProject -- GET /projects/:id/rules (Track S5B).
+// validRuleTemplateKey -- kunci template Library bawaan (sama dengan
+// RULE_TEMPLATES di frontend); rule manual mengirim string kosong.
+func validRuleTemplateKey(k string) bool {
+	switch k {
+	case "assign-on-status", "notify-on-status", "due-date-reminder", "due-date-status-change":
+		return true
+	}
+	return false
+}
+
+// ListForProject -- GET /projects/:id/rules (Track S5B). Menyertakan rule
+// workspace pemilik project (scope_type="workspace", "DIWARISI" di FE).
 func (s *RuleService) ListForProject(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) ([]repository.Rule, error) {
 	if projectID == "" {
 		return nil, fmt.Errorf("service.ListForProject: %w", domain.ErrInvalidInput)
@@ -385,7 +398,11 @@ func (s *RuleService) ListForProject(ctx context.Context, exec db.Executor, proj
 	if err := s.authorizeScope(ctx, exec, "project", projectID, actorID, actorRole); err != nil {
 		return nil, err
 	}
-	list, err := s.repo.ListForScope(ctx, exec, "project", projectID)
+	workspaceID, err := s.resolveWorkspaceID(ctx, exec, "project", projectID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListForProject: %w", err)
+	}
+	list, err := s.repo.ListForProjectWithWorkspace(ctx, exec, projectID, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.ListForProject: %w", err)
 	}
@@ -588,13 +605,15 @@ func (s *RuleService) runRule(ctx context.Context, exec db.Executor, rl *reposit
 		return
 	}
 	tb := triggeredBy
+	started := time.Now()
 	actionTaken, err := s.executeAction(ctx, exec, rl, task)
+	ms := int(time.Since(started).Milliseconds())
 	if err != nil {
 		msg := err.Error()
-		_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "failed", actionTaken, &msg)
+		_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "failed", actionTaken, &msg, ms)
 		return
 	}
-	_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "completed", actionTaken, nil)
+	_ = s.repo.CreateExecution(ctx, exec, rl.ID, triggerEvent, &tb, "completed", actionTaken, nil, ms)
 }
 
 // ruleStatusMatches (Track S5B, status-matching by NAME -- lihat komentar

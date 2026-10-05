@@ -21,6 +21,7 @@ type fakeRuleRepo struct {
 	activeForEvent     []repository.Rule
 	activeDueDateRules []repository.Rule
 	hasExecutionFor    map[string]bool // key: ruleID+"|"+taskID
+	lastTemplateKey    string
 
 	executionCalls []struct {
 		ruleID string
@@ -28,7 +29,8 @@ type fakeRuleRepo struct {
 	}
 }
 
-func (f *fakeRuleRepo) Create(_ context.Context, _ db.Executor, _, scopeID, name string, _, _, _ []byte, _, _, _ string) (string, error) {
+func (f *fakeRuleRepo) Create(_ context.Context, _ db.Executor, _, scopeID, name, templateKey string, _, _, _ []byte, _, _, _ string) (string, error) {
+	f.lastTemplateKey = templateKey
 	f.createCalls = append(f.createCalls, struct{ workspaceID, name string }{scopeID, name})
 	return "new-rule", nil
 }
@@ -62,7 +64,7 @@ func (f *fakeRuleRepo) ListActiveForEvent(_ context.Context, _ db.Executor, _, _
 func (f *fakeRuleRepo) ListActiveDueDateRules(_ context.Context, _ db.Executor) ([]repository.Rule, error) {
 	return f.activeDueDateRules, nil
 }
-func (f *fakeRuleRepo) CreateExecution(_ context.Context, _ db.Executor, ruleID string, _ json.RawMessage, _ *string, status string, _ json.RawMessage, _ *string) error {
+func (f *fakeRuleRepo) CreateExecution(_ context.Context, _ db.Executor, ruleID string, _ json.RawMessage, _ *string, status string, _ json.RawMessage, _ *string, _ int) error {
 	f.executionCalls = append(f.executionCalls, struct {
 		ruleID string
 		status string
@@ -171,7 +173,7 @@ func TestRuleService_Create_ForbiddenForNonAdmin(t *testing.T) {
 	repo := &fakeRuleRepo{}
 	svc := newTestRuleService(repo, "editor", nil, "")
 
-	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba",
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba", "",
 		RuleTriggerInput{Event: "task_created"}, nil, RuleActionInput{Type: "create_subtask"}, "user-1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want domain.ErrForbidden", err)
@@ -185,7 +187,7 @@ func TestRuleService_Create_NameTooShort(t *testing.T) {
 	repo := &fakeRuleRepo{}
 	svc := newTestRuleService(repo, "admin_workspace", nil, "")
 
-	_, err := svc.Create(context.Background(), nil, "ws-1", "AB",
+	_, err := svc.Create(context.Background(), nil, "ws-1", "AB", "",
 		RuleTriggerInput{Event: "task_created"}, nil, RuleActionInput{Type: "create_subtask"}, "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
@@ -196,7 +198,7 @@ func TestRuleService_Create_InvalidTriggerEvent(t *testing.T) {
 	repo := &fakeRuleRepo{}
 	svc := newTestRuleService(repo, "admin_workspace", nil, "")
 
-	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba",
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba", "",
 		RuleTriggerInput{Event: "not_a_real_event"}, nil, RuleActionInput{Type: "create_subtask"}, "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
@@ -212,7 +214,7 @@ func TestRuleService_Create_StatusUndefinedBlocked(t *testing.T) {
 	}
 	svc := newTestRuleService(repo, "admin_workspace", statuses, "")
 
-	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba",
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba", "",
 		RuleTriggerInput{Event: "status_changed", StatusID: "s1"}, nil, RuleActionInput{Type: "create_subtask"}, "aw-1", "member")
 	if !errors.Is(err, domain.ErrTaskStatusUndefined) {
 		t.Errorf("err = %v, want domain.ErrTaskStatusUndefined", err)
@@ -229,7 +231,7 @@ func TestRuleService_Create_StatusFromOtherWorkspaceRejected(t *testing.T) {
 	}
 	svc := newTestRuleService(repo, "admin_workspace", statuses, "")
 
-	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba",
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba", "",
 		RuleTriggerInput{Event: "status_changed", StatusID: "s1"}, nil, RuleActionInput{Type: "create_subtask"}, "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
@@ -241,7 +243,7 @@ func TestRuleService_Create_ProjectConditionFromOtherWorkspaceRejected(t *testin
 	svc := newTestRuleService(repo, "admin_workspace", nil, "ws-OTHER")
 
 	condition := &RuleConditionInput{Type: "project", ProjectID: "proj-1"}
-	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba",
+	_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba", "",
 		RuleTriggerInput{Event: "task_created"}, condition, RuleActionInput{Type: "create_subtask"}, "aw-1", "member")
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
@@ -255,7 +257,7 @@ func TestRuleService_Create_Success(t *testing.T) {
 	}
 	svc := newTestRuleService(repo, "admin_workspace", statuses, "")
 
-	id, err := svc.Create(context.Background(), nil, "ws-1", "Auto-assign QA",
+	id, err := svc.Create(context.Background(), nil, "ws-1", "Auto-assign QA", "",
 		RuleTriggerInput{Event: "status_changed", StatusID: "s1"}, nil, RuleActionInput{Type: "assign", TargetUserID: "user-2"}, "aw-1", "member")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -405,5 +407,36 @@ func TestRuleService_RunDueDateCheck_DedupSkipsAlreadyExecuted(t *testing.T) {
 	}
 	if len(repo.executionCalls) != 1 {
 		t.Errorf("executionCalls = %v, want satu entri", repo.executionCalls)
+	}
+}
+
+func (f *fakeRuleRepo) ListForProjectWithWorkspace(_ context.Context, _ db.Executor, _, _ string) ([]repository.Rule, error) {
+	return nil, nil
+}
+
+func TestRuleService_Create_TemplateKey(t *testing.T) {
+	for _, tc := range []struct {
+		key     string
+		wantErr bool
+	}{
+		{"", false},
+		{"notify-on-status", false},
+		{"template-ngawur", true},
+	} {
+		repo := &fakeRuleRepo{}
+		svc := newTestRuleService(repo, "admin_workspace", nil, "")
+		_, err := svc.Create(context.Background(), nil, "ws-1", "Rule Uji Coba", tc.key,
+			RuleTriggerInput{Event: "task_created"}, nil, RuleActionInput{Type: "create_subtask"}, "aw-1", "member")
+		if tc.wantErr {
+			if !errors.Is(err, domain.ErrInvalidInput) {
+				t.Errorf("key %q: err = %v, want ErrInvalidInput", tc.key, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("key %q: unexpected error %v", tc.key, err)
+		} else if repo.lastTemplateKey != tc.key {
+			t.Errorf("key %q: repo got %q", tc.key, repo.lastTemplateKey)
+		}
 	}
 }
