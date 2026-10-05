@@ -95,10 +95,10 @@ func (r *TaskDependencyRepository) ListForProject(ctx context.Context, exec db.E
 	return r.queryDependencies(ctx, exec, "tp.project_id = $1", projectID)
 }
 
-// ListIncompletePredecessors -- predecessor taskID yang BELUM berstatus
-// DONE (US-018, S4-48 HARD-BLOCK: dicek sebelum status task ini berubah).
+// ListIncompletePredecessors -- predecessor taskID yang BELUM berstatus akhir
+// (DONE/CANCELED, IG-118; US-018, S4-48 HARD-BLOCK: dicek sebelum status task ini berubah).
 func (r *TaskDependencyRepository) ListIncompletePredecessors(ctx context.Context, exec db.Executor, taskID string) ([]TaskDependency, error) {
-	return r.queryDependencies(ctx, exec, "td.successor_id = $1 AND cs_p.name != 'DONE'", taskID)
+	return r.queryDependencies(ctx, exec, "td.successor_id = $1 AND cs_p.name NOT IN ('DONE', 'CANCELED')", taskID)
 }
 
 // WouldCreateCycle -- deteksi circular dependency (S4-47) via recursive CTE
@@ -189,9 +189,9 @@ func (r *TaskDependencyRepository) Delete(ctx context.Context, exec db.Executor,
 // diblokir predecessor lain), tambah filter EXISTS (predecessor lain belum
 // DONE) di WHERE.
 func (r *TaskDependencyRepository) NotifySuccessorPics(ctx context.Context, exec db.Executor, taskID string, unblocked bool) error {
-	notifType, title, body := "dependency_blocked", "Dependency Task Diblokir Kembali", "Predecessor task Anda berpindah keluar dari DONE -- task ini kembali terblokir."
+	notifType, title, body := "dependency_blocked", "Dependency Task Diblokir Kembali", "Predecessor task Anda berpindah keluar dari status akhir (DONE/CANCELED) -- task ini kembali terblokir."
 	if unblocked {
-		notifType, title, body = "dependency_unblocked", "Dependency Task Selesai", "Predecessor task ini sudah DONE -- task Anda mungkin tidak lagi terblokir."
+		notifType, title, body = "dependency_unblocked", "Dependency Task Selesai", "Predecessor task ini sudah DONE atau dibatalkan -- task Anda mungkin tidak lagi terblokir."
 	}
 	_, err := exec.Exec(ctx, `
 		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)

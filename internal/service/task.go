@@ -504,10 +504,12 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 		}
 	}
 
-	wasDone := current.StatusName == "DONE"
-	isDone := status.Name == "DONE"
-	if isDone != wasDone {
-		if err := s.deps.NotifySuccessorPics(ctx, exec, taskID, isDone); err != nil {
+	// Status akhir (DONE/CANCELED) sama-sama melepas blokir successor (IG-118);
+	// DONE<->CANCELED tidak mengubah apa pun sehingga tidak ada notifikasi.
+	wasFinal := current.StatusName == "DONE" || current.StatusName == "CANCELED"
+	isFinal := status.Name == "DONE" || status.Name == "CANCELED"
+	if isFinal != wasFinal {
+		if err := s.deps.NotifySuccessorPics(ctx, exec, taskID, isFinal); err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
 		}
 	}
