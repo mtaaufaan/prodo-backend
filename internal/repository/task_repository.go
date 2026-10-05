@@ -148,14 +148,14 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 }
 
 // isBlockedSubquery -- Phase 3 (US-018/S4-53): task terblokir kalau ada
-// predecessor yang BELUM DONE. Subquery ter-index (idx_task_dependencies_successor),
+// predecessor yang BELUM DONE/CANCELED. Subquery ter-index (idx_task_dependencies_successor),
 // dievaluasi native di DB -- bukan N+1 query per task dari Go.
 const isBlockedSubquery = `
 	EXISTS (
 		SELECT 1 FROM task_dependencies td
 		JOIN tasks tp ON tp.id = td.predecessor_id
 		JOIN custom_statuses cs_p ON cs_p.id = tp.status_id
-		WHERE td.successor_id = t.id AND cs_p.name != 'DONE'
+		WHERE td.successor_id = t.id AND cs_p.name NOT IN ('DONE', 'CANCELED')
 	)
 `
 

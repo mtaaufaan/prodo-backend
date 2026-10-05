@@ -113,12 +113,13 @@ func (f *fakeTaskPics) IsActivePic(_ context.Context, _ db.Executor, _, _ string
 	return true, nil
 }
 
-type fakeTaskDeps struct{}
+type fakeTaskDeps struct{ notified []bool }
 
 func (f *fakeTaskDeps) ListIncompletePredecessors(_ context.Context, _ db.Executor, _ string) ([]repository.TaskDependency, error) {
 	return nil, nil
 }
-func (f *fakeTaskDeps) NotifySuccessorPics(_ context.Context, _ db.Executor, _ string, _ bool) error {
+func (f *fakeTaskDeps) NotifySuccessorPics(_ context.Context, _ db.Executor, _ string, unblocked bool) error {
+	f.notified = append(f.notified, unblocked)
 	return nil
 }
 
@@ -325,6 +326,42 @@ func TestTaskService_SetStatus_NoSprint_AllowsBlocked(t *testing.T) {
 
 	if err := svc.SetStatus(context.Background(), nil, "t1", "blocked-status", []string{"pic1"}, "user1", "member"); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestTaskService_SetStatus_FinalStatusNotifiesSuccessors -- DONE dan CANCELED
+// sama-sama melepas blokir successor (IG-118); DONE<->CANCELED tidak.
+func TestTaskService_SetStatus_FinalStatusNotifiesSuccessors(t *testing.T) {
+	cases := []struct {
+		name, from, to string
+		want           []bool
+	}{
+		{"canceled releases", "IN PROGRESS", "CANCELED", []bool{true}},
+		{"done releases", "IN PROGRESS", "DONE", []bool{true}},
+		{"reopen from canceled re-blocks", "CANCELED", "IN PROGRESS", []bool{false}},
+		{"done to canceled is no-op", "DONE", "CANCELED", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			statuses := map[string]*repository.CustomStatus{
+				"from": {ID: "from", Name: c.from, RequirePic: c.from != "DONE" && c.from != "CANCELED"},
+				"to":   {ID: "to", Name: c.to, RequirePic: c.to != "DONE" && c.to != "CANCELED"},
+			}
+			repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+				"t1": {ID: "t1", ProjectID: "p1", StatusID: "from", StatusName: c.from},
+			}}
+			deps := &fakeTaskDeps{}
+			svc := NewTaskService(repo, &fakeTaskPics{}, deps, &fakeTaskSessions{},
+				&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+				&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
+
+			if err := svc.SetStatus(context.Background(), nil, "t1", "to", []string{"pic1"}, "user1", "member"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(deps.notified) != len(c.want) || (len(c.want) == 1 && deps.notified[0] != c.want[0]) {
+				t.Errorf("notified = %v, want %v", deps.notified, c.want)
+			}
+		})
 	}
 }
 
