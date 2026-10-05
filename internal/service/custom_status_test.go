@@ -46,6 +46,10 @@ type fakeCustomStatusRepo struct {
 		statusID string
 		require  bool
 	}
+	setPicCalls []struct {
+		statusID string
+		require  bool
+	}
 }
 
 func (f *fakeCustomStatusRepo) ListForScope(_ context.Context, _ db.Executor, _, _ string) ([]repository.CustomStatus, error) {
@@ -113,6 +117,14 @@ func (f *fakeCustomStatusRepo) SetRequireStartConfirmation(_ context.Context, _ 
 		return f.setRequireErr
 	}
 	f.setRequireCalls = append(f.setRequireCalls, struct {
+		statusID string
+		require  bool
+	}{statusID, require})
+	return nil
+}
+
+func (f *fakeCustomStatusRepo) SetRequirePic(_ context.Context, _ db.Executor, statusID string, require bool, _, _, _ string) error {
+	f.setPicCalls = append(f.setPicCalls, struct {
 		statusID string
 		require  bool
 	}{statusID, require})
@@ -355,5 +367,42 @@ func TestCustomStatusService_SetRequireStartConfirmation_ForbiddenForEditor(t *t
 
 	if err := svc.SetRequireStartConfirmation(context.Background(), nil, "s1", true, "user-1", "member"); !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("err = %v, want domain.ErrForbidden", err)
+	}
+}
+
+func TestCustomStatusService_SetRequirePic_AllowsPMAndAnyStatus(t *testing.T) {
+	// Beda dari konfirmasi mulai: parameter ini berlaku untuk status MANA PUN,
+	// termasuk status sistem BACKLOG/DONE/BLOCKED.
+	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
+		"s1": {ID: "s1", ScopeType: "workspace", ScopeID: "ws-1", Name: "DONE", IsSystem: true},
+	}}
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "project_manager"}, nil, nil)
+
+	if err := svc.SetRequirePic(context.Background(), nil, "s1", true, "pm-1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.setPicCalls) != 1 || !repo.setPicCalls[0].require {
+		t.Errorf("setPicCalls = %+v, want satu entri require=true", repo.setPicCalls)
+	}
+}
+
+func TestCustomStatusService_SetRequirePic_ForbiddenForEditor(t *testing.T) {
+	repo := &fakeCustomStatusRepo{getByID: map[string]*repository.CustomStatus{
+		"s1": {ID: "s1", ScopeType: "workspace", ScopeID: "ws-1", Name: "IN PROGRESS", IsSystem: true},
+	}}
+	svc := NewCustomStatusService(repo, &fakeCustomStatusRoleChecker{role: "editor"}, nil, nil)
+
+	if err := svc.SetRequirePic(context.Background(), nil, "s1", false, "user-1", "member"); !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("err = %v, want domain.ErrForbidden", err)
+	}
+	if len(repo.setPicCalls) != 0 {
+		t.Errorf("setPicCalls = %d, want 0", len(repo.setPicCalls))
+	}
+}
+
+func TestCustomStatusService_SetRequirePic_EmptyID(t *testing.T) {
+	svc := NewCustomStatusService(&fakeCustomStatusRepo{}, &fakeCustomStatusRoleChecker{role: "admin_workspace"}, nil, nil)
+	if err := svc.SetRequirePic(context.Background(), nil, "", true, "aw-1", "member"); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("err = %v, want domain.ErrInvalidInput", err)
 	}
 }

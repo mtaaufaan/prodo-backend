@@ -31,7 +31,10 @@ type CustomStatus struct {
 	IsSystem                 bool
 	IsUndefined              bool
 	RequireStartConfirmation bool
-	CreatedAt                time.Time
+	// RequirePic -- false: pindah KE status ini tidak menanyakan/menetapkan PIC
+	// (status akhir seperti DONE/CANCELED); PIC fase sebelumnya dinonaktifkan.
+	RequirePic bool
+	CreatedAt  time.Time
 	// TaskCount (S4W-05, US-021 AC "menyebutkan jumlah task yang saat ini
 	// menggunakan status tersebut") -- cuma terisi lewat ListForScope/
 	// Get (subquery COUNT), 0 default untuk hasil Create (status baru pasti
@@ -45,18 +48,18 @@ func NewCustomStatusRepository() *CustomStatusRepository {
 	return &CustomStatusRepository{}
 }
 
-const customStatusSelectColumns = `id, scope_type, scope_id, name, color_token, position, is_system, is_undefined, require_start_confirmation, created_at`
+const customStatusSelectColumns = `id, scope_type, scope_id, name, color_token, position, is_system, is_undefined, require_start_confirmation, require_pic, created_at`
 
 // customStatusSelectWithCount -- dipakai ListForScope/Get (tampilan panel
 // Kelola Custom Status AW/PM butuh jumlah task terdampak sebelum undefine,
 // US-021) -- subquery COUNT per baris, bukan JOIN+GROUP BY, supaya query
 // List tetap 1 baris per status walau task-nya banyak.
-const customStatusSelectWithCount = `cs.id, cs.scope_type, cs.scope_id, cs.name, cs.color_token, cs.position, cs.is_system, cs.is_undefined, cs.require_start_confirmation, cs.created_at,
+const customStatusSelectWithCount = `cs.id, cs.scope_type, cs.scope_id, cs.name, cs.color_token, cs.position, cs.is_system, cs.is_undefined, cs.require_start_confirmation, cs.require_pic, cs.created_at,
 	(SELECT COUNT(*) FROM tasks t WHERE t.status_id = cs.id AND t.deleted_at IS NULL)`
 
 func scanCustomStatus(row interface{ Scan(dest ...any) error }) (*CustomStatus, error) {
 	var s CustomStatus
-	if err := row.Scan(&s.ID, &s.ScopeType, &s.ScopeID, &s.Name, &s.ColorToken, &s.Position, &s.IsSystem, &s.IsUndefined, &s.RequireStartConfirmation, &s.CreatedAt); err != nil {
+	if err := row.Scan(&s.ID, &s.ScopeType, &s.ScopeID, &s.Name, &s.ColorToken, &s.Position, &s.IsSystem, &s.IsUndefined, &s.RequireStartConfirmation, &s.RequirePic, &s.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -64,7 +67,7 @@ func scanCustomStatus(row interface{ Scan(dest ...any) error }) (*CustomStatus, 
 
 func scanCustomStatusWithCount(row interface{ Scan(dest ...any) error }) (*CustomStatus, error) {
 	var s CustomStatus
-	if err := row.Scan(&s.ID, &s.ScopeType, &s.ScopeID, &s.Name, &s.ColorToken, &s.Position, &s.IsSystem, &s.IsUndefined, &s.RequireStartConfirmation, &s.CreatedAt, &s.TaskCount); err != nil {
+	if err := row.Scan(&s.ID, &s.ScopeType, &s.ScopeID, &s.Name, &s.ColorToken, &s.Position, &s.IsSystem, &s.IsUndefined, &s.RequireStartConfirmation, &s.RequirePic, &s.CreatedAt, &s.TaskCount); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -161,8 +164,8 @@ func (r *CustomStatusRepository) Create(ctx context.Context, exec db.Executor, s
 // Create).
 func (r *CustomStatusRepository) CloneForProject(ctx context.Context, exec db.Executor, workspaceID, projectID string) error {
 	if _, err := exec.Exec(ctx, `
-		INSERT INTO custom_statuses (scope_type, scope_id, name, color_token, position, is_system, require_start_confirmation, created_by)
-		SELECT 'project', $2, ws.name, ws.color_token, ws.position, ws.is_system, ws.require_start_confirmation, ws.created_by
+		INSERT INTO custom_statuses (scope_type, scope_id, name, color_token, position, is_system, require_start_confirmation, require_pic, created_by)
+		SELECT 'project', $2, ws.name, ws.color_token, ws.position, ws.is_system, ws.require_start_confirmation, ws.require_pic, ws.created_by
 		FROM custom_statuses ws
 		WHERE ws.scope_type = 'workspace' AND ws.scope_id = $1 AND ws.is_undefined = FALSE
 	`, workspaceID, projectID); err != nil {
@@ -317,6 +320,27 @@ func (r *CustomStatusRepository) SetRequireStartConfirmation(ctx context.Context
 	if err := insertCustomStatusAudit(ctx, exec, actorID, actorRole, "custom_status.start_confirmation_changed", statusID, workspaceID,
 		map[string]any{"require_start_confirmation": old.RequireStartConfirmation}, map[string]any{"require_start_confirmation": require}); err != nil {
 		return fmt.Errorf("repository.SetRequireStartConfirmation: audit: %w", err)
+	}
+	return nil
+}
+
+// SetRequirePic -- PUT /statuses/:id/pic-requirement. Pola sama
+// SetRequireStartConfirmation (satu parameter per status, diaudit).
+func (r *CustomStatusRepository) SetRequirePic(ctx context.Context, exec db.Executor, statusID string, require bool, actorID, actorRole, workspaceID string) error {
+	old, err := r.Get(ctx, exec, statusID)
+	if err != nil {
+		return err
+	}
+	tag, err := exec.Exec(ctx, `UPDATE custom_statuses SET require_pic = $2, updated_at = NOW() WHERE id = $1`, statusID, require)
+	if err != nil {
+		return fmt.Errorf("repository.SetRequirePic: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("repository.SetRequirePic: %w", domain.ErrCustomStatusNotFound)
+	}
+	if err := insertCustomStatusAudit(ctx, exec, actorID, actorRole, "custom_status.pic_requirement_changed", statusID, workspaceID,
+		map[string]any{"require_pic": old.RequirePic}, map[string]any{"require_pic": require}); err != nil {
+		return fmt.Errorf("repository.SetRequirePic: audit: %w", err)
 	}
 	return nil
 }

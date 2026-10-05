@@ -69,6 +69,8 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Status kustom %q dinonaktifkan (undefine)`, target)
 	case "custom_status.restored":
 		return fmt.Sprintf(`Status kustom %q dipulihkan`, target)
+	case "custom_status.pic_requirement_changed":
+		return fmt.Sprintf(`Kewajiban PIC status %q diubah`, target)
 	case "custom_status.start_confirmation_changed":
 		return fmt.Sprintf(`Konfirmasi mulai pengerjaan status %q diubah`, target)
 	case "rule.created":

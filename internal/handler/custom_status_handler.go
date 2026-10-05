@@ -257,6 +257,35 @@ func (h *CustomStatusHandler) UpdateRequireStartConfirmation(c *fiber.Ctx) error
 	return c.JSON(response.Success(fiber.Map{"id": statusID, "require_start_confirmation": body.RequireStartConfirmation}))
 }
 
+type requirePicRequest struct {
+	RequirePic bool `json:"require_pic"`
+}
+
+// UpdateRequirePic menangani PUT /statuses/:id/pic-requirement -- parameter
+// per status "wajib menetapkan PIC saat task masuk status ini". false untuk
+// status akhir (DONE/BLOCKED default sistem). Otorisasi sama toggle
+// konfirmasi mulai (PM + Admin Workspace).
+func (h *CustomStatusHandler) UpdateRequirePic(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	statusID := c.Params("id")
+
+	var body requirePicRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
+	}
+	if err := h.statuses.SetRequirePic(c.Context(), exec, statusID, body.RequirePic, actorUserID, actorRole); err != nil {
+		return h.mapCustomStatusError(c, err, "Gagal mengubah setting status")
+	}
+	return c.JSON(response.Success(fiber.Map{"id": statusID, "require_pic": body.RequirePic}))
+}
+
 func (h *CustomStatusHandler) mapCustomStatusError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
@@ -274,7 +303,7 @@ func (h *CustomStatusHandler) mapCustomStatusError(c *fiber.Ctx, err error, fall
 	case errors.Is(err, domain.ErrCustomStatusNotUndefined):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("STATUS_NOT_UNDEFINED", "Status ini tidak sedang UNDEFINED", nil))
 	case errors.Is(err, domain.ErrCustomStatusNotTrackable):
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STATUS_NOT_TRACKABLE", "BACKLOG, DONE, dan BLOCKED tidak dilacak waktunya -- konfirmasi mulai tidak berlaku", nil))
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("STATUS_NOT_TRACKABLE", "BACKLOG, DONE, BLOCKED, dan CANCELED tidak dilacak waktunya -- konfirmasi mulai tidak berlaku", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))
@@ -285,6 +314,6 @@ func customStatusJSON(s *repository.CustomStatus) fiber.Map {
 	return fiber.Map{
 		"id": s.ID, "name": s.Name, "color_token": s.ColorToken, "position": s.Position,
 		"is_system": s.IsSystem, "is_undefined": s.IsUndefined, "require_start_confirmation": s.RequireStartConfirmation,
-		"task_count": s.TaskCount,
+		"require_pic": s.RequirePic, "task_count": s.TaskCount,
 	}
 }
