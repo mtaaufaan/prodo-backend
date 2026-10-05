@@ -20,6 +20,8 @@ import (
 type Sprint struct {
 	ID        string
 	ProjectID string
+	// Code -- kode unik per project (SPR-01, ...); kunci penghubung import task.
+	Code      string
 	Name      string
 	StartDate *time.Time
 	EndDate   *time.Time
@@ -40,28 +42,60 @@ func NewSprintRepository() *SprintRepository {
 // ProjectRepository.Create -- audit ditulis di titik yang sama dengan
 // insert, satu transaksi).
 func (r *SprintRepository) Create(ctx context.Context, exec db.Executor, projectID, name string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string) (*Sprint, error) {
-	var s Sprint
-	s.ProjectID, s.Name = projectID, name
-	err := exec.QueryRow(ctx, `
-		INSERT INTO sprints (project_id, name, start_date, end_date, goal, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, status, created_at, updated_at
-	`, projectID, name, startDate, endDate, goal, actorID).Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	code, err := r.nextAutoCode(ctx, exec, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("repository.Create: %w", err)
+		return nil, err
+	}
+	return r.insert(ctx, exec, projectID, code, name, "", startDate, endDate, goal, workspaceID, actorID, actorRole, false)
+}
+
+// CreateImported -- sprint dari import CSV: kode dan status ditentukan
+// berkas (status "" = default backlog). Audit sprint.created ditandai
+// imported=true.
+func (r *SprintRepository) CreateImported(ctx context.Context, exec db.Executor, projectID, code, name, status string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string) (*Sprint, error) {
+	return r.insert(ctx, exec, projectID, code, name, status, startDate, endDate, goal, workspaceID, actorID, actorRole, true)
+}
+
+func (r *SprintRepository) insert(ctx context.Context, exec db.Executor, projectID, code, name, status string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string, imported bool) (*Sprint, error) {
+	var s Sprint
+	s.ProjectID, s.Code, s.Name = projectID, code, name
+	err := exec.QueryRow(ctx, `
+		INSERT INTO sprints (project_id, code, name, start_date, end_date, goal, created_by, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE(NULLIF($8, '')::sprint_status, 'backlog'))
+		RETURNING id, status, created_at, updated_at
+	`, projectID, code, name, startDate, endDate, goal, actorID, status).Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("repository.insert: %w", err)
 	}
 	s.StartDate, s.EndDate, s.Goal, s.CreatedBy = startDate, endDate, goal, &actorID
 
-	if err := insertSprintAudit(ctx, exec, actorID, actorRole, "sprint.created", s.ID, workspaceID, nil,
-		map[string]any{"name": name, "start_date": startDate, "end_date": endDate}); err != nil {
-		return nil, fmt.Errorf("repository.Create: audit: %w", err)
+	state := map[string]any{"code": code, "name": name, "start_date": startDate, "end_date": endDate}
+	if imported {
+		state["imported"] = true
+		state["status"] = s.Status
+	}
+	if err := insertSprintAudit(ctx, exec, actorID, actorRole, "sprint.created", s.ID, workspaceID, nil, state); err != nil {
+		return nil, fmt.Errorf("repository.insert: audit: %w", err)
 	}
 	return &s, nil
 }
 
+// nextAutoCode -- "SPR-NN" berikutnya: angka terbesar dari kode berpola
+// SPR-<angka> di project ini + 1 (kode kustom hasil import tidak ikut dihitung).
+func (r *SprintRepository) nextAutoCode(ctx context.Context, exec db.Executor, projectID string) (string, error) {
+	var n int
+	err := exec.QueryRow(ctx, `
+		SELECT COALESCE(MAX(substring(code from '^SPR-([0-9]+)$')::int), 0) + 1 FROM sprints WHERE project_id = $1
+	`, projectID).Scan(&n)
+	if err != nil {
+		return "", fmt.Errorf("repository.nextAutoCode: %w", err)
+	}
+	return fmt.Sprintf("SPR-%02d", n), nil
+}
+
 func (r *SprintRepository) List(ctx context.Context, exec db.Executor, projectID string) ([]Sprint, error) {
 	rows, err := exec.Query(ctx, `
-		SELECT id, project_id, name, start_date, end_date, goal, status, created_by, created_at, updated_at
+		SELECT id, project_id, code, name, start_date, end_date, goal, status, created_by, created_at, updated_at
 		FROM sprints WHERE project_id = $1
 		ORDER BY created_at DESC
 	`, projectID)
@@ -73,7 +107,7 @@ func (r *SprintRepository) List(ctx context.Context, exec db.Executor, projectID
 	list := make([]Sprint, 0)
 	for rows.Next() {
 		var s Sprint
-		if err := rows.Scan(&s.ID, &s.ProjectID, &s.Name, &s.StartDate, &s.EndDate, &s.Goal, &s.Status, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ProjectID, &s.Code, &s.Name, &s.StartDate, &s.EndDate, &s.Goal, &s.Status, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		list = append(list, s)
@@ -111,9 +145,9 @@ func (r *SprintRepository) CountInProject(ctx context.Context, exec db.Executor,
 func (r *SprintRepository) Get(ctx context.Context, exec db.Executor, sprintID string) (*Sprint, error) {
 	var s Sprint
 	err := exec.QueryRow(ctx, `
-		SELECT id, project_id, name, start_date, end_date, goal, status, created_by, created_at, updated_at
+		SELECT id, project_id, code, name, start_date, end_date, goal, status, created_by, created_at, updated_at
 		FROM sprints WHERE id = $1
-	`, sprintID).Scan(&s.ID, &s.ProjectID, &s.Name, &s.StartDate, &s.EndDate, &s.Goal, &s.Status, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt)
+	`, sprintID).Scan(&s.ID, &s.ProjectID, &s.Code, &s.Name, &s.StartDate, &s.EndDate, &s.Goal, &s.Status, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("repository.Get: %w", domain.ErrSprintNotFound)
@@ -128,9 +162,9 @@ func (r *SprintRepository) Get(ctx context.Context, exec db.Executor, sprintID s
 func (r *SprintRepository) GetActiveInProject(ctx context.Context, exec db.Executor, projectID string) (*Sprint, error) {
 	var s Sprint
 	err := exec.QueryRow(ctx, `
-		SELECT id, project_id, name, start_date, end_date, goal, status, created_by, created_at, updated_at
+		SELECT id, project_id, code, name, start_date, end_date, goal, status, created_by, created_at, updated_at
 		FROM sprints WHERE project_id = $1 AND status = 'active'
-	`, projectID).Scan(&s.ID, &s.ProjectID, &s.Name, &s.StartDate, &s.EndDate, &s.Goal, &s.Status, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt)
+	`, projectID).Scan(&s.ID, &s.ProjectID, &s.Code, &s.Name, &s.StartDate, &s.EndDate, &s.Goal, &s.Status, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil

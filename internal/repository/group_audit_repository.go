@@ -68,6 +68,7 @@ const groupScopeClause = `(o.group_id = $%d OR (al.metadata ? 'group_id' AND (al
 const actionTypeCase = `CASE
 	WHEN al.action LIKE '%%.created' THEN 'CREATE'
 	WHEN al.action LIKE '%%.deleted' THEN 'DELETE'
+	WHEN al.action LIKE '%%.report_downloaded' THEN 'ACCESS'
 	WHEN al.action LIKE 'session.%%' OR al.action LIKE 'auth.%%' OR al.action IN ('user.login', 'user.backup_code_used') THEN 'ACCESS'
 	ELSE 'UPDATE'
 END`
