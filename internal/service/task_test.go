@@ -92,12 +92,18 @@ func (f *fakeTaskRepo) ListAudit(_ context.Context, _ db.Executor, _ string, _, 
 	return nil, 0, nil
 }
 
-type fakeTaskPics struct{ group []repository.PicGroupMember }
+type fakeTaskPics struct {
+	group       []repository.PicGroupMember
+	deactivated int
+	phases      []string
+}
 
 func (f *fakeTaskPics) DeactivateActiveForTask(_ context.Context, _ db.Executor, _ string) error {
+	f.deactivated++
 	return nil
 }
-func (f *fakeTaskPics) CreatePhase(_ context.Context, _ db.Executor, _, _, _ string, _ *string) error {
+func (f *fakeTaskPics) CreatePhase(_ context.Context, _ db.Executor, _, _, userID string, _ *string) error {
+	f.phases = append(f.phases, userID)
 	return nil
 }
 func (f *fakeTaskPics) ListGroupForStatus(_ context.Context, _ db.Executor, _, _ string) ([]repository.PicGroupMember, error) {
@@ -322,6 +328,25 @@ func TestTaskService_SetStatus_NoSprint_AllowsBlocked(t *testing.T) {
 	}
 }
 
+// TestTaskService_SetStatus_NoSprint_AllowsCanceled -- CANCELED dikecualikan
+// dari guard sprint seperti BLOCKED, dan tidak butuh PIC (require_pic=false).
+func TestTaskService_SetStatus_NoSprint_AllowsCanceled(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"canceled-status": {ID: "canceled-status", Name: "CANCELED", RequirePic: false},
+		"backlog-status":  {ID: "backlog-status", Name: "BACKLOG", RequirePic: true},
+	}
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "backlog-status", StatusName: "BACKLOG", SprintID: nil},
+	}}
+	svc := NewTaskService(repo, &fakeTaskPics{}, &fakeTaskDeps{}, &fakeTaskSessions{},
+		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
+
+	if err := svc.SetStatus(context.Background(), nil, "t1", "canceled-status", nil, "user1", "member"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // TestTaskService_SetStatus_NonActiveSprint_Rejected -- task masih tertaut
 // sprint yang BUKAN sprint aktif project ini ditolak, baik sprint itu
 // belum dimulai ('backlog' -- ditemukan user via pengujian live: task
@@ -353,5 +378,73 @@ func TestTaskService_SetStatus_NonActiveSprint_Rejected(t *testing.T) {
 				t.Errorf("err = %v, want domain.ErrTaskNotInSprint", err)
 			}
 		})
+	}
+}
+
+// require_pic (parameter per status, diminta user: status akhir DONE/BLOCKED
+// tidak perlu PIC) -- RequirePic true tetap mewajibkan PIC (US-017).
+func TestTaskService_SetStatus_RequirePic_Rejected_WithoutPic(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"review": {ID: "review", Name: "UNDER REVIEW", RequirePic: true},
+	}
+	sprintID := "s1"
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "review", StatusName: "IN PROGRESS", SprintID: &sprintID},
+	}}
+	svc := newTaskServiceForTest(repo, statuses)
+	if err := svc.SetStatus(context.Background(), nil, "t1", "review", nil, "user1", "member"); !errors.Is(err, domain.ErrPicRequired) {
+		t.Fatalf("err = %v, want domain.ErrPicRequired", err)
+	}
+}
+
+// RequirePic false: tanpa PIC diterima, PIC lama dinonaktifkan, tidak ada
+// fase PIC baru -- bahkan kalau klien tetap mengirim pic_ids.
+func TestTaskService_SetStatus_NoPicRequired_DeactivatesAndCreatesNoPhase(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"x":    {ID: "x", Name: "IN PROGRESS", Position: 1, RequirePic: true},
+		"done": {ID: "done", Name: "DONE", Position: 3, RequirePic: false},
+	}
+	sprintID := "s1"
+	for name, pics := range map[string][]string{"tanpa pic": nil, "pic ikut terkirim diabaikan": {"pic1"}} {
+		t.Run(name, func(t *testing.T) {
+			repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+				"t1": {ID: "t1", ProjectID: "p1", StatusID: "x", StatusName: "IN PROGRESS", SprintID: &sprintID},
+			}}
+			picFake := &fakeTaskPics{}
+			svc := NewTaskService(repo, picFake, &fakeTaskDeps{}, &fakeTaskSessions{},
+				&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+				&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
+			if err := svc.SetStatus(context.Background(), nil, "t1", "done", pics, "user1", "member"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if picFake.deactivated != 1 {
+				t.Errorf("PIC aktif lama dinonaktifkan %d kali, want 1", picFake.deactivated)
+			}
+			if len(picFake.phases) != 0 {
+				t.Errorf("fase PIC baru = %v, want kosong", picFake.phases)
+			}
+		})
+	}
+}
+
+// Status yang butuh PIC tetap membuat fase untuk PIC terpilih (tidak regresi).
+func TestTaskService_SetStatus_RequirePic_CreatesPhases(t *testing.T) {
+	statuses := map[string]*repository.CustomStatus{
+		"x":      {ID: "x", Name: "IN PROGRESS", Position: 1, RequirePic: true},
+		"review": {ID: "review", Name: "UNDER REVIEW", Position: 2, RequirePic: true},
+	}
+	sprintID := "s1"
+	repo := &fakeTaskRepo{byID: map[string]*repository.Task{
+		"t1": {ID: "t1", ProjectID: "p1", StatusID: "x", StatusName: "IN PROGRESS", SprintID: &sprintID},
+	}}
+	picFake := &fakeTaskPics{}
+	svc := NewTaskService(repo, picFake, &fakeTaskDeps{}, &fakeTaskSessions{},
+		&fakeTaskProjects{workspaceID: "ws1"}, &fakeTaskStatuses{byID: statuses},
+		&fakeSprintRBAC{role: "project_manager"}, &fakeSprintProjectRoles{found: false}, &fakeTaskRules{}, &fakeTaskSprints{})
+	if err := svc.SetStatus(context.Background(), nil, "t1", "review", []string{"a", "b"}, "user1", "member"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(picFake.phases) != 2 {
+		t.Errorf("fase PIC = %v, want 2", picFake.phases)
 	}
 }

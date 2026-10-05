@@ -19,11 +19,11 @@ import (
 // sendiri, tidak berbagi kuota dengan template workspace asal).
 const customStatusMaxPerScope = 12
 
-// customStatusUntracked -- 3 dari 5 status sistem yang bukan status kerja
+// customStatusUntracked -- 4 dari 6 status sistem yang bukan status kerja
 // aktif (task di situ menunggu keputusan, bukan sedang dikerjakan) --
 // konfirmasi "Mulai Pengerjaan" tidak berlaku, sama persis konstanta
 // UNTRACKED di AW Custom Status.dc.html.
-var customStatusUntracked = map[string]bool{"BACKLOG": true, "DONE": true, "BLOCKED": true}
+var customStatusUntracked = map[string]bool{"BACKLOG": true, "DONE": true, "BLOCKED": true, "CANCELED": true}
 
 // customStatusColorTokens -- 7 token warna resmi Tailwind (tailwind.config.ts,
 // docs/design.md §2) yang dipakai color picker Add/Kelola Status.
@@ -40,6 +40,7 @@ type customStatusRepository interface {
 	Move(ctx context.Context, exec db.Executor, scopeType, scopeID, statusID string, direction int, actorID, actorRole, workspaceID string) error
 	SetUndefined(ctx context.Context, exec db.Executor, statusID string, undefined bool, actorID, actorRole, workspaceID string) error
 	SetRequireStartConfirmation(ctx context.Context, exec db.Executor, statusID string, require bool, actorID, actorRole, workspaceID string) error
+	SetRequirePic(ctx context.Context, exec db.Executor, statusID string, require bool, actorID, actorRole, workspaceID string) error
 }
 
 // customStatusProjectResolver -- reuse ProjectRepository.GetWorkspaceID
@@ -398,6 +399,31 @@ func (s *CustomStatusService) SetRequireStartConfirmation(ctx context.Context, e
 	}
 	if err := s.repo.SetRequireStartConfirmation(ctx, exec, statusID, require, actorID, actorRole, workspaceID); err != nil {
 		return fmt.Errorf("service.SetRequireStartConfirmation: %w", err)
+	}
+	return nil
+}
+
+// SetRequirePic -- PUT /statuses/:id/pic-requirement. Parameter per status:
+// false = pindah KE status ini tidak menanyakan/menetapkan PIC (status akhir
+// seperti DONE/BLOCKED, default sistem); true = perilaku US-017 (wajib pilih
+// PIC). Otorisasi sama toggle konfirmasi mulai (authorizeConfirmToggle).
+func (s *CustomStatusService) SetRequirePic(ctx context.Context, exec db.Executor, statusID string, require bool, actorID, actorRole string) error {
+	if statusID == "" {
+		return fmt.Errorf("service.SetRequirePic: %w", domain.ErrInvalidInput)
+	}
+	status, err := s.repo.Get(ctx, exec, statusID)
+	if err != nil {
+		return err
+	}
+	if err := s.authorizeConfirmToggle(ctx, exec, status.ScopeType, status.ScopeID, actorID, actorRole); err != nil {
+		return err
+	}
+	workspaceID, err := s.resolveWorkspaceID(ctx, exec, status.ScopeType, status.ScopeID)
+	if err != nil {
+		return fmt.Errorf("service.SetRequirePic: %w", err)
+	}
+	if err := s.repo.SetRequirePic(ctx, exec, statusID, require, actorID, actorRole, workspaceID); err != nil {
+		return fmt.Errorf("service.SetRequirePic: %w", err)
 	}
 	return nil
 }

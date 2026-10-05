@@ -388,9 +388,6 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	if taskID == "" || statusID == "" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrInvalidInput)
 	}
-	if len(picIDs) == 0 {
-		return fmt.Errorf("service.SetStatus: %w", domain.ErrPicRequired)
-	}
 	projectID, err := s.repo.GetProjectID(ctx, exec, taskID)
 	if err != nil {
 		return err
@@ -410,15 +407,25 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	if status.IsUndefined {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskStatusUndefined)
 	}
+	// require_pic (parameter per status): status akhir seperti DONE/BLOCKED
+	// tidak butuh PIC -- pilihan PIC yang ikut terkirim diabaikan, PIC fase
+	// sebelumnya tetap dinonaktifkan di bawah (riwayat PIC tetap tersimpan).
+	if status.RequirePic {
+		if len(picIDs) == 0 {
+			return fmt.Errorf("service.SetStatus: %w", domain.ErrPicRequired)
+		}
+	} else {
+		picIDs = nil
+	}
 
 	current, err := s.repo.Get(ctx, exec, taskID)
 	if err != nil {
 		return err
 	}
-	if current.StatusName == "BACKLOG" && current.Completeness != nil && *current.Completeness == "incomplete" && status.Name != "BLOCKED" {
+	if current.StatusName == "BACKLOG" && current.Completeness != nil && *current.Completeness == "incomplete" && status.Name != "BLOCKED" && status.Name != "CANCELED" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskIncomplete)
 	}
-	if current.StatusName == "BACKLOG" && status.Name != "BLOCKED" {
+	if current.StatusName == "BACKLOG" && status.Name != "BLOCKED" && status.Name != "CANCELED" {
 		workable, err := s.isTaskInWorkableSprint(ctx, exec, current.SprintID)
 		if err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
@@ -427,7 +434,7 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 			return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskNotInSprint)
 		}
 	}
-	if status.Name != "BACKLOG" && status.Name != "BLOCKED" {
+	if status.Name != "BACKLOG" && status.Name != "BLOCKED" && status.Name != "CANCELED" {
 		blocking, err := s.deps.ListIncompletePredecessors(ctx, exec, taskID)
 		if err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
@@ -446,7 +453,7 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 		}
 	}
 
-	if !isFullPicMode(role) {
+	if status.RequirePic && !isFullPicMode(role) {
 		group, err := s.pics.ListGroupForStatus(ctx, exec, projectID, statusID)
 		if err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
