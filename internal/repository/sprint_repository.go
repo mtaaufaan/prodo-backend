@@ -194,11 +194,11 @@ func (r *SprintRepository) Delete(ctx context.Context, exec db.Executor, sprintI
 // task yang belum DONE dipindah ke backlog (sprint_id NULL), bukan
 // otomatis ke sprint berikutnya (tidak ada urutan sprint eksplisit di
 // skema -- GA/PM memindah manual kalau perlu, dijelaskan di FE).
-func (r *SprintRepository) UnassignIncompleteTasks(ctx context.Context, exec db.Executor, sprintID, doneStatusID string) error {
+func (r *SprintRepository) UnassignIncompleteTasks(ctx context.Context, exec db.Executor, sprintID string, closedStatusIDs []string) error {
 	_, err := exec.Exec(ctx, `
 		UPDATE tasks SET sprint_id = NULL, updated_at = NOW()
-		WHERE sprint_id = $1 AND status_id != $2 AND deleted_at IS NULL
-	`, sprintID, doneStatusID)
+		WHERE sprint_id = $1 AND status_id <> ALL($2::uuid[]) AND deleted_at IS NULL
+	`, sprintID, closedStatusIDs)
 	if err != nil {
 		return fmt.Errorf("repository.UnassignIncompleteTasks: %w", err)
 	}
@@ -206,7 +206,8 @@ func (r *SprintRepository) UnassignIncompleteTasks(ctx context.Context, exec db.
 }
 
 // Summary -- GET /sprints/:id/summary (Phase 4, US-018a/S4-59; diperluas
-// IG-92 US-081 kapasitas SP: total/selesai/tersisa). "Selesai" = task
+// IG-92 US-081 kapasitas SP: total/selesai/tersisa). Task CANCELED tidak
+// dihitung sama sekali (IG-118). "Selesai" = task
 // berstatus custom_statuses.name='DONE' (JOIN, sama definisi dipakai
 // SprintService.closeSprint mencari doneStatusID).
 func (r *SprintRepository) Summary(ctx context.Context, exec db.Executor, sprintID string) (totalSP, doneSP, unestimatedCount, taskCount int, err error) {
@@ -218,7 +219,7 @@ func (r *SprintRepository) Summary(ctx context.Context, exec db.Executor, sprint
 			COUNT(*)
 		FROM tasks t
 		JOIN custom_statuses cs ON cs.id = t.status_id
-		WHERE t.sprint_id = $1 AND t.deleted_at IS NULL
+		WHERE t.sprint_id = $1 AND t.deleted_at IS NULL AND cs.name <> 'CANCELED'
 	`, sprintID).Scan(&totalSP, &doneSP, &unestimatedCount, &taskCount)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("repository.Summary: %w", err)

@@ -24,7 +24,7 @@ type sprintRepository interface {
 	Update(ctx context.Context, exec db.Executor, sprintID, name string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string, before map[string]any) error
 	SetStatus(ctx context.Context, exec db.Executor, sprintID, status, action, workspaceID, actorID, actorRole, fromStatus string) error
 	Delete(ctx context.Context, exec db.Executor, sprintID, workspaceID, actorID, actorRole, name string) error
-	UnassignIncompleteTasks(ctx context.Context, exec db.Executor, sprintID, doneStatusID string) error
+	UnassignIncompleteTasks(ctx context.Context, exec db.Executor, sprintID string, closedStatusIDs []string) error
 	Summary(ctx context.Context, exec db.Executor, sprintID string) (totalSP, doneSP, unestimatedCount, taskCount int, err error)
 	AssignTasks(ctx context.Context, exec db.Executor, sprintID, projectID, workspaceID, actorID, actorRole string, taskIDs []string) error
 }
@@ -198,18 +198,23 @@ func (s *SprintService) closeSprint(ctx context.Context, exec db.Executor, sprin
 	if err != nil {
 		return fmt.Errorf("service.closeSprint: %w", err)
 	}
-	var doneStatusID string
+	// Status akhir (DONE, CANCELED) tetap tinggal di sprint sebagai catatan;
+	// sisanya dikembalikan ke backlog.
+	var closedStatusIDs []string
+	hasDone := false
 	for _, st := range statuses {
+		if st.Name == "DONE" || st.Name == "CANCELED" {
+			closedStatusIDs = append(closedStatusIDs, st.ID)
+		}
 		if st.Name == "DONE" {
-			doneStatusID = st.ID
-			break
+			hasDone = true
 		}
 	}
 	if err := s.repo.SetStatus(ctx, exec, sprint.ID, "done", "sprint.completed", workspaceID, actorID, actorRole, sprint.Status); err != nil {
 		return fmt.Errorf("service.closeSprint: %w", err)
 	}
-	if doneStatusID != "" {
-		if err := s.repo.UnassignIncompleteTasks(ctx, exec, sprint.ID, doneStatusID); err != nil {
+	if hasDone {
+		if err := s.repo.UnassignIncompleteTasks(ctx, exec, sprint.ID, closedStatusIDs); err != nil {
 			return fmt.Errorf("service.closeSprint: %w", err)
 		}
 	}
