@@ -20,6 +20,7 @@ type fakeSprintRepo struct {
 	created       []string
 	statusChanges []struct{ id, status, action, actorRole string }
 	unassigned    []string
+	closedIDs     []string
 	assignCalls   []struct {
 		sprintID string
 		taskIDs  []string
@@ -92,8 +93,9 @@ func (f *fakeSprintRepo) Delete(_ context.Context, _ db.Executor, sprintID, _, _
 	delete(f.byID, sprintID)
 	return nil
 }
-func (f *fakeSprintRepo) UnassignIncompleteTasks(_ context.Context, _ db.Executor, sprintID, _ string) error {
+func (f *fakeSprintRepo) UnassignIncompleteTasks(_ context.Context, _ db.Executor, sprintID string, closedStatusIDs []string) error {
 	f.unassigned = append(f.unassigned, sprintID)
+	f.closedIDs = closedStatusIDs
 	return nil
 }
 func (f *fakeSprintRepo) Summary(_ context.Context, _ db.Executor, _ string) (totalSP, doneSP, unestimatedCount, taskCount int, err error) {
@@ -136,7 +138,7 @@ func (f *fakeSprintProjectRoles) GetRole(_ context.Context, _ db.Executor, _, _ 
 
 func newSprintServiceForTest(repo *fakeSprintRepo, wsRole string) *SprintService {
 	return NewSprintService(repo, &fakeSprintProjects{workspaceID: "ws1"},
-		&fakeSprintStatuses{list: []repository.CustomStatus{{ID: "done-status", Name: "DONE"}}},
+		&fakeSprintStatuses{list: []repository.CustomStatus{{ID: "done-status", Name: "DONE"}, {ID: "canceled-status", Name: "CANCELED"}, {ID: "wip-status", Name: "IN PROGRESS"}}},
 		&fakeSprintRBAC{role: wsRole}, &fakeSprintProjectRoles{found: false})
 }
 
@@ -208,6 +210,10 @@ func TestSprintService_CompleteSprint_UnassignsIncompleteTasks(t *testing.T) {
 	}
 	if len(repo.unassigned) != 1 {
 		t.Fatalf("expected UnassignIncompleteTasks called once, got %d", len(repo.unassigned))
+	}
+	// DONE dan CANCELED tetap di sprint; IN PROGRESS dikembalikan ke backlog.
+	if len(repo.closedIDs) != 2 || repo.closedIDs[0] != "done-status" || repo.closedIDs[1] != "canceled-status" {
+		t.Fatalf("closed status IDs = %v, want [done-status canceled-status]", repo.closedIDs)
 	}
 }
 

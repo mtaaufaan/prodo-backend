@@ -72,7 +72,7 @@ func (r *GroupPerformanceRepository) ListTaskMetrics(ctx context.Context, exec d
 		JOIN workspaces w ON w.id = p.workspace_id
 		JOIN organizations o ON o.id = w.org_id
 		JOIN custom_statuses cs ON cs.id = t.status_id
-		WHERE `+where, args...)
+		WHERE cs.name <> 'CANCELED' AND `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListTaskMetrics: %w", err)
 	}

@@ -618,7 +618,7 @@ func (r *TaskRepository) ListDueForWorkspace(ctx context.Context, exec db.Execut
 		JOIN projects p ON p.id = t.project_id
 		WHERE p.workspace_id = $1 AND t.deleted_at IS NULL AND t.due_date IS NOT NULL
 		  AND t.due_date >= CURRENT_DATE AND t.due_date <= CURRENT_DATE + make_interval(days => $2)
-		  AND cs.name != 'DONE'
+		  AND cs.name NOT IN ('DONE', 'CANCELED')
 	`, workspaceID, days)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListDueForWorkspace: %w", err)
@@ -680,7 +680,7 @@ func (r *TaskRepository) ListDueForProject(ctx context.Context, exec db.Executor
 		LEFT JOIN sprints s ON s.id = t.sprint_id
 		WHERE t.project_id = $1 AND t.deleted_at IS NULL AND t.due_date IS NOT NULL
 		  AND t.due_date >= CURRENT_DATE AND t.due_date <= CURRENT_DATE + make_interval(days => $2)
-		  AND cs.name != 'DONE'
+		  AND cs.name NOT IN ('DONE', 'CANCELED')
 	`, projectID, days)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListDueForProject: %w", err)
