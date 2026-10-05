@@ -75,12 +75,13 @@ func (r *WorkspaceRepository) Create(ctx context.Context, exec db.Executor, orgI
 	// dibuat sama sekali tanpa status default (custom_statuses.status_id
 	// NOT NULL).
 	if _, err := exec.Exec(ctx, `
-		INSERT INTO custom_statuses (scope_type, scope_id, name, color_token, position, is_system)
-		VALUES ('workspace', $1, 'BACKLOG', 'grey', 0, TRUE),
-		       ('workspace', $1, 'IN PROGRESS', 'accent', 1, TRUE),
-		       ('workspace', $1, 'UNDER REVIEW', 'violet', 2, TRUE),
-		       ('workspace', $1, 'DONE', 'mint', 3, TRUE),
-		       ('workspace', $1, 'BLOCKED', 'red', 4, TRUE)
+		INSERT INTO custom_statuses (scope_type, scope_id, name, color_token, position, is_system, require_pic)
+		VALUES ('workspace', $1, 'BACKLOG', 'grey', 0, TRUE, TRUE),
+		       ('workspace', $1, 'IN PROGRESS', 'accent', 1, TRUE, TRUE),
+		       ('workspace', $1, 'UNDER REVIEW', 'violet', 2, TRUE, TRUE),
+		       ('workspace', $1, 'DONE', 'mint', 3, TRUE, FALSE),
+		       ('workspace', $1, 'BLOCKED', 'red', 4, TRUE, TRUE),
+		       ('workspace', $1, 'CANCELED', 'grey', 5, TRUE, FALSE)
 	`, ws.ID); err != nil {
 		return nil, fmt.Errorf("repository.Create: seed status sistem: %w", err)
 	}

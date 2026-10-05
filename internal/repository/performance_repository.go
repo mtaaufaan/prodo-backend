@@ -92,6 +92,8 @@ func perfScopeClause(workspaceID, projectID, timeColumn string, since *time.Time
 }
 
 // ListTasks -- Completion Rate, On-Time Rate, Backlog Health, Overdue Task.
+// Task CANCELED dikeluarkan dari cakupan (bukan selesai, bukan terlambat, tidak
+// masuk penyebut persentase) -- IG-118.
 func (r *PerformanceRepository) ListTasks(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfTask, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "t.created_at", since)
 	rows, err := exec.Query(ctx, `
@@ -99,7 +101,7 @@ func (r *PerformanceRepository) ListTasks(ctx context.Context, exec db.Executor,
 		FROM tasks t
 		JOIN projects p ON p.id = t.project_id
 		JOIN custom_statuses cs ON cs.id = t.status_id
-		WHERE `+where, args...)
+		WHERE cs.name <> 'CANCELED' AND `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListTasks: %w", err)
 	}
@@ -122,7 +124,7 @@ func (r *PerformanceRepository) ListTasks(ctx context.Context, exec db.Executor,
 // GroupPerformanceRepository.ListStatusDwell).
 func (r *PerformanceRepository) ListStatusSessions(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfSession, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "tss.entered_at", since)
-	where += " AND cs.name != 'DONE'"
+	where += " AND cs.name NOT IN ('DONE', 'CANCELED')"
 	rows, err := exec.Query(ctx, `
 		SELECT tss.task_id, p.id, t.priority, cs.name, tss.entered_at, tss.work_started_at, tss.exited_at, tss.is_regression
 		FROM task_status_sessions tss
@@ -189,7 +191,7 @@ func (r *PerformanceRepository) ListAssignees(ctx context.Context, exec db.Execu
 		JOIN projects p ON p.id = t.project_id
 		JOIN custom_statuses cs ON cs.id = t.status_id
 		JOIN users u ON u.id = ta.user_id
-		WHERE `+where, args...)
+		WHERE cs.name <> 'CANCELED' AND `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListAssignees: %w", err)
 	}

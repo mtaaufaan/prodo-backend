@@ -824,6 +824,7 @@ func run() error {
 	// Status Time Tracking, Regression).
 	v1.Put("/projects/:id/settings", jwtAuth, dbCtx, projectHandler.UpdateSettings)
 	v1.Put("/statuses/:id", jwtAuth, dbCtx, customStatusHandler.UpdateRequireStartConfirmation)
+	v1.Put("/statuses/:id/pic-requirement", jwtAuth, dbCtx, customStatusHandler.UpdateRequirePic)
 	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
 	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
 	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, taskHandler.StatusSessions)
