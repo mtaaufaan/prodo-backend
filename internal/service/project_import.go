@@ -122,7 +122,8 @@ func validateSprintRows(rows []SprintImportRow, existing []repository.Sprint) {
 	codes := map[string]bool{}
 	names := map[string]bool{}
 	hasActive := false
-	for _, s := range existing {
+	for i := range existing {
+		s := &existing[i]
 		codes[strings.ToUpper(s.Code)] = true
 		names[strings.ToLower(s.Name)] = true
 		if s.Status == "active" {
@@ -429,7 +430,8 @@ func (s *ProjectImportService) Report(ctx context.Context, exec db.Executor, pro
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	_ = w.Write([]string{"baris", "code", "name", "start_date", "end_date", "goal", "status", "hasil", "alasan"})
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		if onlySkipped && r.Status != "skipped" {
 			continue
 		}

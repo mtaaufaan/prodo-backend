@@ -48,7 +48,8 @@ func TestValidateSprintRows(t *testing.T) {
 	validateSprintRows(rows, existing)
 
 	want := map[int]string{2: "valid", 3: "skipped", 4: "skipped", 5: "skipped", 6: "skipped", 7: "skipped", 8: "skipped", 9: "valid", 10: "skipped", 11: "skipped", 12: "skipped", 13: "valid"}
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		if r.Status != want[r.RowNum] {
 			t.Errorf("baris %d: status = %q (%s), want %q", r.RowNum, r.Status, r.Reason, want[r.RowNum])
 		}
