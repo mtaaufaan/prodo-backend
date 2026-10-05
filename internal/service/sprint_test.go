@@ -16,6 +16,9 @@ type fakeSprintRepo struct {
 	activeByProj  map[string]*repository.Sprint
 	countInProj   int
 	nameTaken     bool
+	takenCodes    map[string]bool
+	nextNum       int
+	lastCode      string
 	createErr     error
 	created       []string
 	statusChanges []struct{ id, status, action, actorRole string }
@@ -28,12 +31,19 @@ type fakeSprintRepo struct {
 	deleted []string
 }
 
-func (f *fakeSprintRepo) Create(_ context.Context, _ db.Executor, projectID, name string, _, _ *time.Time, _ *string, _, _, _ string) (*repository.Sprint, error) {
+func (f *fakeSprintRepo) CodeTaken(_ context.Context, _ db.Executor, _, code string) (bool, error) {
+	return f.takenCodes[code], nil
+}
+func (f *fakeSprintRepo) NextAutoNumber(_ context.Context, _ db.Executor, _ string) (int, error) {
+	return f.nextNum, nil
+}
+func (f *fakeSprintRepo) Create(_ context.Context, _ db.Executor, projectID, code, name string, _, _ *time.Time, _ *string, _, _, _ string) (*repository.Sprint, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
+	f.lastCode = code
 	id := "sp_" + name
-	s := &repository.Sprint{ID: id, ProjectID: projectID, Name: name, Status: "backlog"}
+	s := &repository.Sprint{ID: id, ProjectID: projectID, Code: code, Name: name, Status: "backlog"}
 	f.byID[id] = s
 	f.created = append(f.created, name)
 	return s, nil
@@ -143,9 +153,9 @@ func newSprintServiceForTest(repo *fakeSprintRepo, wsRole string) *SprintService
 }
 
 func TestSprintService_Create_AutoName(t *testing.T) {
-	repo := &fakeSprintRepo{byID: map[string]*repository.Sprint{}, activeByProj: map[string]*repository.Sprint{}, countInProj: 3}
+	repo := &fakeSprintRepo{byID: map[string]*repository.Sprint{}, activeByProj: map[string]*repository.Sprint{}, countInProj: 3, nextNum: 4}
 	svc := newSprintServiceForTest(repo, "project_manager")
-	sprint, err := svc.Create(context.Background(), nil, "proj1", "", nil, nil, nil, "user1", "member")
+	sprint, err := svc.Create(context.Background(), nil, "proj1", "", "", nil, nil, nil, nil, "user1", "member")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,9 +165,9 @@ func TestSprintService_Create_AutoName(t *testing.T) {
 }
 
 func TestSprintService_Create_NameTaken(t *testing.T) {
-	repo := &fakeSprintRepo{byID: map[string]*repository.Sprint{}, activeByProj: map[string]*repository.Sprint{}, nameTaken: true}
+	repo := &fakeSprintRepo{byID: map[string]*repository.Sprint{}, activeByProj: map[string]*repository.Sprint{}, nameTaken: true, countInProj: 1, nextNum: 2}
 	svc := newSprintServiceForTest(repo, "project_manager")
-	_, err := svc.Create(context.Background(), nil, "proj1", "Sprint 1", nil, nil, nil, "user1", "member")
+	_, err := svc.Create(context.Background(), nil, "proj1", "", "Sprint 1", nil, nil, nil, nil, "user1", "member")
 	if !errors.Is(err, domain.ErrSprintNameTaken) {
 		t.Fatalf("expected ErrSprintNameTaken, got %v", err)
 	}
@@ -166,7 +176,7 @@ func TestSprintService_Create_NameTaken(t *testing.T) {
 func TestSprintService_Create_ViewerForbidden(t *testing.T) {
 	repo := &fakeSprintRepo{byID: map[string]*repository.Sprint{}, activeByProj: map[string]*repository.Sprint{}}
 	svc := newSprintServiceForTest(repo, "viewer")
-	_, err := svc.Create(context.Background(), nil, "proj1", "Sprint X", nil, nil, nil, "user1", "member")
+	_, err := svc.Create(context.Background(), nil, "proj1", "", "Sprint X", nil, nil, nil, nil, "user1", "member")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
@@ -283,5 +293,50 @@ func TestSprintService_Summary(t *testing.T) {
 	}
 	if total != 10 || done != 4 || unest != 1 || count != 5 {
 		t.Fatalf("unexpected summary values: total=%d done=%d unest=%d count=%d", total, done, unest, count)
+	}
+}
+
+func intPtr(n int) *int { return &n }
+
+func TestSprintService_Create_CodeRules(t *testing.T) {
+	cases := []struct {
+		name      string
+		count     int
+		next      int
+		taken     map[string]bool
+		code      string
+		startFrom *int
+		wantCode  string
+		wantName  string
+		wantErr   error
+	}{
+		{name: "kode manual dinormalisasi", count: 2, code: " spr-9 ", wantCode: "SPR-9", wantName: "Sprint 3"},
+		{name: "kode manual sudah dipakai", count: 2, code: "spr-01", taken: map[string]bool{"SPR-01": true}, wantErr: domain.ErrSprintCodeTaken},
+		{name: "kode manual format salah", count: 2, code: "SPR 01", wantErr: domain.ErrInvalidInput},
+		{name: "otomatis: increment dari terbesar", count: 3, next: 6, wantCode: "SPR-06", wantName: "Sprint 6"},
+		{name: "sprint pertama tanpa pilihan -> ditanya", count: 0, wantErr: domain.ErrSprintStartRequired},
+		{name: "sprint pertama nilai pilihan tidak sah", count: 0, startFrom: intPtr(2), wantErr: domain.ErrSprintStartRequired},
+		{name: "sprint pertama mulai dari 0", count: 0, startFrom: intPtr(0), wantCode: "SPR-00", wantName: "Sprint 0"},
+		{name: "sprint pertama mulai dari 1", count: 0, startFrom: intPtr(1), wantCode: "SPR-01", wantName: "Sprint 1"},
+		{name: "start_from diabaikan kalau sudah ada sprint", count: 1, next: 1, startFrom: intPtr(0), wantCode: "SPR-01", wantName: "Sprint 1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repo := &fakeSprintRepo{byID: map[string]*repository.Sprint{}, activeByProj: map[string]*repository.Sprint{}, countInProj: c.count, nextNum: c.next, takenCodes: c.taken}
+			svc := newSprintServiceForTest(repo, "project_manager")
+			sprint, err := svc.Create(context.Background(), nil, "proj1", c.code, "", c.startFrom, nil, nil, nil, "user1", "member")
+			if c.wantErr != nil {
+				if !errors.Is(err, c.wantErr) {
+					t.Fatalf("err = %v, want %v", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sprint.Code != c.wantCode || sprint.Name != c.wantName {
+				t.Errorf("code/name = %q/%q, want %q/%q", sprint.Code, sprint.Name, c.wantCode, c.wantName)
+			}
+		})
 	}
 }
