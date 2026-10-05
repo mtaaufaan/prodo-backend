@@ -34,7 +34,7 @@ type CustomStatus struct {
 	// RequirePic -- false: pindah KE status ini tidak menanyakan/menetapkan PIC
 	// (status akhir seperti DONE/CANCELED); PIC fase sebelumnya dinonaktifkan.
 	RequirePic bool
-	CreatedAt                time.Time
+	CreatedAt  time.Time
 	// TaskCount (S4W-05, US-021 AC "menyebutkan jumlah task yang saat ini
 	// menggunakan status tersebut") -- cuma terisi lewat ListForScope/
 	// Get (subquery COUNT), 0 default untuk hasil Create (status baru pasti
