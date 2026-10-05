@@ -41,11 +41,7 @@ func NewSprintRepository() *SprintRepository {
 // Create menyimpan sprint baru + audit trail (IG-92, pola sama
 // ProjectRepository.Create -- audit ditulis di titik yang sama dengan
 // insert, satu transaksi).
-func (r *SprintRepository) Create(ctx context.Context, exec db.Executor, projectID, name string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string) (*Sprint, error) {
-	code, err := r.nextAutoCode(ctx, exec, projectID)
-	if err != nil {
-		return nil, err
-	}
+func (r *SprintRepository) Create(ctx context.Context, exec db.Executor, projectID, code, name string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string) (*Sprint, error) {
 	return r.insert(ctx, exec, projectID, code, name, "", startDate, endDate, goal, workspaceID, actorID, actorRole, false)
 }
 
@@ -80,18 +76,32 @@ func (r *SprintRepository) insert(ctx context.Context, exec db.Executor, project
 	return &s, nil
 }
 
-// nextAutoCode -- "SPR-NN" berikutnya: angka terbesar dari kode berpola
-// SPR-<angka> di project ini + 1 (kode kustom hasil import tidak ikut dihitung).
-func (r *SprintRepository) nextAutoCode(ctx context.Context, exec db.Executor, projectID string) (string, error) {
+// CodeTaken -- kode (case-insensitive) sudah dipakai sprint lain di project ini.
+func (r *SprintRepository) CodeTaken(ctx context.Context, exec db.Executor, projectID, code string) (bool, error) {
+	var exists bool
+	err := exec.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sprints WHERE project_id = $1 AND upper(code) = upper($2))`, projectID, code).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repository.CodeTaken: %w", err)
+	}
+	return exists, nil
+}
+
+// NextAutoNumber -- angka berikutnya untuk kode otomatis "SPR-NN": angka
+// terbesar dari kode berpola SPR-<angka> di project ini + 1 (kode kustom hasil
+// import/input manual tidak ikut dihitung). Sprint 0 (SPR-00) -> berikutnya 1.
+func (r *SprintRepository) NextAutoNumber(ctx context.Context, exec db.Executor, projectID string) (int, error) {
 	var n int
 	err := exec.QueryRow(ctx, `
 		SELECT COALESCE(MAX(substring(code from '^SPR-([0-9]+)$')::int), 0) + 1 FROM sprints WHERE project_id = $1
 	`, projectID).Scan(&n)
 	if err != nil {
-		return "", fmt.Errorf("repository.nextAutoCode: %w", err)
+		return 0, fmt.Errorf("repository.NextAutoNumber: %w", err)
 	}
-	return fmt.Sprintf("SPR-%02d", n), nil
+	return n, nil
 }
+
+// FormatSprintCode -- "SPR-00", "SPR-07", "SPR-123".
+func FormatSprintCode(n int) string { return fmt.Sprintf("SPR-%02d", n) }
 
 func (r *SprintRepository) List(ctx context.Context, exec db.Executor, projectID string) ([]Sprint, error) {
 	rows, err := exec.Query(ctx, `

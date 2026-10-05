@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 
 // sprintRepository -- interface didefinisikan di consumer, §3.9.
 type sprintRepository interface {
-	Create(ctx context.Context, exec db.Executor, projectID, name string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string) (*repository.Sprint, error)
+	Create(ctx context.Context, exec db.Executor, projectID, code, name string, startDate, endDate *time.Time, goal *string, workspaceID, actorID, actorRole string) (*repository.Sprint, error)
+	CodeTaken(ctx context.Context, exec db.Executor, projectID, code string) (bool, error)
+	NextAutoNumber(ctx context.Context, exec db.Executor, projectID string) (int, error)
 	List(ctx context.Context, exec db.Executor, projectID string) ([]repository.Sprint, error)
 	NameTaken(ctx context.Context, exec db.Executor, projectID, name string, excludeID *string) (bool, error)
 	CountInProject(ctx context.Context, exec db.Executor, projectID string) (int, error)
@@ -106,11 +109,51 @@ func (s *SprintService) authorize(ctx context.Context, exec db.Executor, project
 	return role, nil
 }
 
-func (s *SprintService) Create(ctx context.Context, exec db.Executor, projectID, name string, startDate, endDate *time.Time, goal *string, actorID, actorRole string) (*repository.Sprint, error) {
+// resolveCode -- kode sprint baru. Diisi user: dinormalisasi huruf besar,
+// harus berformat sah dan unik. Dikosongkan: dibuat sistem -- project yang
+// BELUM punya sprint wajib memilih startFrom (0 atau 1), selebihnya
+// angka terbesar + 1. autoNum terisi hanya untuk kode otomatis (dipakai
+// nama otomatis "Sprint N").
+func (s *SprintService) resolveCode(ctx context.Context, exec db.Executor, projectID, code string, startFrom *int) (resolved string, autoNum *int, err error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code != "" {
+		if !sprintCodePattern.MatchString(code) {
+			return "", nil, fmt.Errorf("service.Create: %w", domain.ErrInvalidInput)
+		}
+		taken, err := s.repo.CodeTaken(ctx, exec, projectID, code)
+		if err != nil {
+			return "", nil, fmt.Errorf("service.Create: %w", err)
+		}
+		if taken {
+			return "", nil, fmt.Errorf("service.Create: %w", domain.ErrSprintCodeTaken)
+		}
+		return code, nil, nil
+	}
+	count, err := s.repo.CountInProject(ctx, exec, projectID)
+	if err != nil {
+		return "", nil, fmt.Errorf("service.Create: %w", err)
+	}
+	var n int
+	if count == 0 {
+		if startFrom == nil || (*startFrom != 0 && *startFrom != 1) {
+			return "", nil, fmt.Errorf("service.Create: %w", domain.ErrSprintStartRequired)
+		}
+		n = *startFrom
+	} else if n, err = s.repo.NextAutoNumber(ctx, exec, projectID); err != nil {
+		return "", nil, fmt.Errorf("service.Create: %w", err)
+	}
+	return repository.FormatSprintCode(n), &n, nil
+}
+
+func (s *SprintService) Create(ctx context.Context, exec db.Executor, projectID, code, name string, startFrom *int, startDate, endDate *time.Time, goal *string, actorID, actorRole string) (*repository.Sprint, error) {
 	if projectID == "" {
 		return nil, fmt.Errorf("service.Create: %w", domain.ErrInvalidInput)
 	}
 	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	resolvedCode, autoNum, err := s.resolveCode(ctx, exec, projectID, code, startFrom)
 	if err != nil {
 		return nil, err
 	}
@@ -119,11 +162,16 @@ func (s *SprintService) Create(ctx context.Context, exec db.Executor, projectID,
 		// Auto-generate "Sprint N" kalau nama dikosongkan (PM Add
 		// Sprint.dc.html nextName()) -- ditegakkan di backend juga
 		// (bukan cuma FE) supaya API tetap benar dipanggil langsung.
-		count, err := s.repo.CountInProject(ctx, exec, projectID)
-		if err != nil {
-			return nil, fmt.Errorf("service.Create: %w", err)
+		// Kode otomatis -> N = angka di kode (Sprint 0 / Sprint 1 / ...).
+		if autoNum != nil {
+			name = "Sprint " + strconv.Itoa(*autoNum)
+		} else {
+			count, err := s.repo.CountInProject(ctx, exec, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("service.Create: %w", err)
+			}
+			name = repository.NextAutoSprintName(count)
 		}
-		name = repository.NextAutoSprintName(count)
 	}
 	taken, err := s.repo.NameTaken(ctx, exec, projectID, name, nil)
 	if err != nil {
@@ -136,7 +184,7 @@ func (s *SprintService) Create(ctx context.Context, exec db.Executor, projectID,
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}
-	sprint, err := s.repo.Create(ctx, exec, projectID, name, startDate, endDate, goal, workspaceID, actorID, auditRole)
+	sprint, err := s.repo.Create(ctx, exec, projectID, resolvedCode, name, startDate, endDate, goal, workspaceID, actorID, auditRole)
 	if err != nil {
 		return nil, fmt.Errorf("service.Create: %w", err)
 	}

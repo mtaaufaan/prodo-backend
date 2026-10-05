@@ -416,6 +416,13 @@ var (
 	// pola sama PM Add Sprint.dc.html save()).
 	ErrSprintNameTaken = errors.New("sprint name already used in this project")
 
+	// ErrSprintCodeTaken -- kode sprint (case-insensitive) sudah dipakai sprint lain di project yang sama.
+	ErrSprintCodeTaken = errors.New("sprint code already used in this project")
+
+	// ErrSprintStartRequired -- kode dikosongkan (otomatis) padahal project belum punya sprint
+	// sama sekali: penomoran harus dipilih dulu, mulai dari Sprint 0 atau Sprint 1.
+	ErrSprintStartRequired = errors.New("sprint numbering start (0 or 1) required for first sprint")
+
 	// ErrSprintNotDone dikembalikan POST /sprints/:id/reopen saat sprint
 	// belum berstatus 'done' -- reopen cuma berlaku dari SELESAI kembali
 	// ke BACKLOG (IG-92).
