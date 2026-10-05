@@ -36,6 +36,11 @@ type Rule struct {
 	CreatedBy       string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	// TemplateKey -- template Library asal rule (nil = dibuat manual); dipakai
+	// kartu "DIPAKAI n RULE". CreatedByName -- nama tampilan pembuat (hanya
+	// terisi dari ListForScope/ListForProjectWithWorkspace).
+	TemplateKey   *string
+	CreatedByName string
 	// Runs -- jumlah automation_rule_executions, dihitung via LEFT JOIN
 	// (pola sama Webhook.Sent30d), bukan kolom counter -- tidak ada risiko
 	// drift.
@@ -52,6 +57,8 @@ type RuleExecution struct {
 	Status       string
 	ActionTaken  json.RawMessage
 	ErrorMessage *string
+	// DurationMS -- lama executeAction (nil untuk baris sebelum kolom ada).
+	DurationMS *int
 	// TaskCode/TaskTitle -- reuse "task_id" di TriggerEvent (S4W-11 selalu
 	// task-based), LEFT JOIN supaya baris tetap muncul walau task sudah
 	// dihapus (soft-delete) atau id-nya tidak valid. Dipakai kolom "TASK"
@@ -69,13 +76,13 @@ func NewRuleRepository() *RuleRepository { return &RuleRepository{} }
 // workspaceID dipakai audit SAJA (workspace pemilik project ini kalau
 // scopeType="project", BUKAN scopeID -- lihat RuleService.resolveWorkspaceID,
 // pola sama insertCustomStatusAudit).
-func (r *RuleRepository) Create(ctx context.Context, exec db.Executor, scopeType, scopeID, name string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole, workspaceID string) (string, error) {
+func (r *RuleRepository) Create(ctx context.Context, exec db.Executor, scopeType, scopeID, name, templateKey string, triggerConfig, conditionConfig, actionConfig []byte, actorID, actorRole, workspaceID string) (string, error) {
 	var id string
 	err := exec.QueryRow(ctx, `
-		INSERT INTO automation_rules (scope_type, scope_id, name, trigger_config, condition_config, action_config, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO automation_rules (scope_type, scope_id, name, trigger_config, condition_config, action_config, created_by, template_key)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
 		RETURNING id
-	`, scopeType, scopeID, name, triggerConfig, conditionConfig, actionConfig, actorID).Scan(&id)
+	`, scopeType, scopeID, name, triggerConfig, conditionConfig, actionConfig, actorID, templateKey).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("repository.Create: %w", err)
 	}
@@ -107,18 +114,33 @@ func (r *RuleRepository) Get(ctx context.Context, exec db.Executor, ruleID strin
 // ListForScope -- daftar rule untuk tab "Rule Aktif" + stats bar, scopeType
 // "workspace" (AW) atau "project" (Track S5B, PM).
 func (r *RuleRepository) ListForScope(ctx context.Context, exec db.Executor, scopeType, scopeID string) ([]Rule, error) {
+	return r.listRules(ctx, exec, "ar.scope_type = $1 AND ar.scope_id = $2", scopeType, scopeID)
+}
+
+// ListForProjectWithWorkspace -- tab "Rule Aktif" halaman PM: rule project
+// ini DAN rule workspace pemiliknya (tampil sebagai "DIWARISI", read-only
+// di FE; keduanya memang dievaluasi aditif, lihat TaskService.fireRules).
+func (r *RuleRepository) ListForProjectWithWorkspace(ctx context.Context, exec db.Executor, projectID, workspaceID string) ([]Rule, error) {
+	return r.listRules(ctx, exec,
+		"((ar.scope_type = 'project' AND ar.scope_id = $1) OR (ar.scope_type = 'workspace' AND ar.scope_id = $2))",
+		projectID, workspaceID)
+}
+
+func (r *RuleRepository) listRules(ctx context.Context, exec db.Executor, where string, args ...any) ([]Rule, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT ar.id, ar.scope_type, ar.scope_id, ar.name, ar.trigger_config, ar.condition_config, ar.action_config,
 		       ar.is_active, ar.inactive_reason, ar.is_template, ar.created_by, ar.created_at, ar.updated_at,
+		       ar.template_key, COALESCE(NULLIF(u.display_name, ''), u.email, ''),
 		       COUNT(e.id)
 		FROM automation_rules ar
 		LEFT JOIN automation_rule_executions e ON e.rule_id = ar.id
-		WHERE ar.scope_type = $1 AND ar.scope_id = $2 AND ar.deleted_at IS NULL
-		GROUP BY ar.id
+		LEFT JOIN users u ON u.id = ar.created_by
+		WHERE `+where+` AND ar.deleted_at IS NULL
+		GROUP BY ar.id, u.id
 		ORDER BY ar.created_at DESC
-	`, scopeType, scopeID)
+	`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("repository.ListForScope: %w", err)
+		return nil, fmt.Errorf("repository.listRules: %w", err)
 	}
 	defer rows.Close()
 
@@ -126,8 +148,9 @@ func (r *RuleRepository) ListForScope(ctx context.Context, exec db.Executor, sco
 	for rows.Next() {
 		var rl Rule
 		if err := rows.Scan(&rl.ID, &rl.ScopeType, &rl.ScopeID, &rl.Name, &rl.TriggerConfig, &rl.ConditionConfig, &rl.ActionConfig,
-			&rl.IsActive, &rl.InactiveReason, &rl.IsTemplate, &rl.CreatedBy, &rl.CreatedAt, &rl.UpdatedAt, &rl.Runs); err != nil {
-			return nil, fmt.Errorf("repository.ListForScope: scan: %w", err)
+			&rl.IsActive, &rl.InactiveReason, &rl.IsTemplate, &rl.CreatedBy, &rl.CreatedAt, &rl.UpdatedAt,
+			&rl.TemplateKey, &rl.CreatedByName, &rl.Runs); err != nil {
+			return nil, fmt.Errorf("repository.listRules: scan: %w", err)
 		}
 		list = append(list, rl)
 	}
@@ -218,7 +241,7 @@ func (r *RuleRepository) DeactivateForStatus(ctx context.Context, exec db.Execut
 func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, scopeType, scopeID, statusFilter string) ([]RuleExecution, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT e.id, e.rule_id, ar.name, e.trigger_event, e.triggered_by, e.executed_at, e.status, e.action_taken, e.error_message,
-		       t.task_code, t.title
+		       e.duration_ms, t.task_code, t.title
 		FROM automation_rule_executions e
 		JOIN automation_rules ar ON ar.id = e.rule_id
 		LEFT JOIN tasks t ON t.id = NULLIF(e.trigger_event->>'task_id', '')::uuid
@@ -236,7 +259,7 @@ func (r *RuleRepository) ListExecutions(ctx context.Context, exec db.Executor, s
 	for rows.Next() {
 		var e RuleExecution
 		if err := rows.Scan(&e.ID, &e.RuleID, &e.RuleName, &e.TriggerEvent, &e.TriggeredBy, &e.ExecutedAt, &e.Status, &e.ActionTaken, &e.ErrorMessage,
-			&e.TaskCode, &e.TaskTitle); err != nil {
+			&e.DurationMS, &e.TaskCode, &e.TaskTitle); err != nil {
 			return nil, fmt.Errorf("repository.ListExecutions: scan: %w", err)
 		}
 		list = append(list, e)
@@ -310,11 +333,11 @@ func (r *RuleRepository) ListActiveDueDateRules(ctx context.Context, exec db.Exe
 
 // CreateExecution (S4W-11) -- satu baris PER eksekusi rule, pola PERSIS
 // webhook_deliveries (tidak pernah diupdate, immutable log).
-func (r *RuleRepository) CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string) error {
+func (r *RuleRepository) CreateExecution(ctx context.Context, exec db.Executor, ruleID string, triggerEvent json.RawMessage, triggeredBy *string, status string, actionTaken json.RawMessage, errMessage *string, durationMS int) error {
 	_, err := exec.Exec(ctx, `
-		INSERT INTO automation_rule_executions (rule_id, trigger_event, triggered_by, status, action_taken, error_message)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, ruleID, triggerEvent, triggeredBy, status, actionTaken, errMessage)
+		INSERT INTO automation_rule_executions (rule_id, trigger_event, triggered_by, status, action_taken, error_message, duration_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, ruleID, triggerEvent, triggeredBy, status, actionTaken, errMessage, durationMS)
 	if err != nil {
 		return fmt.Errorf("repository.CreateExecution: %w", err)
 	}
