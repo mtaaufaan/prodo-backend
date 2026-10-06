@@ -26,6 +26,8 @@ func NewSprintHandler(sprints *service.SprintService, logger *zap.Logger) *Sprin
 }
 
 type sprintRequest struct {
+	Code      string  `json:"code"`
+	StartFrom *int    `json:"start_from"`
 	Name      string  `json:"name"`
 	StartDate *string `json:"start_date"`
 	EndDate   *string `json:"end_date"`
@@ -65,7 +67,7 @@ func (h *SprintHandler) Create(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Format tanggal harus YYYY-MM-DD", nil))
 	}
 
-	sprint, err := h.sprints.Create(c.Context(), exec, projectID, body.Name, startDate, endDate, body.Goal, actorUserID, actorRole)
+	sprint, err := h.sprints.Create(c.Context(), exec, projectID, body.Code, body.Name, body.StartFrom, startDate, endDate, body.Goal, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal membuat sprint")
 	}
@@ -231,7 +233,7 @@ func (h *SprintHandler) Summary(c *fiber.Ctx) error {
 
 func sprintJSON(s *repository.Sprint) fiber.Map {
 	return fiber.Map{
-		"id": s.ID, "project_id": s.ProjectID, "name": s.Name,
+		"id": s.ID, "project_id": s.ProjectID, "code": s.Code, "name": s.Name,
 		"start_date": dateOnly(s.StartDate), "end_date": dateOnly(s.EndDate), "goal": s.Goal, "status": s.Status, "created_at": s.CreatedAt,
 	}
 }
@@ -239,7 +241,11 @@ func sprintJSON(s *repository.Sprint) fiber.Map {
 func (h *SprintHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) error {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- nama sprint wajib diisi", nil))
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Input tidak valid -- periksa nama dan kode sprint (kode: huruf/angka/titik/strip, maks 20 karakter)", nil))
+	case errors.Is(err, domain.ErrSprintCodeTaken):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("SPRINT_CODE_TAKEN", "Kode sprint sudah dipakai di project ini", nil))
+	case errors.Is(err, domain.ErrSprintStartRequired):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("SPRINT_START_REQUIRED", "Project ini belum punya sprint -- pilih penomoran dimulai dari Sprint 0 atau Sprint 1", nil))
 	case errors.Is(err, domain.ErrSprintNameTaken):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("SPRINT_NAME_TAKEN", "Nama sprint sudah dipakai di project ini", nil))
 	case errors.Is(err, domain.ErrSprintNotDone):
