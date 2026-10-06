@@ -47,7 +47,7 @@ func (h *ProjectImportHandler) Template(c *fiber.Ctx) error {
 	kind := c.Query("kind", "sprint")
 	data, ok := service.ProjectImportTemplate(kind)
 	if !ok {
-		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "kind belum didukung -- saat ini hanya 'sprint'", nil))
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "kind tidak dikenal -- gunakan 'sprint' atau 'task'", nil))
 	}
 	c.Set("Content-Type", "text/csv")
 	c.Set("Content-Disposition", `attachment; filename="`+kind+`-import-template.csv"`)
@@ -162,7 +162,7 @@ func (h *ProjectImportHandler) mapError(c *fiber.Ctx, err error, fallbackMessage
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR",
-			"Input tidak valid -- berkas CSV harus berisi kolom code dan name, dan jenis import harus 'sprint'", nil))
+			"Input tidak valid -- jenis import harus 'sprint' atau 'task' dan berkas CSV wajib memuat kolom wajibnya (sprint: code, name; task: title)", nil))
 	case errors.Is(err, domain.ErrCSVTooLarge):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("CSV_TOO_LARGE", "Berkas melebihi 10 MB", nil))
 	case errors.Is(err, domain.ErrCSVTooManyRows):

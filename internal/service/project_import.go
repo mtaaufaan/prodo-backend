@@ -208,10 +208,14 @@ type ProjectImportService struct {
 	sprints  projectImportSprints
 	projects projectImportProjects
 	rbac     sprintWorkspaceRoleChecker
+	statuses projectImportStatuses
+	members  projectImportMembers
+	tasks    projectImportTasks
 }
 
-func NewProjectImportService(repo projectImportRepo, sprints projectImportSprints, projects projectImportProjects, rbac sprintWorkspaceRoleChecker) *ProjectImportService {
-	return &ProjectImportService{repo: repo, sprints: sprints, projects: projects, rbac: rbac}
+func NewProjectImportService(repo projectImportRepo, sprints projectImportSprints, projects projectImportProjects, rbac sprintWorkspaceRoleChecker,
+	statuses projectImportStatuses, members projectImportMembers, tasks projectImportTasks) *ProjectImportService {
+	return &ProjectImportService{repo: repo, sprints: sprints, projects: projects, rbac: rbac, statuses: statuses, members: members, tasks: tasks}
 }
 
 // authorize -- PM project ini, Admin Workspace, atau GA/PA (bypass). Editor/
@@ -242,28 +246,52 @@ func (s *ProjectImportService) authorize(ctx context.Context, exec db.Executor, 
 	return "", "", fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
 }
 
-func validImportKind(kind string) bool { return kind == "sprint" }
+func validImportKind(kind string) bool { return kind == "sprint" || kind == "task" }
 
 // ProjectImportTemplate -- template CSV per kind.
 func ProjectImportTemplate(kind string) ([]byte, bool) {
-	if kind == "sprint" {
+	switch kind {
+	case "sprint":
 		return SprintImportTemplateCSV(), true
+	case "task":
+		return TaskImportTemplateCSV(), true
 	}
 	return nil, false
 }
 
-// ProjectImportValidateResult -- ringkasan pratinjau dry-run.
+// ProjectImportValidateResult -- ringkasan pratinjau dry-run. Preview =
+// []SprintImportRow atau []TaskImportRow sesuai kind (50 baris pertama).
 type ProjectImportValidateResult struct {
 	ImportID string
 	Kind     string
 	Total    int
 	ValidN   int
 	SkippedN int
-	Preview  []SprintImportRow // 50 baris pertama
+	Preview  any
 }
 
-// Validate -- parse + validasi (dry-run). TIDAK menulis sprint; hanya
-// menyimpan hasil pratinjau sebagai import 'pending'.
+const importPreviewRows = 50
+
+// countValid -- jumlah baris berstatus "valid".
+func countValid[T any](rows []T, status func(*T) string) int {
+	n := 0
+	for i := range rows {
+		if status(&rows[i]) == "valid" {
+			n++
+		}
+	}
+	return n
+}
+
+func firstN[T any](rows []T, n int) []T {
+	if len(rows) > n {
+		return rows[:n]
+	}
+	return rows
+}
+
+// Validate -- parse + validasi (dry-run). TIDAK menulis apa pun selain
+// catatan import 'pending' berisi hasil pratinjau.
 func (s *ProjectImportService) Validate(ctx context.Context, exec db.Executor, projectID, kind, filename string, data []byte, actorID, actorRole string) (*ProjectImportValidateResult, error) {
 	if projectID == "" || len(data) == 0 || !validImportKind(kind) {
 		return nil, fmt.Errorf("service.Validate: %w", domain.ErrInvalidInput)
@@ -272,35 +300,51 @@ func (s *ProjectImportService) Validate(ctx context.Context, exec db.Executor, p
 	if err != nil {
 		return nil, err
 	}
-	rows, err := parseSprintCSV(data)
-	if err != nil {
-		return nil, fmt.Errorf("service.Validate: %w", err)
-	}
-	existing, err := s.sprints.List(ctx, exec, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("service.Validate: %w", err)
-	}
-	validateSprintRows(rows, existing)
 
-	validN := 0
-	for i := range rows {
-		if rows[i].Status == "valid" {
-			validN++
+	var (
+		rowsJSON []byte
+		total    int
+		validN   int
+		preview  any
+	)
+	switch kind {
+	case "sprint":
+		rows, err := parseSprintCSV(data)
+		if err != nil {
+			return nil, fmt.Errorf("service.Validate: %w", err)
+		}
+		existing, err := s.sprints.List(ctx, exec, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("service.Validate: %w", err)
+		}
+		validateSprintRows(rows, existing)
+		total, validN, preview = len(rows), countValid(rows, func(r *SprintImportRow) string { return r.Status }), firstN(rows, importPreviewRows)
+		rowsJSON, err = json.Marshal(rows)
+		if err != nil {
+			return nil, fmt.Errorf("service.Validate: encode hasil: %w", err)
+		}
+	case "task":
+		rows, err := parseTaskCSV(data)
+		if err != nil {
+			return nil, fmt.Errorf("service.Validate: %w", err)
+		}
+		env, err := s.loadTaskImportEnv(ctx, exec, projectID)
+		if err != nil {
+			return nil, err
+		}
+		validateTaskRows(rows, env)
+		total, validN, preview = len(rows), countValid(rows, func(r *TaskImportRow) string { return r.Status }), firstN(rows, importPreviewRows)
+		rowsJSON, err = json.Marshal(rows)
+		if err != nil {
+			return nil, fmt.Errorf("service.Validate: encode hasil: %w", err)
 		}
 	}
-	rowResults, err := json.Marshal(rows)
-	if err != nil {
-		return nil, fmt.Errorf("service.Validate: encode hasil: %w", err)
-	}
-	importID, err := s.repo.Create(ctx, exec, projectID, kind, actorID, auditRole, filename, len(rows), rowResults)
+
+	importID, err := s.repo.Create(ctx, exec, projectID, kind, actorID, auditRole, filename, total, rowsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("service.Validate: %w", err)
 	}
-	preview := rows
-	if len(preview) > 50 {
-		preview = preview[:50]
-	}
-	return &ProjectImportValidateResult{ImportID: importID, Kind: kind, Total: len(rows), ValidN: validN, SkippedN: len(rows) - validN, Preview: preview}, nil
+	return &ProjectImportValidateResult{ImportID: importID, Kind: kind, Total: total, ValidN: validN, SkippedN: total - validN, Preview: preview}, nil
 }
 
 func (s *ProjectImportService) load(ctx context.Context, exec db.Executor, projectID, importID string) (*repository.ProjectImport, error) {
@@ -314,10 +358,10 @@ func (s *ProjectImportService) load(ctx context.Context, exec db.Executor, proje
 	return imp, nil
 }
 
-// Execute -- tulis sprint yang valid. Pratinjau divalidasi ULANG terhadap
-// kondisi project saat ini (sprint bisa berubah sejak pratinjau); baris
-// yang sebelumnya dilewati tetap dilewati, baris valid yang kini bentrok
-// ikut dilewati dengan alasan.
+// Execute -- tulis data yang valid. Pratinjau divalidasi ULANG terhadap
+// kondisi project saat ini (bisa berubah sejak pratinjau); baris yang
+// sebelumnya dilewati tetap dilewati, baris valid yang kini bentrok ikut
+// dilewati dengan alasan "Berubah sejak pratinjau".
 func (s *ProjectImportService) Execute(ctx context.Context, exec db.Executor, projectID, importID, actorID, actorRole string) (*repository.ProjectImport, error) {
 	auditRole, workspaceID, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
@@ -330,14 +374,34 @@ func (s *ProjectImportService) Execute(ctx context.Context, exec db.Executor, pr
 	if imp.Status != "pending" {
 		return nil, fmt.Errorf("service.Execute: %w", domain.ErrCSVImportAlreadyStarted)
 	}
+
+	var rowsJSON []byte
+	var success, total int
+	switch imp.Kind {
+	case "sprint":
+		rowsJSON, success, total, err = s.executeSprintImport(ctx, exec, imp, projectID, workspaceID, actorID, auditRole)
+	case "task":
+		rowsJSON, success, total, err = s.executeTaskImport(ctx, exec, imp, projectID, workspaceID, actorID, auditRole)
+	default:
+		err = fmt.Errorf("service.Execute: %w", domain.ErrInvalidInput)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.Complete(ctx, exec, imp, success, total-success, rowsJSON, workspaceID, actorID, auditRole); err != nil {
+		return nil, fmt.Errorf("service.Execute: %w", err)
+	}
+	return s.load(ctx, exec, projectID, importID)
+}
+
+func (s *ProjectImportService) executeSprintImport(ctx context.Context, exec db.Executor, imp *repository.ProjectImport, projectID, workspaceID, actorID, auditRole string) (rowsJSON []byte, success, total int, err error) {
 	var rows []SprintImportRow
 	if err := json.Unmarshal(imp.RowResults, &rows); err != nil {
-		return nil, fmt.Errorf("service.Execute: decode hasil: %w", err)
+		return nil, 0, 0, fmt.Errorf("service.Execute: decode hasil: %w", err)
 	}
-
 	existing, err := s.sprints.List(ctx, exec, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("service.Execute: %w", err)
+		return nil, 0, 0, fmt.Errorf("service.Execute: %w", err)
 	}
 	// Validasi ulang HANYA baris yang lolos pratinjau (baris yang sudah
 	// dilewati tidak boleh "menyita" code/nama dan menggagalkan baris lain).
@@ -357,41 +421,61 @@ func (s *ProjectImportService) Execute(ctx context.Context, exec db.Executor, pr
 		}
 	}
 
-	success, failed := 0, 0
 	for i := range rows {
 		row := &rows[i]
 		if row.Status != "valid" {
-			failed++
 			continue
-		}
-		var start, end *time.Time
-		if row.StartDate != "" {
-			t, _ := time.Parse("2006-01-02", row.StartDate)
-			start = &t
-		}
-		if row.EndDate != "" {
-			t, _ := time.Parse("2006-01-02", row.EndDate)
-			end = &t
 		}
 		var goal *string
 		if row.Goal != "" {
 			g := row.Goal
 			goal = &g
 		}
-		if _, err := s.sprints.CreateImported(ctx, exec, projectID, row.Code, row.Name, row.SprintStatus, start, end, goal, workspaceID, actorID, auditRole); err != nil {
-			return nil, fmt.Errorf("service.Execute: baris %d: %w", row.RowNum, err)
+		if _, err := s.sprints.CreateImported(ctx, exec, projectID, row.Code, row.Name, row.SprintStatus, importDatePtr(row.StartDate), importDatePtr(row.EndDate), goal, workspaceID, actorID, auditRole); err != nil {
+			return nil, 0, 0, fmt.Errorf("service.Execute: baris %d: %w", row.RowNum, err)
 		}
 		success++
 	}
-
-	rowResults, err := json.Marshal(rows)
+	rowsJSON, err = json.Marshal(rows)
 	if err != nil {
-		return nil, fmt.Errorf("service.Execute: encode hasil: %w", err)
+		return nil, 0, 0, fmt.Errorf("service.Execute: encode hasil: %w", err)
 	}
-	if err := s.repo.Complete(ctx, exec, imp, success, failed, rowResults, workspaceID, actorID, auditRole); err != nil {
-		return nil, fmt.Errorf("service.Execute: %w", err)
+	return rowsJSON, success, len(rows), nil
+}
+
+func (s *ProjectImportService) executeTaskImport(ctx context.Context, exec db.Executor, imp *repository.ProjectImport, projectID, workspaceID, actorID, auditRole string) (rowsJSON []byte, success, total int, err error) {
+	var rows []TaskImportRow
+	if err := json.Unmarshal(imp.RowResults, &rows); err != nil {
+		return nil, 0, 0, fmt.Errorf("service.Execute: decode hasil: %w", err)
 	}
-	return s.load(ctx, exec, projectID, importID)
+	env, err := s.loadTaskImportEnv(ctx, exec, projectID)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	var idx []int
+	var recheck []TaskImportRow
+	for i := range rows {
+		if rows[i].Status == "valid" {
+			idx = append(idx, i)
+			recheck = append(recheck, rows[i])
+		}
+	}
+	validateTaskRows(recheck, env)
+	for k, i := range idx {
+		rows[i] = recheck[k]
+		if rows[i].Status == "skipped" {
+			rows[i].Reason = "Berubah sejak pratinjau: " + rows[i].Reason
+		}
+	}
+	success, err = s.executeTaskRows(ctx, exec, projectID, workspaceID, actorID, auditRole, rows, env)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	rowsJSON, err = json.Marshal(rows)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("service.Execute: encode hasil: %w", err)
+	}
+	return rowsJSON, success, len(rows), nil
 }
 
 func (s *ProjectImportService) Get(ctx context.Context, exec db.Executor, projectID, importID, actorID, actorRole string) (*repository.ProjectImport, error) {
@@ -423,10 +507,29 @@ func (s *ProjectImportService) Report(ctx context.Context, exec db.Executor, pro
 	if err != nil {
 		return nil, err
 	}
-	var rows []SprintImportRow
-	if err := json.Unmarshal(imp.RowResults, &rows); err != nil {
-		return nil, fmt.Errorf("service.Report: decode hasil: %w", err)
+
+	var out []byte
+	switch imp.Kind {
+	case "task":
+		var rows []TaskImportRow
+		if err := json.Unmarshal(imp.RowResults, &rows); err != nil {
+			return nil, fmt.Errorf("service.Report: decode hasil: %w", err)
+		}
+		out = taskImportReportCSV(rows, onlySkipped)
+	default:
+		var rows []SprintImportRow
+		if err := json.Unmarshal(imp.RowResults, &rows); err != nil {
+			return nil, fmt.Errorf("service.Report: decode hasil: %w", err)
+		}
+		out = sprintImportReportCSV(rows, onlySkipped)
 	}
+	if err := s.repo.AuditReportDownload(ctx, exec, imp, workspaceID, actorID, auditRole); err != nil {
+		return nil, fmt.Errorf("service.Report: audit: %w", err)
+	}
+	return out, nil
+}
+
+func sprintImportReportCSV(rows []SprintImportRow, onlySkipped bool) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	_ = w.Write([]string{"baris", "code", "name", "start_date", "end_date", "goal", "status", "hasil", "alasan"})
@@ -442,8 +545,5 @@ func (s *ProjectImportService) Report(ctx context.Context, exec db.Executor, pro
 		_ = w.Write([]string{fmt.Sprintf("%d", r.RowNum), r.Code, r.Name, r.StartDate, r.EndDate, r.Goal, r.SprintStatus, hasil, r.Reason})
 	}
 	w.Flush()
-	if err := s.repo.AuditReportDownload(ctx, exec, imp, workspaceID, actorID, auditRole); err != nil {
-		return nil, fmt.Errorf("service.Report: audit: %w", err)
-	}
-	return buf.Bytes(), nil
+	return buf.Bytes()
 }

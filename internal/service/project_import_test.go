@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -126,8 +127,43 @@ func (f *fakePIProjects) IsPM(_ context.Context, _ db.Executor, _, _ string) (bo
 	return f.isPM, nil
 }
 
+type fakePIStatuses struct{ list []repository.CustomStatus }
+
+func (f *fakePIStatuses) ListForScope(_ context.Context, _ db.Executor, _, _ string) ([]repository.CustomStatus, error) {
+	return f.list, nil
+}
+
+type fakePIMembers struct{ list []repository.ProjectMember }
+
+func (f *fakePIMembers) ListAssignableMembers(_ context.Context, _ db.Executor, _ string) ([]repository.ProjectMember, error) {
+	return f.list, nil
+}
+
+type fakePITasks struct{ created []repository.TaskImportInput }
+
+func (f *fakePITasks) CreateImported(_ context.Context, _ db.Executor, in *repository.TaskImportInput) (taskID, taskCode string, err error) {
+	f.created = append(f.created, *in)
+	return "task-" + in.Title, "PRJ-" + in.Title, nil
+}
+
+func defaultPIStatuses() *fakePIStatuses {
+	return &fakePIStatuses{list: []repository.CustomStatus{
+		{ID: "st-backlog", Name: "BACKLOG"}, {ID: "st-prog", Name: "IN PROGRESS"}, {ID: "st-done", Name: "DONE"},
+		{ID: "st-canceled", Name: "CANCELED"}, {ID: "st-old", Name: "LAMA", IsUndefined: true},
+	}}
+}
+
+func defaultPIMembers() *fakePIMembers {
+	return &fakePIMembers{list: []repository.ProjectMember{
+		{UserID: "u-ed", Email: "Editor@Corp.com", Role: "editor"},
+		{UserID: "u-pm", Email: "pm@corp.com", Role: "project_manager", IsPM: true},
+		{UserID: "u-vw", Email: "viewer@corp.com", Role: "viewer"},
+	}}
+}
+
 func newPIService(repo *fakePIRepo, sprints *fakePISprints, isPM bool, wsRole string) *ProjectImportService {
-	return NewProjectImportService(repo, sprints, &fakePIProjects{isPM: isPM}, &fakeSprintRBAC{role: wsRole})
+	return NewProjectImportService(repo, sprints, &fakePIProjects{isPM: isPM}, &fakeSprintRBAC{role: wsRole},
+		defaultPIStatuses(), defaultPIMembers(), &fakePITasks{})
 }
 
 const piCSV = "code,name,status\nSPR-01,Sprint 1,done\nSPR-02,Sprint 2,backlog\nSPR-03,,backlog\n"
@@ -184,12 +220,135 @@ func TestProjectImport_ForbiddenForEditorAndWrongKind(t *testing.T) {
 	}
 
 	pm := newPIService(&fakePIRepo{}, &fakePISprints{}, true, "project_manager")
-	if _, err := pm.Validate(context.Background(), nil, "p1", "task", "x.csv", []byte(piCSV), "pm-1", ""); !errors.Is(err, domain.ErrInvalidInput) {
-		t.Errorf("kind task belum didukung: err = %v, want ErrInvalidInput", err)
+	if _, err := pm.Validate(context.Background(), nil, "p1", "epic", "x.csv", []byte(piCSV), "pm-1", ""); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("kind tidak dikenal: err = %v, want ErrInvalidInput", err)
 	}
 
 	aw := newPIService(&fakePIRepo{}, &fakePISprints{}, false, "admin_workspace")
 	if _, err := aw.Validate(context.Background(), nil, "p1", "sprint", "x.csv", []byte(piCSV), "aw-1", ""); err != nil {
 		t.Errorf("admin workspace harus boleh: %v", err)
+	}
+}
+
+// ---- import task (tahap b) ----
+
+func taskEnv() taskImportEnv {
+	env := taskImportEnv{statuses: map[string]repository.CustomStatus{}, sprints: map[string]repository.Sprint{}, assignees: map[string]string{"editor@corp.com": "u-ed", "pm@corp.com": "u-pm"}}
+	for _, st := range defaultPIStatuses().list {
+		if !st.IsUndefined {
+			env.statuses[st.Name] = st
+		}
+	}
+	env.sprints["SPR-01"] = repository.Sprint{ID: "sp-1", Code: "SPR-01", Status: "active"}
+	env.sprints["SPR-00"] = repository.Sprint{ID: "sp-0", Code: "SPR-00", Status: "done"}
+	return env
+}
+
+func TestParseTaskCSV(t *testing.T) {
+	rows, err := parseTaskCSV([]byte("Title*,Status,PRIORITY,assignee,start_date,due_date,sprint,estimate,story_points\nJudul A,done,HIGH,a@x.com,01/10/2026,08/10/2026,spr-01,\"6,5\",3\nJudul B\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 2 || rows[0].Title != "Judul A" || rows[0].Sprint != "spr-01" || rows[0].Estimate != "6,5" || rows[1].Title != "Judul B" {
+		t.Errorf("rows = %+v", rows)
+	}
+	if _, err := parseTaskCSV([]byte("name,goal\nx,y\n")); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Errorf("kolom title hilang: err = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestValidateTaskRows(t *testing.T) {
+	rows := []TaskImportRow{
+		{RowNum: 2, Title: "Task valid lengkap", TaskStatus: "in progress", Priority: "HIGH", Assignee: "EDITOR@corp.com; pm@corp.com;editor@corp.com", StartDate: "01/10/2026", DueDate: "08/10/2026", Sprint: "spr-01", Estimate: "6,5", StoryPoints: "5"},
+		{RowNum: 3, Title: "Task minimal"},                                 // default BACKLOG/medium, tanpa assignee
+		{RowNum: 4, Title: "ab"},                                           // judul pendek
+		{RowNum: 5, Title: "Status ngawur", TaskStatus: "REVIEW QA"},       // status tak ada
+		{RowNum: 6, Title: "Status undefined", TaskStatus: "LAMA"},         // status UNDEFINED ditolak
+		{RowNum: 7, Title: "Prioritas salah", Priority: "urgent"},          // priority
+		{RowNum: 8, Title: "Assignee asing", Assignee: "orang@luar.com"},   // bukan member
+		{RowNum: 9, Title: "Assignee viewer", Assignee: "viewer@corp.com"}, // viewer ditolak
+		{RowNum: 10, Title: "Tanggal rusak", DueDate: "31-12-2026"},        // format
+		{RowNum: 11, Title: "Due sebelum start", StartDate: "10/10/2026", DueDate: "01/10/2026"},
+		{RowNum: 12, Title: "Sprint tak ada", Sprint: "SPR-99"},
+		{RowNum: 13, Title: "Sprint selesai kerja", Sprint: "SPR-00", TaskStatus: "IN PROGRESS"}, // sprint done + status kerja
+		{RowNum: 14, Title: "Sprint selesai done", Sprint: "SPR-00", TaskStatus: "DONE"},         // boleh
+		{RowNum: 15, Title: "Estimate rusak", Estimate: "banyak"},
+		{RowNum: 16, Title: "SP rusak", StoryPoints: "4"},
+		{RowNum: 17, Title: "SP tanda tanya", StoryPoints: "?"},
+	}
+	validateTaskRows(rows, taskEnv())
+
+	want := map[int]string{2: "valid", 3: "valid", 4: "skipped", 5: "skipped", 6: "skipped", 7: "skipped", 8: "skipped", 9: "skipped", 10: "skipped", 11: "skipped",
+		12: "skipped", 13: "skipped", 14: "valid", 15: "skipped", 16: "skipped", 17: "valid"}
+	for i := range rows {
+		r := &rows[i]
+		if r.Status != want[r.RowNum] {
+			t.Errorf("baris %d: status = %q (%s), want %q", r.RowNum, r.Status, r.Reason, want[r.RowNum])
+		}
+		if r.Status == "skipped" && r.Reason == "" {
+			t.Errorf("baris %d: dilewati tanpa alasan", r.RowNum)
+		}
+	}
+	r := rows[0]
+	if r.TaskStatus != "IN PROGRESS" || r.Priority != "high" || r.Assignee != "editor@corp.com;pm@corp.com" || r.StartDate != "2026-10-01" ||
+		r.DueDate != "2026-10-08" || r.Sprint != "SPR-01" || r.Estimate != "6.5" || r.StoryPoints != "5" {
+		t.Errorf("normalisasi baris 2 = %+v", r)
+	}
+	if rows[1].TaskStatus != "BACKLOG" || rows[1].Priority != "medium" {
+		t.Errorf("default baris 3 = %+v", rows[1])
+	}
+	if rows[15].StoryPoints != "" {
+		t.Errorf("SP '?' harus kosong, got %q", rows[15].StoryPoints)
+	}
+}
+
+func TestProjectImport_Task_ValidateAndExecute(t *testing.T) {
+	repo, sprints, tasks := &fakePIRepo{}, &fakePISprints{existing: []repository.Sprint{{ID: "sp-1", Code: "SPR-01", Status: "active"}}}, &fakePITasks{}
+	svc := NewProjectImportService(repo, sprints, &fakePIProjects{isPM: true}, &fakeSprintRBAC{role: "project_manager"}, defaultPIStatuses(), defaultPIMembers(), tasks)
+
+	csvData := "title,status,priority,assignee,sprint,story_points\nTask Satu,IN PROGRESS,high,editor@corp.com,SPR-01,5\nTask Dua,,,,,\nTask Rusak,STATUS-X,,,,\n"
+	res, err := svc.Validate(context.Background(), nil, "p1", "task", "task.csv", []byte(csvData), "pm-1", "")
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Total != 3 || res.ValidN != 2 || res.SkippedN != 1 || len(tasks.created) != 0 {
+		t.Fatalf("hasil = %+v created=%d", res, len(tasks.created))
+	}
+
+	if _, err := svc.Execute(context.Background(), nil, "p1", res.ImportID, "pm-1", ""); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(tasks.created) != 2 || repo.success != 2 || repo.failed != 1 {
+		t.Fatalf("created=%d success=%d failed=%d", len(tasks.created), repo.success, repo.failed)
+	}
+	first := tasks.created[0]
+	if first.StatusID != "st-prog" || first.Priority != "high" || first.SprintID == nil || *first.SprintID != "sp-1" ||
+		len(first.AssigneeUserIDs) != 1 || first.AssigneeUserIDs[0] != "u-ed" || first.StoryPoints == nil || *first.StoryPoints != 5 {
+		t.Errorf("task pertama = %+v", first)
+	}
+	second := tasks.created[1]
+	if second.StatusID != "st-backlog" || second.Priority != "medium" || second.SprintID != nil || len(second.AssigneeUserIDs) != 0 {
+		t.Errorf("task kedua (assignee opsional) = %+v", second)
+	}
+
+	report, err := svc.Report(context.Background(), nil, "p1", res.ImportID, true, "pm-1", "")
+	if err != nil || !bytes.Contains(report, []byte("STATUS-X")) || bytes.Contains(report, []byte("Task Satu")) {
+		t.Errorf("laporan baris dilewati salah: %v\n%s", err, report)
+	}
+}
+
+func TestProjectImport_Task_RechecksSprintChange(t *testing.T) {
+	repo, sprints, tasks := &fakePIRepo{}, &fakePISprints{existing: []repository.Sprint{{ID: "sp-1", Code: "SPR-01", Status: "active"}}}, &fakePITasks{}
+	svc := NewProjectImportService(repo, sprints, &fakePIProjects{isPM: true}, &fakeSprintRBAC{role: "project_manager"}, defaultPIStatuses(), defaultPIMembers(), tasks)
+	res, err := svc.Validate(context.Background(), nil, "p1", "task", "task.csv", []byte("title,sprint\nTask Satu,SPR-01\nTask Dua,\n"), "pm-1", "")
+	if err != nil || res.ValidN != 2 {
+		t.Fatalf("Validate: %v %+v", err, res)
+	}
+	sprints.existing = nil // sprint dihapus sebelum eksekusi
+	if _, err := svc.Execute(context.Background(), nil, "p1", res.ImportID, "pm-1", ""); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(tasks.created) != 1 || tasks.created[0].Title != "Task Dua" || repo.failed != 1 {
+		t.Errorf("created=%v failed=%d, want hanya Task Dua", tasks.created, repo.failed)
 	}
 }
