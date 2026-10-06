@@ -233,9 +233,10 @@ func TestProjectImport_ForbiddenForEditorAndWrongKind(t *testing.T) {
 // ---- import task (tahap b) ----
 
 func taskEnv() taskImportEnv {
-	env := taskImportEnv{statuses: map[string]repository.CustomStatus{}, sprints: map[string]repository.Sprint{}, assignees: map[string]string{"editor@corp.com": "u-ed", "pm@corp.com": "u-pm"}}
+	env := taskImportEnv{statuses: map[string]repository.CustomStatus{}, sprints: map[string]repository.Sprint{}, assignees: map[string]string{"editor@corp.com": "u-ed", "pm@corp.com": "u-pm"}, today: "2026-12-31"}
 	for _, st := range defaultPIStatuses().list {
 		if !st.IsUndefined {
+			st.RequirePic = st.Name != "DONE" && st.Name != "CANCELED"
 			env.statuses[st.Name] = st
 		}
 	}
@@ -350,5 +351,113 @@ func TestProjectImport_Task_RechecksSprintChange(t *testing.T) {
 	}
 	if len(tasks.created) != 1 || tasks.created[0].Title != "Task Dua" || repo.failed != 1 {
 		t.Errorf("created=%v failed=%d, want hanya Task Dua", tasks.created, repo.failed)
+	}
+}
+
+// ---- riwayat tanggal status + PIC per status (tahap c) ----
+
+func TestValidateTaskRows_History(t *testing.T) {
+	base := func(status string, mod func(*TaskImportRow)) TaskImportRow {
+		r := TaskImportRow{Title: "Task riwayat", TaskStatus: status}
+		mod(&r)
+		return r
+	}
+	rows := []TaskImportRow{
+		/*2*/ base("DONE", func(r *TaskImportRow) {
+			r.CreatedAt, r.InProgressAt, r.UnderReviewAt, r.DoneAt = "28/09/2026", "01/10/2026", "06/10/2026", "08/10/2026"
+			r.PicBacklog, r.PicInProgress, r.PicUnderReview = "pm@corp.com", "editor@corp.com", "pm@corp.com"
+		}),
+		/*3*/ base("IN PROGRESS", func(r *TaskImportRow) { r.InProgressAt = "01/10/2026" }), // valid, tanpa created_at
+		/*4*/ base("DONE", func(r *TaskImportRow) { r.InProgressAt = "01/10/2026" }), // DONE tanpa done_at
+		/*5*/ base("UNDER REVIEW", func(r *TaskImportRow) { r.UnderReviewAt, r.DoneAt = "02/10/2026", "03/10/2026" }), // done_at melewati status
+		/*6*/ base("DONE", func(r *TaskImportRow) { r.InProgressAt, r.DoneAt = "05/10/2026", "01/10/2026" }), // tidak berurutan
+		/*7*/ base("DONE", func(r *TaskImportRow) { r.DoneAt = "01/01/2027" }), // masa depan
+		/*8*/ base("CANCELED", func(r *TaskImportRow) { r.InProgressAt = "01/10/2026" }), // status di luar 4 status baku
+		/*9*/ base("DONE", func(r *TaskImportRow) { r.DoneAt = "31-12-2026" }), // format
+		/*10*/ base("DONE", func(r *TaskImportRow) {
+			r.InProgressAt, r.DoneAt, r.PicUnderReview = "01/10/2026", "02/10/2026", "pm@corp.com"
+		}), // PIC status tak dilalui
+		/*11*/ base("IN PROGRESS", func(r *TaskImportRow) { r.InProgressAt, r.PicInProgress = "01/10/2026", "orang@luar.com" }), // PIC bukan member
+		/*12*/ base("IN PROGRESS", func(r *TaskImportRow) { r.PicInProgress = "editor@corp.com" }), // tanpa riwayat: PIC status saat ini boleh
+		/*13*/ base("IN PROGRESS", func(r *TaskImportRow) { r.PicBacklog = "editor@corp.com" }), // tanpa riwayat: PIC status lain tidak
+	}
+	for i := range rows {
+		rows[i].RowNum = i + 2
+	}
+	validateTaskRows(rows, taskEnv())
+
+	want := map[int]string{2: "valid", 3: "valid", 4: "skipped", 5: "skipped", 6: "skipped", 7: "skipped", 8: "skipped", 9: "skipped", 10: "skipped", 11: "skipped", 12: "valid", 13: "skipped"}
+	for i := range rows {
+		r := &rows[i]
+		if r.Status != want[r.RowNum] {
+			t.Errorf("baris %d: status = %q (%s), want %q", r.RowNum, r.Status, r.Reason, want[r.RowNum])
+		}
+		if r.Status == "skipped" && r.Reason == "" {
+			t.Errorf("baris %d: dilewati tanpa alasan", r.RowNum)
+		}
+	}
+	if rows[0].CreatedAt != "2026-09-28" || rows[0].DoneAt != "2026-10-08" || rows[0].PicInProgress != "editor@corp.com" {
+		t.Errorf("normalisasi baris 2 = %+v", rows[0])
+	}
+}
+
+func TestBuildTaskImportHistory(t *testing.T) {
+	env := taskEnv()
+	row := &TaskImportRow{
+		TaskStatus: "DONE", CreatedAt: "2026-09-28", InProgressAt: "2026-10-01", UnderReviewAt: "2026-10-01", DoneAt: "2026-10-08",
+		PicBacklog: "pm@corp.com", PicInProgress: "editor@corp.com;pm@corp.com", PicDone: "pm@corp.com",
+	}
+	created, completed, sessions, phases := buildTaskImportHistory(row, env, time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+
+	if created == nil || created.Format("2006-01-02") != "2026-09-28" || completed == nil || completed.Format("2006-01-02") != "2026-10-08" {
+		t.Fatalf("created=%v completed=%v", created, completed)
+	}
+	if len(sessions) != 4 {
+		t.Fatalf("sessions = %d, want 4", len(sessions))
+	}
+	// rantai tertutup: exited sesi k = entered sesi k+1; sesi terakhir (DONE) terbuka
+	for k := 0; k < 3; k++ {
+		if sessions[k].ExitedAt == nil || !sessions[k].ExitedAt.Equal(sessions[k+1].EnteredAt) {
+			t.Errorf("sesi %d tidak tersambung ke sesi berikutnya: %+v", k, sessions[k])
+		}
+	}
+	if sessions[3].ExitedAt != nil || sessions[3].WorkStarted {
+		t.Errorf("sesi DONE harus terbuka dan tanpa work_started: %+v", sessions[3])
+	}
+	// hari yang sama (in_progress dan under_review 01/10): urutan tetap naik
+	if !sessions[2].EnteredAt.After(sessions[1].EnteredAt) {
+		t.Errorf("urutan hari yang sama tidak terjaga: %v vs %v", sessions[1].EnteredAt, sessions[2].EnteredAt)
+	}
+	if sessions[1].StatusID != "st-prog" || !sessions[1].WorkStarted || !sessions[0].WorkStarted {
+		t.Errorf("sesi in progress / backlog (tertutup) = %+v / %+v", sessions[1], sessions[0])
+	}
+	// PIC: 1 (backlog) + 2 (in progress) + 1 (done) = 4 fase; DONE tidak butuh PIC -> tidak aktif
+	if len(phases) != 4 {
+		t.Fatalf("phases = %d, want 4", len(phases))
+	}
+	for i := range phases {
+		if phases[i].Active {
+			t.Errorf("fase %d seharusnya tidak aktif (task DONE): %+v", i, phases[i])
+		}
+	}
+}
+
+func TestBuildTaskImportHistory_CurrentStatusPicActive(t *testing.T) {
+	env := taskEnv()
+	row := &TaskImportRow{TaskStatus: "IN PROGRESS", InProgressAt: "2026-10-01", PicInProgress: "editor@corp.com"}
+	now := time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)
+	_, completed, sessions, phases := buildTaskImportHistory(row, env, now)
+	if completed != nil || len(sessions) != 1 || sessions[0].ExitedAt != nil || !sessions[0].WorkStarted {
+		t.Fatalf("completed=%v sessions=%+v", completed, sessions)
+	}
+	if len(phases) != 1 || !phases[0].Active || phases[0].DeactivatedAt != nil || phases[0].UserID != "u-ed" {
+		t.Errorf("PIC status saat ini harus aktif: %+v", phases)
+	}
+
+	// tanpa riwayat: tidak ada sesi (repo membuat satu sesi sejak sekarang), PIC status saat ini aktif
+	row2 := &TaskImportRow{TaskStatus: "IN PROGRESS", PicInProgress: "pm@corp.com"}
+	created, completed2, sessions2, phases2 := buildTaskImportHistory(row2, env, now)
+	if created != nil || completed2 != nil || len(sessions2) != 0 || len(phases2) != 1 || !phases2[0].Active {
+		t.Errorf("tanpa riwayat: created=%v completed=%v sessions=%v phases=%+v", created, completed2, sessions2, phases2)
 	}
 }
