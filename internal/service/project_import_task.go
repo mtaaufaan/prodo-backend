@@ -75,7 +75,7 @@ func parseTaskCSV(data []byte) ([]TaskImportRow, error) {
 	if len(data) > maxCSVBytes {
 		return nil, fmt.Errorf("service.parseTaskCSV: %w", domain.ErrCSVTooLarge)
 	}
-	r := csv.NewReader(bytes.NewReader(data))
+	r := newImportCSVReader(data)
 	r.TrimLeadingSpace = true
 	r.FieldsPerRecord = -1
 	header, err := r.Read()

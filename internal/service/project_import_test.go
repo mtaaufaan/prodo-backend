@@ -259,6 +259,21 @@ func TestParseTaskCSV(t *testing.T) {
 	}
 }
 
+// Excel locale Indonesia menyimpan CSV dengan ";" -- pemisah dideteksi dari header.
+func TestParseCSVSemicolonDelimiter(t *testing.T) {
+	rows, err := parseTaskCSV([]byte("title;status;assignee;estimate\nJudul A;DONE;\"a@x.com;b@x.com\";6,5\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Title != "Judul A" || rows[0].Assignee != "a@x.com;b@x.com" || rows[0].Estimate != "6,5" {
+		t.Errorf("rows = %+v", rows)
+	}
+	sprints, err := parseSprintCSV([]byte("code;name\nSPR-01;Sprint 1\n"))
+	if err != nil || len(sprints) != 1 || sprints[0].Code != "SPR-01" || sprints[0].Name != "Sprint 1" {
+		t.Errorf("sprints = %+v, err = %v", sprints, err)
+	}
+}
+
 func TestValidateTaskRows(t *testing.T) {
 	rows := []TaskImportRow{
 		{RowNum: 2, Title: "Task valid lengkap", TaskStatus: "in progress", Priority: "HIGH", Assignee: "EDITOR@corp.com; pm@corp.com;editor@corp.com", StartDate: "01/10/2026", DueDate: "08/10/2026", Sprint: "spr-01", Estimate: "6,5", StoryPoints: "5"},
