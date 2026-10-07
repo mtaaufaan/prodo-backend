@@ -118,6 +118,7 @@ type attachmentTaskResolver interface {
 // minimal sendiri.
 type attachmentProjectResolver interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
+	IsPM(ctx context.Context, exec db.Executor, projectID, userID string) (bool, error)
 }
 
 // attachmentOrgQuota -- reuse OrganizationRepository.GetAttachmentQuotaInfo
@@ -426,6 +427,109 @@ func (s *TaskAttachmentService) QuotaOverview(ctx context.Context, exec db.Execu
 		return nil, fmt.Errorf("service.QuotaOverview: %w", err)
 	}
 	return &QuotaOverview{QuotaBytes: quota.QuotaBytes, UsedBytes: quota.UsedBytes, RetentionDays: quota.RetentionDays, PerProject: perProject}, nil
+}
+
+// authorizeProject -- menu "Dokumen & Lampiran" PM (IG-123): PM project ini,
+// Admin Workspace, atau GA/PA (bypass). Editor/Approver/Viewer ditolak.
+// Mengembalikan role EFEKTIF untuk audit -- rute project tanpa RequireRole,
+// jadi actorRole dari handler kosong (pelajaran IG-92).
+func (s *TaskAttachmentService) authorizeProject(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (workspaceID, auditRole string, err error) {
+	if projectID == "" {
+		return "", "", fmt.Errorf("service.authorizeProject: %w", domain.ErrInvalidInput)
+	}
+	workspaceID, err = s.projects.GetWorkspaceID(ctx, exec, projectID)
+	if err != nil {
+		return "", "", fmt.Errorf("service.authorizeProject: %w", err)
+	}
+	if actorRole == "platform_admin" || actorRole == "group_admin" {
+		return workspaceID, actorRole, nil
+	}
+	isPM, err := s.projects.IsPM(ctx, exec, projectID, actorID)
+	if err != nil {
+		return "", "", fmt.Errorf("service.authorizeProject: %w", err)
+	}
+	if isPM {
+		return workspaceID, "project_manager", nil
+	}
+	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
+	if err != nil {
+		return "", "", fmt.Errorf("service.authorizeProject: %w", err)
+	}
+	if role == "admin_workspace" {
+		return workspaceID, role, nil
+	}
+	return "", "", fmt.Errorf("service.authorizeProject: %w", domain.ErrForbidden)
+}
+
+// ListForProject -- GET /projects/:id/documents. Reuse query workspace dengan
+// filter project dipaksa ke project dari path (filter project_id klien diabaikan).
+func (s *TaskAttachmentService) ListForProject(ctx context.Context, exec db.Executor, projectID string, f *repository.AttachmentFilter, actorID, actorRole string) ([]repository.TaskAttachment, error) {
+	workspaceID, _, err := s.authorizeProject(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	scoped := *f
+	scoped.ProjectID = projectID
+	list, _, err := s.repo.ListForWorkspace(ctx, exec, workspaceID, &scoped)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListForProject: %w", err)
+	}
+	return list, nil
+}
+
+// ProjectQuotaOverview -- GET /projects/:id/documents/quota, BACA-SAJA:
+// kuota organisasi (batas, terpakai, retensi) + pemakaian project ini saja.
+// PerProject berisi tepat satu entri (project ini, nol bila belum ada lampiran).
+func (s *TaskAttachmentService) ProjectQuotaOverview(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (*QuotaOverview, error) {
+	workspaceID, _, err := s.authorizeProject(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	quota, err := s.orgs.GetAttachmentQuotaInfo(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ProjectQuotaOverview: %w", err)
+	}
+	perProject, err := s.repo.PerProjectUsage(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ProjectQuotaOverview: %w", err)
+	}
+	mine := repository.ProjectUsage{ProjectID: projectID}
+	for _, p := range perProject {
+		if p.ProjectID == projectID {
+			mine = p
+			break
+		}
+	}
+	return &QuotaOverview{QuotaBytes: quota.QuotaBytes, UsedBytes: quota.UsedBytes, RetentionDays: quota.RetentionDays, PerProject: []repository.ProjectUsage{mine}}, nil
+}
+
+// BulkDeleteForProject -- POST /projects/:id/documents/bulk-delete. HANYA
+// mode retensi (bisa dipulihkan) -- hapus permanen tetap AW-only lewat
+// endpoint workspace. Lampiran milik project lain / yang sudah terhapus
+// dilewati, kegagalan satu baris tidak menggagalkan baris lain.
+func (s *TaskAttachmentService) BulkDeleteForProject(ctx context.Context, exec db.Executor, projectID string, ids []string, actorID, actorRole string) (succeeded int, err error) {
+	workspaceID, auditRole, err := s.authorizeProject(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return 0, err
+	}
+	quota, err := s.orgs.GetAttachmentQuotaInfo(ctx, exec, workspaceID)
+	if err != nil {
+		return 0, fmt.Errorf("service.BulkDeleteForProject: %w", err)
+	}
+	purgeAt := time.Now().Add(time.Duration(quota.RetentionDays) * 24 * time.Hour)
+	for _, id := range ids {
+		before, gerr := s.repo.Get(ctx, exec, id)
+		if gerr != nil || before.DeletedAt != nil {
+			continue
+		}
+		if pid, perr := s.tasks.GetProjectID(ctx, exec, before.TaskID); perr != nil || pid != projectID {
+			continue
+		}
+		if err := s.repo.SoftDelete(ctx, exec, id, purgeAt, actorID, auditRole, workspaceID, before); err == nil {
+			succeeded++
+		}
+	}
+	return succeeded, nil
 }
 
 // PermanentDelete -- AW-only, "AW Documents.dc.html" mode "permanen":

@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
@@ -195,6 +196,11 @@ func (h *TaskAttachmentHandler) ListForWorkspace(c *fiber.Ctx) error {
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil daftar dokumen")
 	}
+	return c.JSON(response.Success(documentRowsJSON(list)))
+}
+
+// documentRowsJSON -- baris grid dokumen (workspace dan project berbagi bentuk).
+func documentRowsJSON(list []repository.TaskAttachment) []fiber.Map {
 	data := make([]fiber.Map, len(list))
 	for i := range list {
 		data[i] = attachmentJSON(&list[i])
@@ -205,7 +211,82 @@ func (h *TaskAttachmentHandler) ListForWorkspace(c *fiber.Ctx) error {
 		data[i]["project_name"] = list[i].ProjectName
 		data[i]["sprint_name"] = list[i].SprintName
 	}
-	return c.JSON(response.Success(data))
+	return data
+}
+
+// ListForProject menangani GET /projects/:id/documents -- menu "Dokumen &
+// Lampiran" PM (IG-123), query: status, ext, uploader_id, sort. Rute project
+// tanpa RequireRole: service meresolve role efektif (PM/AW/GA/PA).
+func (h *TaskAttachmentHandler) ListForProject(c *fiber.Ctx) error {
+	actorUserID, actorRole, exec, ok := h.actorAndTx(c)
+	if !ok {
+		return nil
+	}
+	f := repository.AttachmentFilter{
+		Status:     c.Query("status"),
+		Ext:        c.Query("ext"),
+		UploaderID: c.Query("uploader_id"),
+		Sort:       c.Query("sort"),
+	}
+	list, err := h.attachments.ListForProject(c.Context(), exec, c.Params("id"), &f, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil daftar dokumen project")
+	}
+	return c.JSON(response.Success(documentRowsJSON(list)))
+}
+
+// ProjectQuota menangani GET /projects/:id/documents/quota (baca-saja).
+func (h *TaskAttachmentHandler) ProjectQuota(c *fiber.Ctx) error {
+	actorUserID, actorRole, exec, ok := h.actorAndTx(c)
+	if !ok {
+		return nil
+	}
+	overview, err := h.attachments.ProjectQuotaOverview(c.Context(), exec, c.Params("id"), actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil info kuota project")
+	}
+	p := overview.PerProject[0]
+	return c.JSON(response.Success(fiber.Map{
+		"quota_bytes": overview.QuotaBytes, "used_bytes": overview.UsedBytes, "retention_days": overview.RetentionDays,
+		"project_bytes": p.Bytes, "project_file_count": p.FileCount,
+	}))
+}
+
+type projectBulkDeleteRequest struct {
+	IDs []string `json:"ids"`
+}
+
+// BulkDeleteForProject menangani POST /projects/:id/documents/bulk-delete --
+// hanya hapus sementara (retensi); tidak ada mode permanen di rute ini.
+func (h *TaskAttachmentHandler) BulkDeleteForProject(c *fiber.Ctx) error {
+	actorUserID, actorRole, exec, ok := h.actorAndTx(c)
+	if !ok {
+		return nil
+	}
+	var body projectBulkDeleteRequest
+	if err := c.BodyParser(&body); err != nil || len(body.IDs) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Daftar id lampiran wajib diisi", nil))
+	}
+	succeeded, err := h.attachments.BulkDeleteForProject(c.Context(), exec, c.Params("id"), body.IDs, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal menghapus dokumen terpilih")
+	}
+	return c.JSON(response.Success(fiber.Map{"succeeded": succeeded, "total": len(body.IDs)}))
+}
+
+// actorAndTx -- rute project tanpa RequireRole (pola ProjectImportHandler).
+func (h *TaskAttachmentHandler) actorAndTx(c *fiber.Ctx) (actorID, actorRole string, exec db.Executor, ok bool) {
+	actorID, actorRole, ok = middleware.ActorFromContext(c)
+	if !ok {
+		_ = c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+		return "", "", nil, false
+	}
+	exec, ok = middleware.DBTxFromContext(c)
+	if !ok {
+		_ = c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+		return "", "", nil, false
+	}
+	return actorID, actorRole, exec, true
 }
 
 // Quota menangani GET /workspaces/:wsId/documents/quota.
