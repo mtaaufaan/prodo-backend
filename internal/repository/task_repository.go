@@ -70,21 +70,28 @@ func NewTaskRepository() *TaskRepository {
 // BUKAN format "TSK-{SPRINT_NO}{SEQ}" di komentar §5.15 -- project.code
 // sudah dibangun tepat untuk tujuan ini sejak S3, dipakai apa adanya
 // (reuse) alih-alih menciptakan skema penomoran kedua yang tumpang tindih.
+//
+// Nomor = angka TERBESAR pada akhiran kode task project ini + 1 (termasuk task
+// soft-delete), BUKAN jumlah baris + 1: hitung jumlah menghasilkan nomor kembar
+// begitu task di tengah dihapus permanen sementara task setelahnya masih ada
+// (IG-122). Project tanpa task -> 001.
 func (r *TaskRepository) nextTaskCode(ctx context.Context, exec db.Executor, projectID string) (string, error) {
 	var code *string
-	var count int
+	var next int
 	err := exec.QueryRow(ctx, `SELECT code FROM projects WHERE id = $1`, projectID).Scan(&code)
 	if err != nil {
 		return "", fmt.Errorf("nextTaskCode: ambil project code: %w", err)
 	}
-	if err := exec.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE project_id = $1`, projectID).Scan(&count); err != nil {
-		return "", fmt.Errorf("nextTaskCode: hitung task: %w", err)
+	if err := exec.QueryRow(ctx, `
+		SELECT COALESCE(MAX(substring(task_code from '-([0-9]+)$')::int), 0) + 1 FROM tasks WHERE project_id = $1
+	`, projectID).Scan(&next); err != nil {
+		return "", fmt.Errorf("nextTaskCode: nomor terbesar: %w", err)
 	}
 	prefix := "TSK"
 	if code != nil && *code != "" {
 		prefix = *code
 	}
-	return fmt.Sprintf("%s-%03d", prefix, count+1), nil
+	return fmt.Sprintf("%s-%03d", prefix, next), nil
 }
 
 // parentTaskID (susulan S4W-11, action "Buat sub-task otomatis") -- kolom
