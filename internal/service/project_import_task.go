@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -27,6 +29,7 @@ import (
 type TaskImportRow struct {
 	RowNum      int    `json:"row"`
 	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
 	TaskStatus  string `json:"task_status"`
 	Priority    string `json:"priority"`
 	Assignee    string `json:"assignee,omitempty"` // email, dipisah ";" kalau lebih dari satu
@@ -50,17 +53,20 @@ type TaskImportRow struct {
 	Reason         string `json:"reason,omitempty"`
 }
 
-const maxTaskTitleLen = 160
+const (
+	maxTaskTitleLen       = 160
+	maxTaskDescriptionLen = 4000 // karakter; row_results menyimpan seluruh baris, jadi dibatasi
+)
 
 // TaskImportTemplateCSV -- template kolom desain + start_date (perkiraan mulai).
 func TaskImportTemplateCSV() []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"title", "status", "priority", "assignee", "start_date", "due_date", "sprint", "estimate", "story_points",
+	_ = w.Write([]string{"title", "description", "status", "priority", "assignee", "start_date", "due_date", "sprint", "estimate", "story_points",
 		"created_at", "in_progress_at", "under_review_at", "done_at", "pic_backlog", "pic_in_progress", "pic_under_review", "pic_done"})
-	_ = w.Write([]string{"Perbaiki validasi form pendaftaran", "DONE", "high", "nama@perusahaan.com", "01/10/2026", "08/10/2026", "SPR-01", "6", "3",
+	_ = w.Write([]string{"Perbaiki validasi form pendaftaran", "Validasi email dan password di form daftar; tampilkan pesan error per kolom.", "DONE", "high", "nama@perusahaan.com", "01/10/2026", "08/10/2026", "SPR-01", "6", "3",
 		"28/09/2026", "01/10/2026", "06/10/2026", "08/10/2026", "pm@perusahaan.com", "nama@perusahaan.com", "reviewer@perusahaan.com", ""})
-	_ = w.Write([]string{"Dokumentasi API publik", "", "low", "", "", "", "", "", "?", "", "", "", "", "", "", "", ""})
+	_ = w.Write([]string{"Dokumentasi API publik", "", "", "low", "", "", "", "", "", "?", "", "", "", "", "", "", "", ""})
 	w.Flush()
 	return buf.Bytes()
 }
@@ -107,7 +113,7 @@ func parseTaskCSV(data []byte) ([]TaskImportRow, error) {
 			return nil, fmt.Errorf("service.parseTaskCSV: %w", domain.ErrCSVTooManyRows)
 		}
 		rows = append(rows, TaskImportRow{
-			RowNum: rowNum, Title: get(rec, "title"), TaskStatus: get(rec, "status"), Priority: get(rec, "priority"),
+			RowNum: rowNum, Title: get(rec, "title"), Description: get(rec, "description"), TaskStatus: get(rec, "status"), Priority: get(rec, "priority"),
 			Assignee: get(rec, "assignee"), StartDate: get(rec, "start_date"), DueDate: get(rec, "due_date"),
 			Sprint: get(rec, "sprint"), Estimate: get(rec, "estimate"), StoryPoints: get(rec, "story_points"),
 			CreatedAt: get(rec, "created_at"), InProgressAt: get(rec, "in_progress_at"), UnderReviewAt: get(rec, "under_review_at"), DoneAt: get(rec, "done_at"),
@@ -162,6 +168,7 @@ func validateTaskRows(rows []TaskImportRow, env taskImportEnv) {
 		row := &rows[i]
 		row.Status, row.Reason = "", ""
 		row.Title = strings.TrimSpace(row.Title)
+		row.Description = strings.TrimSpace(strings.ReplaceAll(row.Description, "\r\n", "\n"))
 		row.TaskStatus = strings.ToUpper(strings.TrimSpace(row.TaskStatus))
 		if row.TaskStatus == "" {
 			row.TaskStatus = "BACKLOG"
@@ -183,6 +190,8 @@ func validateTaskRows(rows []TaskImportRow, env taskImportEnv) {
 			skip(row, "Kolom title wajib diisi (minimal 3 karakter).")
 		case len(row.Title) > maxTaskTitleLen:
 			skip(row, fmt.Sprintf("Judul maksimal %d karakter.", maxTaskTitleLen))
+		case utf8.RuneCountInString(row.Description) > maxTaskDescriptionLen:
+			skip(row, fmt.Sprintf("Deskripsi maksimal %d karakter.", maxTaskDescriptionLen))
 		case !okStatus:
 			skip(row, fmt.Sprintf("Status %q tidak ada di project ini.", row.TaskStatus))
 		case perr != nil:
@@ -447,6 +456,9 @@ func (s *ProjectImportService) executeTaskRows(ctx context.Context, exec db.Exec
 			StatusID: env.statuses[row.TaskStatus].ID, StatusName: row.TaskStatus,
 			Title: row.Title, Priority: row.Priority,
 		}
+		if row.Description != "" {
+			in.Description, _ = json.Marshal(row.Description)
+		}
 		if row.Sprint != "" {
 			id := env.sprints[row.Sprint].ID
 			in.SprintID = &id
@@ -490,7 +502,7 @@ func importDatePtr(iso string) *time.Time {
 func taskImportReportCSV(rows []TaskImportRow, onlySkipped bool) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"baris", "title", "status", "priority", "assignee", "start_date", "due_date", "sprint", "estimate", "story_points",
+	_ = w.Write([]string{"baris", "title", "description", "status", "priority", "assignee", "start_date", "due_date", "sprint", "estimate", "story_points",
 		"created_at", "in_progress_at", "under_review_at", "done_at", "pic_backlog", "pic_in_progress", "pic_under_review", "pic_done", "task_code", "hasil", "alasan"})
 	for i := range rows {
 		r := &rows[i]
@@ -501,7 +513,7 @@ func taskImportReportCSV(rows []TaskImportRow, onlySkipped bool) []byte {
 		if r.Status == "skipped" {
 			hasil = "DILEWATI"
 		}
-		_ = w.Write([]string{fmt.Sprintf("%d", r.RowNum), r.Title, r.TaskStatus, r.Priority, r.Assignee, r.StartDate, r.DueDate, r.Sprint, r.Estimate, r.StoryPoints,
+		_ = w.Write([]string{fmt.Sprintf("%d", r.RowNum), r.Title, r.Description, r.TaskStatus, r.Priority, r.Assignee, r.StartDate, r.DueDate, r.Sprint, r.Estimate, r.StoryPoints,
 			r.CreatedAt, r.InProgressAt, r.UnderReviewAt, r.DoneAt, r.PicBacklog, r.PicInProgress, r.PicUnderReview, r.PicDone, r.TaskCode, hasil, r.Reason})
 	}
 	w.Flush()

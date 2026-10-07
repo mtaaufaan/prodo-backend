@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -35,11 +36,13 @@ type TaskImportInput struct {
 	ProjectID, WorkspaceID, ActorID, ActorRole string
 	StatusID, StatusName                       string
 	Title, Priority                            string
-	SprintID                                   *string
-	StartDate, DueDate                         *time.Time
-	EstimatedHours                             *float64
-	StoryPoints                                *int
-	AssigneeUserIDs                            []string
+	// Description -- JSON string (sama bentuk yang dikirim form task: teks biasa); nil = tanpa deskripsi.
+	Description        json.RawMessage
+	SprintID           *string
+	StartDate, DueDate *time.Time
+	EstimatedHours     *float64
+	StoryPoints        *int
+	AssigneeUserIDs    []string
 	// Riwayat (tahap c) -- opsional. Sessions kosong = satu sesi di StatusID
 	// sejak sekarang. CreatedAt/CompletedAt menimpa NOW().
 	CreatedAt   *time.Time
@@ -78,12 +81,12 @@ func (r *TaskRepository) CreateImported(ctx context.Context, exec db.Executor, i
 		completedAt = time.Now()
 	}
 	err = exec.QueryRow(ctx, `
-		INSERT INTO tasks (project_id, sprint_id, status_id, title, priority, completeness, start_date, due_date, estimated_hours, story_points, task_code, created_by, completed_at, created_at, position)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()),
+		INSERT INTO tasks (project_id, sprint_id, status_id, title, priority, completeness, start_date, due_date, estimated_hours, story_points, task_code, created_by, completed_at, created_at, description, position)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()), $15,
 			COALESCE((SELECT MAX(position) FROM tasks WHERE project_id = $1 AND status_id = $3), 0) + 1)
 		RETURNING id
 	`, in.ProjectID, in.SprintID, in.StatusID, in.Title, in.Priority, completeness, in.StartDate, in.DueDate, in.EstimatedHours, in.StoryPoints,
-		taskCode, in.ActorID, completedAt, in.CreatedAt).Scan(&taskID)
+		taskCode, in.ActorID, completedAt, in.CreatedAt, in.Description).Scan(&taskID)
 	if err != nil {
 		return "", "", fmt.Errorf("repository.CreateImported: %w", err)
 	}
