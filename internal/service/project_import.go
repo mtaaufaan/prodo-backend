@@ -64,11 +64,23 @@ func parseImportDate(raw string) (string, bool) {
 	return "", false
 }
 
+// newImportCSVReader -- pemisah kolom dideteksi dari baris header: Excel dengan
+// locale Indonesia menyimpan CSV dengan ";" (koma dipakai sebagai desimal).
+// Header tidak berkutip, jadi cukup bandingkan jumlah ";" dan "," di baris pertama.
+func newImportCSVReader(data []byte) *csv.Reader {
+	r := csv.NewReader(bytes.NewReader(data))
+	first, _, _ := bytes.Cut(data, []byte("\n"))
+	if bytes.Count(first, []byte(";")) > bytes.Count(first, []byte(",")) {
+		r.Comma = ';'
+	}
+	return r
+}
+
 func parseSprintCSV(data []byte) ([]SprintImportRow, error) {
 	if len(data) > maxCSVBytes {
 		return nil, fmt.Errorf("service.parseSprintCSV: %w", domain.ErrCSVTooLarge)
 	}
-	r := csv.NewReader(bytes.NewReader(data))
+	r := newImportCSVReader(data)
 	r.TrimLeadingSpace = true
 	r.FieldsPerRecord = -1
 	header, err := r.Read()
