@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -459,5 +460,38 @@ func TestBuildTaskImportHistory_CurrentStatusPicActive(t *testing.T) {
 	created, completed2, sessions2, phases2 := buildTaskImportHistory(row2, env, now)
 	if created != nil || completed2 != nil || len(sessions2) != 0 || len(phases2) != 1 || !phases2[0].Active {
 		t.Errorf("tanpa riwayat: created=%v completed=%v sessions=%v phases=%+v", created, completed2, sessions2, phases2)
+	}
+}
+
+func TestProjectImport_Task_Description(t *testing.T) {
+	// parser: kolom description (sel dengan baris baru dalam tanda kutip) dan trim
+	rows, err := parseTaskCSV([]byte("title,description\nTask A,\"  baris satu\r\nbaris dua  \"\nTask B\n"))
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("parse: %v rows=%d", err, len(rows))
+	}
+	validateTaskRows(rows, taskEnv())
+	if rows[0].Status != "valid" || rows[0].Description != "baris satu\nbaris dua" || rows[1].Description != "" {
+		t.Errorf("normalisasi deskripsi = %+v / %+v", rows[0], rows[1])
+	}
+
+	// terlalu panjang dilewati
+	long := []TaskImportRow{{RowNum: 2, Title: "Task panjang", Description: strings.Repeat("x", maxTaskDescriptionLen+1)}}
+	validateTaskRows(long, taskEnv())
+	if long[0].Status != "skipped" || long[0].Reason == "" {
+		t.Errorf("deskripsi terlalu panjang harus dilewati: %+v", long[0])
+	}
+
+	// eksekusi: deskripsi dikirim sebagai JSON string, kosong -> nil
+	repo, sprints, tasks := &fakePIRepo{}, &fakePISprints{}, &fakePITasks{}
+	svc := NewProjectImportService(repo, sprints, &fakePIProjects{isPM: true}, &fakeSprintRBAC{role: "project_manager"}, defaultPIStatuses(), defaultPIMembers(), tasks)
+	res, err := svc.Validate(context.Background(), nil, "p1", "task", "t.csv", []byte("title,description\nTask Satu,\"Ada \"\"kutip\"\" di sini\"\nTask Dua,\n"), "pm-1", "")
+	if err != nil || res.ValidN != 2 {
+		t.Fatalf("Validate: %v %+v", err, res)
+	}
+	if _, err := svc.Execute(context.Background(), nil, "p1", res.ImportID, "pm-1", ""); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if string(tasks.created[0].Description) != `"Ada \"kutip\" di sini"` || tasks.created[1].Description != nil {
+		t.Errorf("description input = %q / %q", tasks.created[0].Description, tasks.created[1].Description)
 	}
 }
