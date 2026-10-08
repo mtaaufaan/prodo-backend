@@ -26,6 +26,8 @@ type fakeAttachmentRepo struct {
 	}
 	permanentDeleteCalls []string
 	restoreCalls         []string
+	softDeleteRoles      []string
+	lastFilter           repository.AttachmentFilter
 
 	orgUsageBytes int64
 	orgUsageErr   error
@@ -55,7 +57,8 @@ func (f *fakeAttachmentRepo) ListForTask(_ context.Context, _ db.Executor, _ str
 	return nil, nil
 }
 
-func (f *fakeAttachmentRepo) ListForWorkspace(_ context.Context, _ db.Executor, _ string, _ *repository.AttachmentFilter) ([]repository.TaskAttachment, int, error) {
+func (f *fakeAttachmentRepo) ListForWorkspace(_ context.Context, _ db.Executor, _ string, flt *repository.AttachmentFilter) ([]repository.TaskAttachment, int, error) {
+	f.lastFilter = *flt
 	return nil, 0, nil
 }
 
@@ -63,7 +66,8 @@ func (f *fakeAttachmentRepo) Rename(_ context.Context, _ db.Executor, _, _, _, _
 	return nil
 }
 
-func (f *fakeAttachmentRepo) SoftDelete(_ context.Context, _ db.Executor, id string, purgeAt time.Time, _, _, _ string, _ *repository.TaskAttachment) error {
+func (f *fakeAttachmentRepo) SoftDelete(_ context.Context, _ db.Executor, id string, purgeAt time.Time, _, actorRole, _ string, _ *repository.TaskAttachment) error {
+	f.softDeleteRoles = append(f.softDeleteRoles, actorRole)
 	f.softDeleteCalls = append(f.softDeleteCalls, struct {
 		id      string
 		purgeAt time.Time
@@ -98,16 +102,30 @@ func (f *fakeAttachmentRepo) LogQuotaRequest(_ context.Context, _ db.Executor, _
 	return nil
 }
 
-type fakeAttachmentTaskResolver struct{ projectID string }
+// byTask (opsional) menimpa projectID untuk task tertentu.
+type fakeAttachmentTaskResolver struct {
+	projectID string
+	byTask    map[string]string
+}
 
-func (f *fakeAttachmentTaskResolver) GetProjectID(_ context.Context, _ db.Executor, _ string) (string, error) {
+func (f *fakeAttachmentTaskResolver) GetProjectID(_ context.Context, _ db.Executor, taskID string) (string, error) {
+	if p, ok := f.byTask[taskID]; ok {
+		return p, nil
+	}
 	return f.projectID, nil
 }
 
-type fakeAttachmentProjectResolver struct{ workspaceID string }
+type fakeAttachmentProjectResolver struct {
+	workspaceID string
+	pm          bool
+}
 
 func (f *fakeAttachmentProjectResolver) GetWorkspaceID(_ context.Context, _ db.Executor, _ string) (string, error) {
 	return f.workspaceID, nil
+}
+
+func (f *fakeAttachmentProjectResolver) IsPM(_ context.Context, _ db.Executor, _, _ string) (bool, error) {
+	return f.pm, nil
 }
 
 type fakeAttachmentWorkspaceInfo struct{ ws *repository.Workspace }
