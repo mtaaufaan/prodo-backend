@@ -20,8 +20,8 @@ import (
 // Import task (IG-120 tahap b dan c, kind=task) -- "PM Import CSV.dc.html". Sprint
 // ditunjuk lewat KODE sprint (tahap a); status awal bebas; assignee opsional;
 // rule task_created tidak dijalankan. Tahap (c): kolom opsional riwayat tanggal
-// status (created_at/in_progress_at/under_review_at/done_at) dan PIC per status
-// (pic_backlog/pic_in_progress/pic_under_review/pic_done).
+// status (created_at/in_progress_at/under_review_at/done_at/canceled_at) dan PIC
+// per status (pic_backlog/pic_in_progress/pic_under_review/pic_done/pic_canceled).
 
 // TaskImportRow -- satu baris CSV import task. Status ("valid"/"skipped",
 // lihat Reason) memakai nama yang sama dengan SprintImportRow; status TASK-nya
@@ -43,11 +43,13 @@ type TaskImportRow struct {
 	InProgressAt  string `json:"in_progress_at,omitempty"`
 	UnderReviewAt string `json:"under_review_at,omitempty"`
 	DoneAt        string `json:"done_at,omitempty"`
+	CanceledAt    string `json:"canceled_at,omitempty"`
 	// PIC per status (tahap c, opsional): email dipisah ";".
 	PicBacklog     string `json:"pic_backlog,omitempty"`
 	PicInProgress  string `json:"pic_in_progress,omitempty"`
 	PicUnderReview string `json:"pic_under_review,omitempty"`
 	PicDone        string `json:"pic_done,omitempty"`
+	PicCanceled    string `json:"pic_canceled,omitempty"`
 	TaskCode       string `json:"task_code,omitempty"` // terisi setelah eksekusi
 	Status         string `json:"status"`
 	Reason         string `json:"reason,omitempty"`
@@ -63,10 +65,11 @@ func TaskImportTemplateCSV() []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	_ = w.Write([]string{"title", "description", "status", "priority", "assignee", "start_date", "due_date", "sprint", "estimate", "story_points",
-		"created_at", "in_progress_at", "under_review_at", "done_at", "pic_backlog", "pic_in_progress", "pic_under_review", "pic_done"})
+		"created_at", "in_progress_at", "under_review_at", "done_at", "canceled_at", "pic_backlog", "pic_in_progress", "pic_under_review", "pic_done", "pic_canceled"})
 	_ = w.Write([]string{"Perbaiki validasi form pendaftaran", "Validasi email dan password di form daftar; tampilkan pesan error per kolom.", "DONE", "high", "nama@perusahaan.com", "01/10/2026", "08/10/2026", "SPR-01", "6", "3",
-		"28/09/2026", "01/10/2026", "06/10/2026", "08/10/2026", "pm@perusahaan.com", "nama@perusahaan.com", "reviewer@perusahaan.com", ""})
-	_ = w.Write([]string{"Dokumentasi API publik", "", "", "low", "", "", "", "", "", "?", "", "", "", "", "", "", "", ""})
+		"28/09/2026", "01/10/2026", "06/10/2026", "08/10/2026", "", "pm@perusahaan.com", "nama@perusahaan.com", "reviewer@perusahaan.com", "", ""})
+	_ = w.Write([]string{"Dokumentasi API publik", "", "", "low", "", "", "", "", "", "?", "", "", "", "", "", "", "", "", "", ""})
+	_ = w.Write([]string{"Fitur eksperimen dibatalkan", "Dibatalkan setelah dikerjakan; canceled_at wajib kalau ada tanggal riwayat.", "CANCELED", "low", "", "", "", "", "", "", "28/09/2026", "01/10/2026", "", "", "05/10/2026", "pm@perusahaan.com", "nama@perusahaan.com", "", "", ""})
 	w.Flush()
 	return buf.Bytes()
 }
@@ -116,8 +119,8 @@ func parseTaskCSV(data []byte) ([]TaskImportRow, error) {
 			RowNum: rowNum, Title: get(rec, "title"), Description: get(rec, "description"), TaskStatus: get(rec, "status"), Priority: get(rec, "priority"),
 			Assignee: get(rec, "assignee"), StartDate: get(rec, "start_date"), DueDate: get(rec, "due_date"),
 			Sprint: get(rec, "sprint"), Estimate: get(rec, "estimate"), StoryPoints: get(rec, "story_points"),
-			CreatedAt: get(rec, "created_at"), InProgressAt: get(rec, "in_progress_at"), UnderReviewAt: get(rec, "under_review_at"), DoneAt: get(rec, "done_at"),
-			PicBacklog: get(rec, "pic_backlog"), PicInProgress: get(rec, "pic_in_progress"), PicUnderReview: get(rec, "pic_under_review"), PicDone: get(rec, "pic_done"),
+			CreatedAt: get(rec, "created_at"), InProgressAt: get(rec, "in_progress_at"), UnderReviewAt: get(rec, "under_review_at"), DoneAt: get(rec, "done_at"), CanceledAt: get(rec, "canceled_at"),
+			PicBacklog: get(rec, "pic_backlog"), PicInProgress: get(rec, "pic_in_progress"), PicUnderReview: get(rec, "pic_under_review"), PicDone: get(rec, "pic_done"), PicCanceled: get(rec, "pic_canceled"),
 		})
 	}
 	return rows, nil
@@ -220,15 +223,17 @@ func validateTaskRows(rows []TaskImportRow, env taskImportEnv) {
 			row.Priority = priority
 			row.Assignee = strings.Join(emails, ";")
 			row.StartDate, row.DueDate, row.Estimate, row.StoryPoints = start, due, estimate, sp
-			row.CreatedAt, row.InProgressAt, row.UnderReviewAt, row.DoneAt = dates[0], dates[1], dates[2], dates[3]
-			row.PicBacklog, row.PicInProgress, row.PicUnderReview, row.PicDone = pics[0], pics[1], pics[2], pics[3]
+			row.CreatedAt, row.InProgressAt, row.UnderReviewAt, row.DoneAt, row.CanceledAt = dates[0], dates[1], dates[2], dates[3], dates[4]
+			row.PicBacklog, row.PicInProgress, row.PicUnderReview, row.PicDone, row.PicCanceled = pics[0], pics[1], pics[2], pics[3], pics[4]
 		}
 	}
 }
 
 // historyStatusNames -- urutan status baku yang punya kolom tanggal riwayat
-// (created_at = masuk BACKLOG) dan kolom PIC.
-var historyStatusNames = [4]string{"BACKLOG", "IN PROGRESS", "UNDER REVIEW", "DONE"}
+// (created_at = masuk BACKLOG) dan kolom PIC. CANCELED (status sistem akhir,
+// IG-118) di urutan terakhir: bisa dicapai dari status manapun, jadi kolom
+// tanggal antara boleh dikosongkan (mis. created_at -> canceled_at).
+var historyStatusNames = [5]string{"BACKLOG", "IN PROGRESS", "UNDER REVIEW", "DONE", "CANCELED"}
 
 func historyIndex(statusName string) int {
 	for i, n := range historyStatusNames {
@@ -241,19 +246,20 @@ func historyIndex(statusName string) int {
 
 // validateTaskHistory -- aturan riwayat tanggal + PIC per status (tahap c).
 //   - Semua kolom tanggal kosong = perilaku tahap (b) (tanpa riwayat).
-//   - Ada tanggal: status task harus salah satu status baku; kolom tanggal
-//     status SETELAH status saat ini tidak boleh diisi; tanggal berurutan
-//     naik; tanggal status saat ini wajib (kecuali BACKLOG); tidak di masa depan.
+//   - Ada tanggal: status task harus salah satu status baku (termasuk
+//     CANCELED); kolom tanggal status SETELAH status saat ini tidak boleh
+//     diisi; tanggal berurutan naik; tanggal status saat ini wajib (kecuali
+//     BACKLOG); tidak di masa depan.
 //   - PIC hanya untuk status yang dilalui (ada tanggalnya; tanpa riwayat:
 //     hanya status saat ini); tiap email harus kandidat assignee.
 //
 // Mengembalikan nilai ternormalisasi (tanggal ISO, email huruf kecil) dan alasan
 // kalau baris harus dilewati.
-func validateTaskHistory(row *TaskImportRow, assignable map[string]string, today string) (dates, pics [4]string, reason string) {
-	raw := [4]string{row.CreatedAt, row.InProgressAt, row.UnderReviewAt, row.DoneAt}
-	rawPic := [4]string{row.PicBacklog, row.PicInProgress, row.PicUnderReview, row.PicDone}
-	dateCols := [4]string{"created_at", "in_progress_at", "under_review_at", "done_at"}
-	picCols := [4]string{"pic_backlog", "pic_in_progress", "pic_under_review", "pic_done"}
+func validateTaskHistory(row *TaskImportRow, assignable map[string]string, today string) (dates, pics [5]string, reason string) {
+	raw := [5]string{row.CreatedAt, row.InProgressAt, row.UnderReviewAt, row.DoneAt, row.CanceledAt}
+	rawPic := [5]string{row.PicBacklog, row.PicInProgress, row.PicUnderReview, row.PicDone, row.PicCanceled}
+	dateCols := [5]string{"created_at", "in_progress_at", "under_review_at", "done_at", "canceled_at"}
+	picCols := [5]string{"pic_backlog", "pic_in_progress", "pic_under_review", "pic_done", "pic_canceled"}
 	cur := historyIndex(row.TaskStatus)
 
 	has := false
@@ -272,7 +278,7 @@ func validateTaskHistory(row *TaskImportRow, assignable map[string]string, today
 	}
 	if has {
 		if cur < 0 {
-			return dates, pics, "Riwayat tanggal hanya untuk task berstatus BACKLOG, IN PROGRESS, UNDER REVIEW, atau DONE."
+			return dates, pics, "Riwayat tanggal hanya untuk task berstatus BACKLOG, IN PROGRESS, UNDER REVIEW, DONE, atau CANCELED."
 		}
 		prev := ""
 		for i := range dates {
@@ -283,7 +289,7 @@ func validateTaskHistory(row *TaskImportRow, assignable map[string]string, today
 				return dates, pics, fmt.Sprintf("%s tidak boleh diisi untuk task berstatus %s.", dateCols[i], row.TaskStatus)
 			}
 			if prev != "" && dates[i] < prev {
-				return dates, pics, "Tanggal riwayat harus berurutan: created_at <= in_progress_at <= under_review_at <= done_at."
+				return dates, pics, "Tanggal riwayat harus berurutan: created_at <= in_progress_at <= under_review_at <= done_at <= canceled_at."
 			}
 			prev = dates[i]
 		}
@@ -314,8 +320,8 @@ func validateTaskHistory(row *TaskImportRow, assignable map[string]string, today
 // jadi urutan status pada hari yang sama dijaga dengan selisih 1 detik per
 // langkah (ponytail: supaya urutan timeline tetap deterministik).
 func buildTaskImportHistory(row *TaskImportRow, env taskImportEnv, now time.Time) (created, completed *time.Time, sessions []repository.TaskImportSession, phases []repository.TaskImportPhase) {
-	dates := [4]string{row.CreatedAt, row.InProgressAt, row.UnderReviewAt, row.DoneAt}
-	pics := [4]string{row.PicBacklog, row.PicInProgress, row.PicUnderReview, row.PicDone}
+	dates := [5]string{row.CreatedAt, row.InProgressAt, row.UnderReviewAt, row.DoneAt, row.CanceledAt}
+	pics := [5]string{row.PicBacklog, row.PicInProgress, row.PicUnderReview, row.PicDone, row.PicCanceled}
 	cur := historyIndex(row.TaskStatus)
 
 	type link struct {
@@ -357,7 +363,7 @@ func buildTaskImportHistory(row *TaskImportRow, env taskImportEnv, now time.Time
 		active := isCurrent && env.statuses[row.TaskStatus].RequirePic
 		deactivated := exited
 		if isCurrent && !active {
-			// status tanpa kewajiban PIC (mis. DONE): PIC tercatat tapi tidak aktif.
+			// status tanpa kewajiban PIC (mis. DONE/CANCELED): PIC tercatat tapi tidak aktif.
 			e := l.entered
 			deactivated = &e
 		}
@@ -373,6 +379,7 @@ func buildTaskImportHistory(row *TaskImportRow, env taskImportEnv, now time.Time
 	if has {
 		c := chain[0].entered
 		created = &c
+		// completed_at hanya untuk DONE (sama SetStatus); CANCELED tidak menyetelnya.
 		if cur == 3 {
 			d := chain[len(chain)-1].entered
 			completed = &d
@@ -503,7 +510,7 @@ func taskImportReportCSV(rows []TaskImportRow, onlySkipped bool) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	_ = w.Write([]string{"baris", "title", "description", "status", "priority", "assignee", "start_date", "due_date", "sprint", "estimate", "story_points",
-		"created_at", "in_progress_at", "under_review_at", "done_at", "pic_backlog", "pic_in_progress", "pic_under_review", "pic_done", "task_code", "hasil", "alasan"})
+		"created_at", "in_progress_at", "under_review_at", "done_at", "canceled_at", "pic_backlog", "pic_in_progress", "pic_under_review", "pic_done", "pic_canceled", "task_code", "hasil", "alasan"})
 	for i := range rows {
 		r := &rows[i]
 		if onlySkipped && r.Status != "skipped" {
@@ -514,7 +521,7 @@ func taskImportReportCSV(rows []TaskImportRow, onlySkipped bool) []byte {
 			hasil = "DILEWATI"
 		}
 		_ = w.Write([]string{fmt.Sprintf("%d", r.RowNum), r.Title, r.Description, r.TaskStatus, r.Priority, r.Assignee, r.StartDate, r.DueDate, r.Sprint, r.Estimate, r.StoryPoints,
-			r.CreatedAt, r.InProgressAt, r.UnderReviewAt, r.DoneAt, r.PicBacklog, r.PicInProgress, r.PicUnderReview, r.PicDone, r.TaskCode, hasil, r.Reason})
+			r.CreatedAt, r.InProgressAt, r.UnderReviewAt, r.DoneAt, r.CanceledAt, r.PicBacklog, r.PicInProgress, r.PicUnderReview, r.PicDone, r.PicCanceled, r.TaskCode, hasil, r.Reason})
 	}
 	w.Flush()
 	return buf.Bytes()
