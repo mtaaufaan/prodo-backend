@@ -30,6 +30,7 @@ type performanceRepository interface {
 	FirstWorkStarted(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) (map[string]time.Time, error)
 	ListAssignees(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfAssignee, error)
 	ListPicPhases(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfPicPhase, error)
+	ListBacklog(ctx context.Context, exec db.Executor, workspaceID, projectID string) ([]repository.PerfBacklogItem, error)
 }
 
 // performanceProjectResolver -- reuse ProjectRepository.GetWorkspaceID.
@@ -145,6 +146,7 @@ type DashboardResult struct {
 	RegressionByStatus     []RegressionStat
 	Bottleneck             []BottleneckStat
 	HandoffDelay           []HandoffStat
+	BacklogAge             BacklogAge
 }
 
 type OnTimeStat struct {
@@ -203,6 +205,24 @@ type BottleneckStat struct {
 	SessionCount   int
 }
 
+// BacklogAge -- umur task yang SAAT INI di BACKLOG (hari sejak masuk backlog).
+// Kartu terpisah dari Bottleneck: BACKLOG adalah tempat menunggu (PRD 2.2
+// Status Time Tracking mengecualikannya), bukan tahap kerja. Tidak
+// dipengaruhi filter rentang -- ini kondisi saat ini.
+type BacklogAge struct {
+	Count      int
+	AvgDays    float64
+	OldestDays float64
+	ByPriority []BacklogAgeStat
+}
+
+type BacklogAgeStat struct {
+	Priority   string
+	Count      int
+	AvgDays    float64
+	OldestDays float64
+}
+
 type HandoffStat struct {
 	ProjectID    string
 	ProjectName  string
@@ -233,6 +253,10 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 		return nil, fmt.Errorf("service.dashboard: %w", err)
 	}
 	picPhases, err := s.repo.ListPicPhases(ctx, exec, workspaceID, projectID, since)
+	if err != nil {
+		return nil, fmt.Errorf("service.dashboard: %w", err)
+	}
+	backlog, err := s.repo.ListBacklog(ctx, exec, workspaceID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("service.dashboard: %w", err)
 	}
@@ -331,7 +355,12 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 		} else {
 			queueHours = totalHours
 		}
-		totalActiveHoursAllStatuses += activeHours
+		// BACKLOG bukan tahap kerja: auto-start saat sesi ditutup (S4-67) membuat
+		// seluruh waktu tunggu backlog tampak sebagai "active", jadi tidak ikut
+		// Flow Efficiency, Cycle, maupun Bottleneck (hanya Regression, di bawah).
+		if sess.StatusName != backlogStatusName {
+			totalActiveHoursAllStatuses += activeHours
+		}
 
 		agg := byStatus[sess.StatusName]
 		if agg == nil {
@@ -350,17 +379,19 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 		}
 	}
 	for status, agg := range byStatus {
-		cs := CycleStat{StatusName: status, AvgByPriority: map[string]float64{}}
-		for p, vals := range agg.activeByPriority {
-			cs.AvgByPriority[p] = mean(vals)
-		}
-		cs.AvgHours = mean(agg.activeHours)
-		result.Cycle = append(result.Cycle, cs)
+		if status != backlogStatusName {
+			cs := CycleStat{StatusName: status, AvgByPriority: map[string]float64{}}
+			for p, vals := range agg.activeByPriority {
+				cs.AvgByPriority[p] = mean(vals)
+			}
+			cs.AvgHours = mean(agg.activeHours)
+			result.Cycle = append(result.Cycle, cs)
 
-		result.Bottleneck = append(result.Bottleneck, BottleneckStat{
-			StatusName: status, AvgTotalHours: mean(agg.totalHours), AvgQueueHours: mean(agg.queueHours),
-			AvgActiveHours: mean(agg.activeHours), SessionCount: agg.sessions,
-		})
+			result.Bottleneck = append(result.Bottleneck, BottleneckStat{
+				StatusName: status, AvgTotalHours: mean(agg.totalHours), AvgQueueHours: mean(agg.queueHours),
+				AvgActiveHours: mean(agg.activeHours), SessionCount: agg.sessions,
+			})
+		}
 
 		rate := 0.0
 		if agg.sessions > 0 {
@@ -381,7 +412,9 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 		result.RegressionRatePct = float64(result.RegressedTasks) / float64(result.ScopeTotal) * 100
 	}
 
-	// --- Flow Efficiency: Lead Time (task selesai) + Active Time (semua sesi) ---
+	result.BacklogAge = backlogAge(backlog, now)
+
+	// --- Flow Efficiency: Lead Time (task selesai) + Active Time (semua sesi kerja) ---
 	var leadHours, cycleSum float64
 	var cycleN int
 	for i := range tasks {
@@ -506,6 +539,51 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 }
 
 var priorityOrder = []string{"critical", "high", "medium", "low"}
+
+// backlogStatusName -- status sistem BACKLOG (tempat menunggu, bukan tahap kerja).
+const backlogStatusName = "BACKLOG"
+
+// backlogAge -- umur (hari sejak masuk backlog) task yang saat ini di BACKLOG,
+// total dan per priority (urutan priorityOrder, priority tanpa task tetap tampil nol).
+func backlogAge(items []repository.PerfBacklogItem, now time.Time) BacklogAge {
+	type agg struct {
+		count       int
+		sum, oldest float64
+	}
+	by := map[string]*agg{}
+	var total agg
+	for i := range items {
+		days := now.Sub(items[i].EnteredAt).Hours() / 24
+		if days < 0 {
+			days = 0
+		}
+		a := by[items[i].Priority]
+		if a == nil {
+			a = &agg{}
+			by[items[i].Priority] = a
+		}
+		for _, x := range []*agg{a, &total} {
+			x.count++
+			x.sum += days
+			if days > x.oldest {
+				x.oldest = days
+			}
+		}
+	}
+	out := BacklogAge{Count: total.count, OldestDays: total.oldest}
+	if total.count > 0 {
+		out.AvgDays = total.sum / float64(total.count)
+	}
+	for _, p := range priorityOrder {
+		st := BacklogAgeStat{Priority: p}
+		if a := by[p]; a != nil {
+			st.Count, st.OldestDays = a.count, a.oldest
+			st.AvgDays = a.sum / float64(a.count)
+		}
+		out.ByPriority = append(out.ByPriority, st)
+	}
+	return out
+}
 
 func mean(vals []float64) float64 {
 	if len(vals) == 0 {

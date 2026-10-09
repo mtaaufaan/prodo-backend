@@ -124,13 +124,18 @@ func (r *PerformanceRepository) ListTasks(ctx context.Context, exec db.Executor,
 // GroupPerformanceRepository.ListStatusDwell).
 func (r *PerformanceRepository) ListStatusSessions(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfSession, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "tss.entered_at", since)
-	where += " AND cs.name NOT IN ('DONE', 'CANCELED')"
+	// Sesi berstatus DONE/CANCELED dibuang, DAN seluruh sesi milik task yang
+	// status akhirnya CANCELED (cur): task CANCELED sudah dikeluarkan dari
+	// Completion/On-Time/Overdue (ListTasks), jadi riwayat waktunya tidak boleh
+	// ikut mengisi Cycle/Bottleneck/Regression (penyebut dan pembilang konsisten).
+	where += " AND cs.name NOT IN ('DONE', 'CANCELED') AND cur.name <> 'CANCELED'"
 	rows, err := exec.Query(ctx, `
 		SELECT tss.task_id, p.id, t.priority, cs.name, tss.entered_at, tss.work_started_at, tss.exited_at, tss.is_regression
 		FROM task_status_sessions tss
 		JOIN tasks t ON t.id = tss.task_id
 		JOIN projects p ON p.id = t.project_id
 		JOIN custom_statuses cs ON cs.id = tss.status_id
+		JOIN custom_statuses cur ON cur.id = t.status_id
 		WHERE `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repository.ListStatusSessions: %w", err)
@@ -144,6 +149,45 @@ func (r *PerformanceRepository) ListStatusSessions(ctx context.Context, exec db.
 			return nil, fmt.Errorf("repository.ListStatusSessions: scan: %w", err)
 		}
 		list = append(list, s)
+	}
+	return list, rows.Err()
+}
+
+// PerfBacklogItem -- satu task yang SAAT INI berstatus BACKLOG; EnteredAt =
+// kapan ia masuk backlog (awal sesi BACKLOG yang masih terbuka, fallback
+// created_at kalau tidak ada sesi).
+type PerfBacklogItem struct {
+	Priority  string
+	EnteredAt time.Time
+}
+
+// ListBacklog -- Umur Backlog (kartu terpisah dari Bottleneck: BACKLOG adalah
+// tempat menunggu, bukan tahap kerja). SENGAJA tidak difilter rentang waktu:
+// umur backlog adalah kondisi SAAT INI, dan filter created_at justru akan
+// menyembunyikan task terlama. Task CANCELED tidak pernah berstatus BACKLOG,
+// jadi otomatis tidak ikut.
+func (r *PerformanceRepository) ListBacklog(ctx context.Context, exec db.Executor, workspaceID, projectID string) ([]PerfBacklogItem, error) {
+	where, args := perfScopeClause(workspaceID, projectID, "", nil)
+	rows, err := exec.Query(ctx, `
+		SELECT t.priority,
+		       COALESCE((SELECT MAX(tss.entered_at) FROM task_status_sessions tss
+		                 WHERE tss.task_id = t.id AND tss.status_id = t.status_id AND tss.exited_at IS NULL), t.created_at)
+		FROM tasks t
+		JOIN projects p ON p.id = t.project_id
+		JOIN custom_statuses cs ON cs.id = t.status_id
+		WHERE cs.name = 'BACKLOG' AND `+where, args...)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListBacklog: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]PerfBacklogItem, 0)
+	for rows.Next() {
+		var b PerfBacklogItem
+		if err := rows.Scan(&b.Priority, &b.EnteredAt); err != nil {
+			return nil, fmt.Errorf("repository.ListBacklog: scan: %w", err)
+		}
+		list = append(list, b)
 	}
 	return list, rows.Err()
 }
