@@ -17,6 +17,7 @@ type fakePerformanceRepo struct {
 	firstWork map[string]time.Time
 	assignees []repository.PerfAssignee
 	picPhases []repository.PerfPicPhase
+	backlog   []repository.PerfBacklogItem
 }
 
 func (f *fakePerformanceRepo) ListTasks(_ context.Context, _ db.Executor, _, _ string, _ *time.Time) ([]repository.PerfTask, error) {
@@ -36,6 +37,10 @@ func (f *fakePerformanceRepo) ListAssignees(_ context.Context, _ db.Executor, _,
 }
 func (f *fakePerformanceRepo) ListPicPhases(_ context.Context, _ db.Executor, _, _ string, _ *time.Time) ([]repository.PerfPicPhase, error) {
 	return f.picPhases, nil
+}
+
+func (f *fakePerformanceRepo) ListBacklog(_ context.Context, _ db.Executor, _, _ string) ([]repository.PerfBacklogItem, error) {
+	return f.backlog, nil
 }
 
 type fakePerformanceProjectResolver struct{ workspaceID string }
@@ -250,7 +255,7 @@ func TestDashboard_Bottleneck_NeverStarted_AllQueueNoActive(t *testing.T) {
 	entered := time.Now().Add(-5 * time.Hour)
 	exited := entered.Add(5 * time.Hour)
 	repo := &fakePerformanceRepo{sessions: []repository.PerfSession{
-		session("t1", "high", "BACKLOG", entered, nil, &exited, false), // tidak pernah "Mulai Pengerjaan"
+		session("t1", "high", "UNDER REVIEW", entered, nil, &exited, false), // tidak pernah "Mulai Pengerjaan"
 	}}
 	svc := newTestPerformanceService(repo, "", "admin_workspace")
 	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 0, "aw-1", "member")
@@ -263,6 +268,109 @@ func TestDashboard_Bottleneck_NeverStarted_AllQueueNoActive(t *testing.T) {
 	}
 	if diff := b.AvgQueueHours - 5; diff > 0.01 || diff < -0.01 {
 		t.Errorf("AvgQueueHours = %v, want ~5 (seluruh durasi adalah antrian)", b.AvgQueueHours)
+	}
+}
+
+// BACKLOG bukan tahap kerja (PRD 2.2): tidak masuk Bottleneck, Cycle, maupun
+// Active Time Flow Efficiency -- tapi tetap terhitung di Regression Rate.
+func TestDashboard_Bottleneck_ExcludesBacklog(t *testing.T) {
+	entered := time.Now().Add(-100 * time.Hour)
+	exited := entered.Add(90 * time.Hour)
+	workStarted := entered // auto-start saat sesi ditutup: seluruh waktu tunggu tampak "active"
+	repo := &fakePerformanceRepo{sessions: []repository.PerfSession{
+		session("t1", "high", "BACKLOG", entered, &workStarted, &exited, false),
+		session("t1", "high", "IN PROGRESS", exited, nil, nil, false),
+		session("t2", "high", "BACKLOG", entered, nil, nil, true), // regresi ke BACKLOG
+	}}
+	svc := newTestPerformanceService(repo, "", "admin_workspace")
+	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 0, "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, b := range result.Bottleneck {
+		if b.StatusName == "BACKLOG" {
+			t.Errorf("Bottleneck memuat BACKLOG: %+v", b)
+		}
+	}
+	for _, c := range result.Cycle {
+		if c.StatusName == "BACKLOG" {
+			t.Errorf("Cycle memuat BACKLOG: %+v", c)
+		}
+	}
+	if len(result.Bottleneck) != 1 || result.Bottleneck[0].StatusName != "IN PROGRESS" {
+		t.Errorf("Bottleneck = %+v, want hanya IN PROGRESS", result.Bottleneck)
+	}
+	var backlogReg *RegressionStat
+	for i := range result.RegressionByStatus {
+		if result.RegressionByStatus[i].StatusName == "BACKLOG" {
+			backlogReg = &result.RegressionByStatus[i]
+		}
+	}
+	if backlogReg == nil || backlogReg.Sessions != 2 || backlogReg.Regressions != 1 {
+		t.Errorf("RegressionByStatus[BACKLOG] = %+v, want tetap tercatat (2 sesi, 1 regresi)", backlogReg)
+	}
+}
+
+func TestDashboard_FlowEfficiency_IgnoresBacklogActiveTime(t *testing.T) {
+	created := time.Now().Add(-20 * time.Hour)
+	completed := time.Now().Add(-10 * time.Hour) // Lead Time = 10h
+	backlogExit := created.Add(4 * time.Hour)
+	workStarted := backlogExit
+	exited := workStarted.Add(5 * time.Hour) // Active Time kerja = 5h
+	repo := &fakePerformanceRepo{
+		tasks: []repository.PerfTask{priTask("t1", "high", "DONE", nil, &completed, nil)},
+		sessions: []repository.PerfSession{
+			session("t1", "high", "BACKLOG", created, &created, &backlogExit, false), // auto-start: 4h "active" semu
+			session("t1", "high", "IN PROGRESS", backlogExit, &workStarted, &exited, false),
+		},
+	}
+	repo.tasks[0].CreatedAt = created
+	svc := newTestPerformanceService(repo, "", "admin_workspace")
+	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 0, "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FlowEfficiencyPct == nil {
+		t.Fatalf("FlowEfficiencyPct nil")
+	}
+	if want := 5.0 / 10.0 * 100; *result.FlowEfficiencyPct-want > 0.01 || *result.FlowEfficiencyPct-want < -0.01 {
+		t.Errorf("FlowEfficiencyPct = %v, want %v (waktu backlog tidak dihitung sebagai active)", *result.FlowEfficiencyPct, want)
+	}
+}
+
+func TestDashboard_BacklogAge_TotalAndPerPriority(t *testing.T) {
+	now := time.Now()
+	repo := &fakePerformanceRepo{backlog: []repository.PerfBacklogItem{
+		{Priority: "high", EnteredAt: now.Add(-10 * 24 * time.Hour)},
+		{Priority: "high", EnteredAt: now.Add(-30 * 24 * time.Hour)},
+		{Priority: "low", EnteredAt: now.Add(-2 * 24 * time.Hour)},
+	}}
+	svc := newTestPerformanceService(repo, "", "admin_workspace")
+	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 7, "aw-1", "member") // rentang tidak memengaruhi
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ba := result.BacklogAge
+	near := func(got, want float64) bool { return got-want < 0.01 && got-want > -0.01 }
+	if ba.Count != 3 || !near(ba.AvgDays, 14) || !near(ba.OldestDays, 30) {
+		t.Errorf("BacklogAge = %+v, want Count=3 Avg=14 Oldest=30", ba)
+	}
+	if len(ba.ByPriority) != 4 || ba.ByPriority[0].Priority != "critical" || ba.ByPriority[0].Count != 0 {
+		t.Fatalf("ByPriority = %+v, want 4 baris urut priorityOrder, critical kosong", ba.ByPriority)
+	}
+	if h := ba.ByPriority[1]; h.Priority != "high" || h.Count != 2 || !near(h.AvgDays, 20) || !near(h.OldestDays, 30) {
+		t.Errorf("high = %+v, want Count=2 Avg=20 Oldest=30", h)
+	}
+}
+
+func TestDashboard_BacklogAge_Empty(t *testing.T) {
+	svc := newTestPerformanceService(&fakePerformanceRepo{}, "", "admin_workspace")
+	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 0, "aw-1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.BacklogAge.Count != 0 || result.BacklogAge.AvgDays != 0 || len(result.BacklogAge.ByPriority) != 4 {
+		t.Errorf("BacklogAge kosong = %+v", result.BacklogAge)
 	}
 }
 

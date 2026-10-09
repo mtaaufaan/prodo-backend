@@ -123,7 +123,15 @@ func dashboardToMap(d *service.DashboardResult) fiber.Map {
 		}
 	}
 
+	byPriority := make([]fiber.Map, len(d.BacklogAge.ByPriority))
+	for i, b := range d.BacklogAge.ByPriority {
+		byPriority[i] = fiber.Map{"priority": b.Priority, "count": b.Count, "avg_days": b.AvgDays, "oldest_days": b.OldestDays}
+	}
+
 	return fiber.Map{
+		"backlog_age": fiber.Map{
+			"count": d.BacklogAge.Count, "avg_days": d.BacklogAge.AvgDays, "oldest_days": d.BacklogAge.OldestDays, "by_priority": byPriority,
+		},
 		"scope_total": d.ScopeTotal, "scope_done": d.ScopeDone,
 		"completion_rate_raw": d.CompletionRateRaw, "completion_rate_weighted": d.CompletionRateWeighted,
 		"on_time": onTime, "no_due_count": d.NoDueCount,
