@@ -272,7 +272,8 @@ func ProjectImportTemplate(kind string) ([]byte, bool) {
 }
 
 // ProjectImportValidateResult -- ringkasan pratinjau dry-run. Preview =
-// []SprintImportRow atau []TaskImportRow sesuai kind (50 baris pertama).
+// []SprintImportRow atau []TaskImportRow sesuai kind -- SELURUH baris berkas
+// (maks maxCSVRows); paginasi dilakukan FE (pola "Grid 1").
 type ProjectImportValidateResult struct {
 	ImportID string
 	Kind     string
@@ -281,8 +282,6 @@ type ProjectImportValidateResult struct {
 	SkippedN int
 	Preview  any
 }
-
-const importPreviewRows = 50
 
 // countValid -- jumlah baris berstatus "valid".
 func countValid[T any](rows []T, status func(*T) string) int {
@@ -293,13 +292,6 @@ func countValid[T any](rows []T, status func(*T) string) int {
 		}
 	}
 	return n
-}
-
-func firstN[T any](rows []T, n int) []T {
-	if len(rows) > n {
-		return rows[:n]
-	}
-	return rows
 }
 
 // Validate -- parse + validasi (dry-run). TIDAK menulis apa pun selain
@@ -330,7 +322,7 @@ func (s *ProjectImportService) Validate(ctx context.Context, exec db.Executor, p
 			return nil, fmt.Errorf("service.Validate: %w", err)
 		}
 		validateSprintRows(rows, existing)
-		total, validN, preview = len(rows), countValid(rows, func(r *SprintImportRow) string { return r.Status }), firstN(rows, importPreviewRows)
+		total, validN, preview = len(rows), countValid(rows, func(r *SprintImportRow) string { return r.Status }), rows
 		rowsJSON, err = json.Marshal(rows)
 		if err != nil {
 			return nil, fmt.Errorf("service.Validate: encode hasil: %w", err)
@@ -345,7 +337,7 @@ func (s *ProjectImportService) Validate(ctx context.Context, exec db.Executor, p
 			return nil, err
 		}
 		validateTaskRows(rows, env)
-		total, validN, preview = len(rows), countValid(rows, func(r *TaskImportRow) string { return r.Status }), firstN(rows, importPreviewRows)
+		total, validN, preview = len(rows), countValid(rows, func(r *TaskImportRow) string { return r.Status }), rows
 		rowsJSON, err = json.Marshal(rows)
 		if err != nil {
 			return nil, fmt.Errorf("service.Validate: encode hasil: %w", err)

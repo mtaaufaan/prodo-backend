@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,24 @@ func TestProjectImport_ValidateAndExecute(t *testing.T) {
 	// eksekusi ulang ditolak
 	if _, err := svc.Execute(context.Background(), nil, "p1", res.ImportID, "pm-1", ""); !errors.Is(err, domain.ErrCSVImportAlreadyStarted) {
 		t.Errorf("eksekusi kedua: err = %v, want ErrCSVImportAlreadyStarted", err)
+	}
+}
+
+// Pratinjau memuat SELURUH baris berkas (paginasi dilakukan FE), bukan 50 pertama.
+func TestProjectImport_Validate_PreviewHasAllRows(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("code,name\n")
+	for i := 1; i <= 120; i++ {
+		fmt.Fprintf(&b, "SPR-%03d,Sprint %d\n", i, i)
+	}
+	svc := newPIService(&fakePIRepo{}, &fakePISprints{}, true, "project_manager")
+	res, err := svc.Validate(context.Background(), nil, "p1", "sprint", "banyak.csv", []byte(b.String()), "pm-1", "")
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	rows, ok := res.Preview.([]SprintImportRow)
+	if !ok || len(rows) != 120 || res.Total != 120 {
+		t.Errorf("preview ok=%v len=%d total=%d, want 120 baris", ok, len(rows), res.Total)
 	}
 }
 
@@ -388,7 +407,7 @@ func TestValidateTaskRows_History(t *testing.T) {
 		/*5*/ base("UNDER REVIEW", func(r *TaskImportRow) { r.UnderReviewAt, r.DoneAt = "02/10/2026", "03/10/2026" }), // done_at melewati status
 		/*6*/ base("DONE", func(r *TaskImportRow) { r.InProgressAt, r.DoneAt = "05/10/2026", "01/10/2026" }), // tidak berurutan
 		/*7*/ base("DONE", func(r *TaskImportRow) { r.DoneAt = "01/01/2027" }), // masa depan
-		/*8*/ base("CANCELED", func(r *TaskImportRow) { r.InProgressAt = "01/10/2026" }), // status di luar 4 status baku
+		/*8*/ base("CANCELED", func(r *TaskImportRow) { r.InProgressAt = "01/10/2026" }), // CANCELED dengan riwayat wajib canceled_at
 		/*9*/ base("DONE", func(r *TaskImportRow) { r.DoneAt = "31-12-2026" }), // format
 		/*10*/ base("DONE", func(r *TaskImportRow) {
 			r.InProgressAt, r.DoneAt, r.PicUnderReview = "01/10/2026", "02/10/2026", "pm@corp.com"
@@ -396,13 +415,24 @@ func TestValidateTaskRows_History(t *testing.T) {
 		/*11*/ base("IN PROGRESS", func(r *TaskImportRow) { r.InProgressAt, r.PicInProgress = "01/10/2026", "orang@luar.com" }), // PIC bukan member
 		/*12*/ base("IN PROGRESS", func(r *TaskImportRow) { r.PicInProgress = "editor@corp.com" }), // tanpa riwayat: PIC status saat ini boleh
 		/*13*/ base("IN PROGRESS", func(r *TaskImportRow) { r.PicBacklog = "editor@corp.com" }), // tanpa riwayat: PIC status lain tidak
+		// CANCELED (status sistem akhir): bisa dicapai dari status manapun.
+		/*14*/ base("CANCELED", func(r *TaskImportRow) {
+			r.CreatedAt, r.InProgressAt, r.CanceledAt, r.PicInProgress = "28/09/2026", "01/10/2026", "05/10/2026", "editor@corp.com"
+		}), // dibatalkan di tengah pengerjaan
+		/*15*/ base("CANCELED", func(r *TaskImportRow) { r.CreatedAt, r.CanceledAt = "28/09/2026", "05/10/2026" }), // dibatalkan langsung dari backlog
+		/*16*/ base("CANCELED", func(r *TaskImportRow) { r.DoneAt, r.CanceledAt = "01/10/2026", "05/10/2026" }), // DONE lalu dibatalkan
+		/*17*/ base("CANCELED", func(r *TaskImportRow) { r.InProgressAt, r.CanceledAt = "05/10/2026", "01/10/2026" }), // canceled_at sebelum in_progress_at
+		/*18*/ base("CANCELED", func(r *TaskImportRow) { r.PicCanceled = "pm@corp.com" }), // tanpa riwayat: PIC status saat ini boleh
+		/*19*/ base("DONE", func(r *TaskImportRow) { r.DoneAt, r.CanceledAt = "01/10/2026", "05/10/2026" }), // canceled_at untuk task berstatus DONE
+		/*20*/ base("CANCELED", func(r *TaskImportRow) { r.CanceledAt = "01/01/2027" }), // masa depan
 	}
 	for i := range rows {
 		rows[i].RowNum = i + 2
 	}
 	validateTaskRows(rows, taskEnv())
 
-	want := map[int]string{2: "valid", 3: "valid", 4: "skipped", 5: "skipped", 6: "skipped", 7: "skipped", 8: "skipped", 9: "skipped", 10: "skipped", 11: "skipped", 12: "valid", 13: "skipped"}
+	want := map[int]string{2: "valid", 3: "valid", 4: "skipped", 5: "skipped", 6: "skipped", 7: "skipped", 8: "skipped", 9: "skipped", 10: "skipped", 11: "skipped", 12: "valid", 13: "skipped",
+		14: "valid", 15: "valid", 16: "valid", 17: "skipped", 18: "valid", 19: "skipped", 20: "skipped"}
 	for i := range rows {
 		r := &rows[i]
 		if r.Status != want[r.RowNum] {
@@ -454,6 +484,37 @@ func TestBuildTaskImportHistory(t *testing.T) {
 	for i := range phases {
 		if phases[i].Active {
 			t.Errorf("fase %d seharusnya tidak aktif (task DONE): %+v", i, phases[i])
+		}
+	}
+}
+
+// CANCELED di tengah alur: rantai sesi sampai CANCELED (terbuka), completed_at
+// TIDAK diisi (hanya DONE), PIC CANCELED tercatat tapi tidak aktif.
+func TestBuildTaskImportHistory_Canceled(t *testing.T) {
+	env := taskEnv()
+	row := &TaskImportRow{
+		TaskStatus: "CANCELED", CreatedAt: "2026-09-28", InProgressAt: "2026-10-01", CanceledAt: "2026-10-05",
+		PicInProgress: "editor@corp.com", PicCanceled: "pm@corp.com",
+	}
+	created, completed, sessions, phases := buildTaskImportHistory(row, env, time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+
+	if created == nil || created.Format("2006-01-02") != "2026-09-28" || completed != nil {
+		t.Fatalf("created=%v completed=%v, want completed nil untuk CANCELED", created, completed)
+	}
+	if len(sessions) != 3 || sessions[2].StatusID != "st-canceled" || sessions[2].ExitedAt != nil || sessions[2].WorkStarted {
+		t.Fatalf("sessions = %+v, want 3 sesi dengan CANCELED terbuka", sessions)
+	}
+	for k := 0; k < 2; k++ {
+		if sessions[k].ExitedAt == nil || !sessions[k].ExitedAt.Equal(sessions[k+1].EnteredAt) {
+			t.Errorf("sesi %d tidak tersambung: %+v", k, sessions[k])
+		}
+	}
+	if len(phases) != 2 {
+		t.Fatalf("phases = %d, want 2", len(phases))
+	}
+	for i := range phases {
+		if phases[i].Active {
+			t.Errorf("fase %d seharusnya tidak aktif (CANCELED/riwayat): %+v", i, phases[i])
 		}
 	}
 }
