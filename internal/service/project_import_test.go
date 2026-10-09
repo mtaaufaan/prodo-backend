@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,24 @@ func TestProjectImport_ValidateAndExecute(t *testing.T) {
 	// eksekusi ulang ditolak
 	if _, err := svc.Execute(context.Background(), nil, "p1", res.ImportID, "pm-1", ""); !errors.Is(err, domain.ErrCSVImportAlreadyStarted) {
 		t.Errorf("eksekusi kedua: err = %v, want ErrCSVImportAlreadyStarted", err)
+	}
+}
+
+// Pratinjau memuat SELURUH baris berkas (paginasi dilakukan FE), bukan 50 pertama.
+func TestProjectImport_Validate_PreviewHasAllRows(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("code,name\n")
+	for i := 1; i <= 120; i++ {
+		fmt.Fprintf(&b, "SPR-%03d,Sprint %d\n", i, i)
+	}
+	svc := newPIService(&fakePIRepo{}, &fakePISprints{}, true, "project_manager")
+	res, err := svc.Validate(context.Background(), nil, "p1", "sprint", "banyak.csv", []byte(b.String()), "pm-1", "")
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	rows, ok := res.Preview.([]SprintImportRow)
+	if !ok || len(rows) != 120 || res.Total != 120 {
+		t.Errorf("preview ok=%v len=%d total=%d, want 120 baris", ok, len(rows), res.Total)
 	}
 }
 
