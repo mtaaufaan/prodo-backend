@@ -393,8 +393,15 @@ func (r *TaskRepository) SetPosition(ctx context.Context, exec db.Executor, task
 // Lengkap", dipanggil setelah service memverifikasi actor = pembuat task
 // atau PIC aktif.
 func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole, workspaceID string) error {
+	// ready_at = kali TERAKHIR dinyatakan lengkap (NULL kalau dibuka lagi);
+	// completeness_reopen_count naik tiap lengkap -> belum lengkap (IG-126).
+	// Kolom completeness di sisi kanan CASE = nilai SEBELUM update.
 	tag, err := exec.Exec(ctx, `
-		UPDATE tasks SET completeness = $2, updated_at = NOW()
+		UPDATE tasks SET
+			completeness_reopen_count = completeness_reopen_count + CASE WHEN $2::task_completeness = 'incomplete' AND completeness = 'complete' THEN 1 ELSE 0 END,
+			ready_at = CASE WHEN $2::task_completeness = 'complete' AND completeness <> 'complete' THEN NOW()
+			                WHEN $2::task_completeness = 'incomplete' THEN NULL ELSE ready_at END,
+			completeness = $2::task_completeness, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
 	`, taskID, completeness)
 	if err != nil {
