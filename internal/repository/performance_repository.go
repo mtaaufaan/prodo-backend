@@ -28,6 +28,10 @@ type PerfTask struct {
 	DueDate      *time.Time
 	CompletedAt  *time.Time
 	Completeness *string
+	// Kesiapan Task (IG-126): kali terakhir dinyatakan lengkap (nil = belum / data lama
+	// tanpa catatan) dan berapa kali dikembalikan ke belum lengkap.
+	ReadyAt     *time.Time
+	ReopenCount int
 }
 
 // PerfSession -- satu sesi status untuk Cycle Time/Bottleneck/Regression
@@ -44,14 +48,19 @@ type PerfSession struct {
 	IsRegression  bool
 }
 
-// PerfAssignee -- satu baris (task, assignee) untuk Member Performance.
-type PerfAssignee struct {
-	TaskID      string
-	UserID      string
-	UserName    string
-	Priority    string
-	StatusName  string
-	CompletedAt *time.Time
+// PerfMemberPhase -- satu fase PIC (task_pic_phases) beserta konteks task, dasar
+// Member Performance (IG-126: berbasis PIC, bukan assignee). Rentang waktu
+// difilter dari created_at task (sama ListTasks); task CANCELED tidak ikut.
+type PerfMemberPhase struct {
+	TaskID        string
+	UserID        string
+	UserName      string
+	Priority      string
+	PhaseStatus   string // nama status fase PIC ini (BACKLOG, IN PROGRESS, ...)
+	TaskStatus    string // status task SAAT INI
+	IsActive      bool
+	ActivatedAt   time.Time
+	DeactivatedAt *time.Time
 }
 
 // PerfPicPhase -- satu fase PIC untuk Acknowledge Rate (per member) dan
@@ -63,6 +72,10 @@ type PerfPicPhase struct {
 	UserName       string
 	ActivatedAt    time.Time
 	AcknowledgedAt *time.Time
+	IsActive       bool
+	// SelfAssigned = fase ditetapkan oleh orangnya sendiri (mis. PIC backlog otomatis
+	// pembuat task): tidak ada serah terima yang perlu dikonfirmasi.
+	SelfAssigned bool
 }
 
 type PerformanceRepository struct{}
@@ -97,7 +110,7 @@ func perfScopeClause(workspaceID, projectID, timeColumn string, since *time.Time
 func (r *PerformanceRepository) ListTasks(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfTask, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "t.created_at", since)
 	rows, err := exec.Query(ctx, `
-		SELECT t.id, p.id, p.name, t.task_code, t.title, t.priority, cs.name, t.created_at, t.due_date, t.completed_at, t.completeness
+		SELECT t.id, p.id, p.name, t.task_code, t.title, t.priority, cs.name, t.created_at, t.due_date, t.completed_at, t.completeness, t.ready_at, t.completeness_reopen_count
 		FROM tasks t
 		JOIN projects p ON p.id = t.project_id
 		JOIN custom_statuses cs ON cs.id = t.status_id
@@ -110,7 +123,7 @@ func (r *PerformanceRepository) ListTasks(ctx context.Context, exec db.Executor,
 	list := make([]PerfTask, 0)
 	for rows.Next() {
 		var t PerfTask
-		if err := rows.Scan(&t.TaskID, &t.ProjectID, &t.ProjectName, &t.TaskCode, &t.Title, &t.Priority, &t.StatusName, &t.CreatedAt, &t.DueDate, &t.CompletedAt, &t.Completeness); err != nil {
+		if err := rows.Scan(&t.TaskID, &t.ProjectID, &t.ProjectName, &t.TaskCode, &t.Title, &t.Priority, &t.StatusName, &t.CreatedAt, &t.DueDate, &t.CompletedAt, &t.Completeness, &t.ReadyAt, &t.ReopenCount); err != nil {
 			return nil, fmt.Errorf("repository.ListTasks: scan: %w", err)
 		}
 		list = append(list, t)
@@ -223,31 +236,33 @@ func (r *PerformanceRepository) FirstWorkStarted(ctx context.Context, exec db.Ex
 	return out, rows.Err()
 }
 
-// ListAssignees -- Task Load, Completion Rate, Avg Completion Time per
-// member (Member Performance). Task tanpa assignee tidak muncul (task load
-// nol tidak relevan ditampilkan per member yang tidak ada).
-func (r *PerformanceRepository) ListAssignees(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfAssignee, error) {
+// ListMemberPhases -- Task Load, Completion Rate, Avg Completion Time, dan
+// Kesiapan Task per member (Member Performance, berbasis PIC). Mengembalikan
+// SEMUA fase PIC task dalam cakupan; service yang memilah fase kerja vs
+// BACKLOG. Task tanpa fase PIC tidak muncul.
+func (r *PerformanceRepository) ListMemberPhases(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfMemberPhase, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "t.created_at", since)
 	rows, err := exec.Query(ctx, `
-		SELECT t.id, u.id, u.display_name, t.priority, cs.name, t.completed_at
-		FROM task_assignees ta
-		JOIN tasks t ON t.id = ta.task_id
+		SELECT tpp.task_id, u.id, u.display_name, t.priority, pcs.name, cs.name, tpp.is_active, tpp.activated_at, tpp.deactivated_at
+		FROM task_pic_phases tpp
+		JOIN tasks t ON t.id = tpp.task_id
 		JOIN projects p ON p.id = t.project_id
 		JOIN custom_statuses cs ON cs.id = t.status_id
-		JOIN users u ON u.id = ta.user_id
+		JOIN custom_statuses pcs ON pcs.id = tpp.status_id
+		JOIN users u ON u.id = tpp.user_id
 		WHERE cs.name <> 'CANCELED' AND `+where, args...)
 	if err != nil {
-		return nil, fmt.Errorf("repository.ListAssignees: %w", err)
+		return nil, fmt.Errorf("repository.ListMemberPhases: %w", err)
 	}
 	defer rows.Close()
 
-	list := make([]PerfAssignee, 0)
+	list := make([]PerfMemberPhase, 0)
 	for rows.Next() {
-		var a PerfAssignee
-		if err := rows.Scan(&a.TaskID, &a.UserID, &a.UserName, &a.Priority, &a.StatusName, &a.CompletedAt); err != nil {
-			return nil, fmt.Errorf("repository.ListAssignees: scan: %w", err)
+		var m PerfMemberPhase
+		if err := rows.Scan(&m.TaskID, &m.UserID, &m.UserName, &m.Priority, &m.PhaseStatus, &m.TaskStatus, &m.IsActive, &m.ActivatedAt, &m.DeactivatedAt); err != nil {
+			return nil, fmt.Errorf("repository.ListMemberPhases: scan: %w", err)
 		}
-		list = append(list, a)
+		list = append(list, m)
 	}
 	return list, rows.Err()
 }
@@ -258,7 +273,7 @@ func (r *PerformanceRepository) ListAssignees(ctx context.Context, exec db.Execu
 func (r *PerformanceRepository) ListPicPhases(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfPicPhase, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "tpp.activated_at", since)
 	rows, err := exec.Query(ctx, `
-		SELECT p.id, p.name, u.id, u.display_name, tpp.activated_at, tpp.acknowledged_at
+		SELECT p.id, p.name, u.id, u.display_name, tpp.activated_at, tpp.acknowledged_at, tpp.is_active, COALESCE(tpp.assigned_by = tpp.user_id, FALSE)
 		FROM task_pic_phases tpp
 		JOIN tasks t ON t.id = tpp.task_id
 		JOIN projects p ON p.id = t.project_id
@@ -272,7 +287,7 @@ func (r *PerformanceRepository) ListPicPhases(ctx context.Context, exec db.Execu
 	list := make([]PerfPicPhase, 0)
 	for rows.Next() {
 		var h PerfPicPhase
-		if err := rows.Scan(&h.ProjectID, &h.ProjectName, &h.UserID, &h.UserName, &h.ActivatedAt, &h.AcknowledgedAt); err != nil {
+		if err := rows.Scan(&h.ProjectID, &h.ProjectName, &h.UserID, &h.UserName, &h.ActivatedAt, &h.AcknowledgedAt, &h.IsActive, &h.SelfAssigned); err != nil {
 			return nil, fmt.Errorf("repository.ListPicPhases: scan: %w", err)
 		}
 		list = append(list, h)

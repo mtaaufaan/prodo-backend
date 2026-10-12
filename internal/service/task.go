@@ -759,14 +759,18 @@ func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, tas
 	if err != nil {
 		return err
 	}
-	if task.CreatedBy != actorID {
-		isPic, err := s.pics.IsActivePic(ctx, exec, taskID, actorID)
-		if err != nil {
-			return fmt.Errorf("service.SetCompleteness: %w", err)
-		}
-		if !isPic {
-			return fmt.Errorf("service.SetCompleteness: %w", domain.ErrForbidden)
-		}
+	// IG-126: hanya PIC aktif fase BACKLOG (task harus berstatus BACKLOG, jadi
+	// PIC aktifnya adalah PIC backlog). Pembuat task / PM yang bukan PIC tidak
+	// lagi boleh -- PM dapat menambahkan diri sebagai PIC paralel dulu.
+	if task.StatusName != "BACKLOG" {
+		return fmt.Errorf("service.SetCompleteness: %w", domain.ErrNotBacklogPic)
+	}
+	isPic, err := s.pics.IsActivePic(ctx, exec, taskID, actorID)
+	if err != nil {
+		return fmt.Errorf("service.SetCompleteness: %w", err)
+	}
+	if !isPic {
+		return fmt.Errorf("service.SetCompleteness: %w", domain.ErrNotBacklogPic)
 	}
 	role, err := s.resolveRole(ctx, exec, task.ProjectID, actorID, actorRole)
 	if err != nil {

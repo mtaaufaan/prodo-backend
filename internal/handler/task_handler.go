@@ -691,6 +691,8 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusConflict).JSON(response.Error("CIRCULAR_DEPENDENCY", "Menambahkan dependency ini akan membuat circular dependency.", fiber.Map{"cycle_path": cycleErr.CyclePath}))
 	case errors.Is(err, domain.ErrTaskIncomplete):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TASK_INCOMPLETE", "Task ini masih ditandai Belum Lengkap -- selesaikan kelengkapannya dulu sebelum mengubah status.", nil))
+	case errors.Is(err, domain.ErrNotBacklogPic):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_BACKLOG_PIC", "Hanya PIC backlog task ini yang dapat menyatakan lengkap atau belum lengkap.", nil))
 	case errors.Is(err, domain.ErrTaskNotInSprint):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TASK_NOT_IN_SPRINT", "Task ini belum berada di sprint yang sedang aktif -- pindahkan ke sprint aktif dulu sebelum mengubah status.", nil))
 	case errors.Is(err, domain.ErrCompletenessInvalid):

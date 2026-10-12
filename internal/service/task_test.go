@@ -93,6 +93,7 @@ func (f *fakeTaskRepo) ListAudit(_ context.Context, _ db.Executor, _ string, _, 
 }
 
 type fakeTaskPics struct {
+	notPic      bool // true -> IsActivePic mengembalikan false
 	group       []repository.PicGroupMember
 	deactivated int
 	phases      []string
@@ -110,7 +111,7 @@ func (f *fakeTaskPics) ListGroupForStatus(_ context.Context, _ db.Executor, _, _
 	return f.group, nil
 }
 func (f *fakeTaskPics) IsActivePic(_ context.Context, _ db.Executor, _, _ string) (bool, error) {
-	return true, nil
+	return !f.notPic, nil
 }
 
 type fakeTaskDeps struct{ notified []bool }

@@ -15,7 +15,7 @@ type fakePerformanceRepo struct {
 	tasks     []repository.PerfTask
 	sessions  []repository.PerfSession
 	firstWork map[string]time.Time
-	assignees []repository.PerfAssignee
+	phases    []repository.PerfMemberPhase
 	picPhases []repository.PerfPicPhase
 	backlog   []repository.PerfBacklogItem
 }
@@ -32,8 +32,8 @@ func (f *fakePerformanceRepo) FirstWorkStarted(_ context.Context, _ db.Executor,
 	}
 	return f.firstWork, nil
 }
-func (f *fakePerformanceRepo) ListAssignees(_ context.Context, _ db.Executor, _, _ string, _ *time.Time) ([]repository.PerfAssignee, error) {
-	return f.assignees, nil
+func (f *fakePerformanceRepo) ListMemberPhases(_ context.Context, _ db.Executor, _, _ string, _ *time.Time) ([]repository.PerfMemberPhase, error) {
+	return f.phases, nil
 }
 func (f *fakePerformanceRepo) ListPicPhases(_ context.Context, _ db.Executor, _, _ string, _ *time.Time) ([]repository.PerfPicPhase, error) {
 	return f.picPhases, nil
@@ -445,15 +445,18 @@ func TestDashboard_MemberAckRate_ExcludesPendingFromAverage(t *testing.T) {
 	acked := activated.Add(6 * time.Hour) // 6 jam
 	repo := &fakePerformanceRepo{picPhases: []repository.PerfPicPhase{
 		{ProjectID: "proj-1", ProjectName: "Project 1", UserID: "u1", UserName: "Budi", ActivatedAt: activated, AcknowledgedAt: &acked},
-		{ProjectID: "proj-1", ProjectName: "Project 1", UserID: "u1", UserName: "Budi", ActivatedAt: activated, AcknowledgedAt: nil}, // masih pending
+		{ProjectID: "proj-1", ProjectName: "Project 1", UserID: "u1", UserName: "Budi", ActivatedAt: activated, AcknowledgedAt: nil, IsActive: true}, // masih pending (fase aktif)
 	}}
 	svc := newTestPerformanceService(repo, "", "admin_workspace")
 	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 0, "aw-1", "member")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// User u1 tidak punya baris di ListAssignees, jadi tidak muncul di Members --
-	// tes ini fokus ke HandoffDelay (agregat per project, sumbernya sama picPhases).
+	// Member Performance berbasis PIC (IG-126): u1 hanya punya fase PIC (tanpa task
+	// di cakupan) tetap muncul di Members dengan data acknowledge-nya.
+	if len(result.Members) != 1 || result.Members[0].UserID != "u1" || result.Members[0].AckPendingCount != 1 {
+		t.Errorf("Members = %+v, want u1 dengan 1 ack pending", result.Members)
+	}
 	if len(result.HandoffDelay) != 1 {
 		t.Fatalf("HandoffDelay = %+v, want 1 project", result.HandoffDelay)
 	}
