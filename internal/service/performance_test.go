@@ -445,7 +445,7 @@ func TestDashboard_MemberAckRate_ExcludesPendingFromAverage(t *testing.T) {
 	acked := activated.Add(6 * time.Hour) // 6 jam
 	repo := &fakePerformanceRepo{picPhases: []repository.PerfPicPhase{
 		{ProjectID: "proj-1", ProjectName: "Project 1", UserID: "u1", UserName: "Budi", ActivatedAt: activated, AcknowledgedAt: &acked},
-		{ProjectID: "proj-1", ProjectName: "Project 1", UserID: "u1", UserName: "Budi", ActivatedAt: activated, AcknowledgedAt: nil}, // masih pending
+		{ProjectID: "proj-1", ProjectName: "Project 1", UserID: "u1", UserName: "Budi", ActivatedAt: activated, AcknowledgedAt: nil, IsActive: true}, // masih pending (fase aktif)
 	}}
 	svc := newTestPerformanceService(repo, "", "admin_workspace")
 	result, err := svc.DashboardForWorkspace(context.Background(), nil, "ws-1", "", 0, "aw-1", "member")

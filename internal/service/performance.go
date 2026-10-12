@@ -192,7 +192,8 @@ type MemberStat struct {
 	CompletionRateWeighted float64
 	AvgCompletionHours     *float64
 	AckAvgHours            *float64
-	AckPendingCount        int
+	AckPendingCount        int      // fase AKTIF yang belum di-acknowledge
+	AckUnconfirmedCount    int      // fase lama yang diserahkan tanpa pernah di-acknowledge (tidak bisa lagi)
 	ReadinessCount         int      // task yang selesai disiapkan (sudah dinyatakan lengkap)
 	ReadinessAvgHours      *float64 // rata-rata jam task terbentuk -> lengkap (kali terakhir)
 	ReadinessPreparing     int      // task BACKLOG belum lengkap yang sedang dipegang (tidak masuk rata-rata)
@@ -234,10 +235,11 @@ type BacklogAgeStat struct {
 }
 
 type HandoffStat struct {
-	ProjectID    string
-	ProjectName  string
-	AvgHours     *float64
-	PendingCount int
+	ProjectID        string
+	ProjectName      string
+	AvgHours         *float64
+	PendingCount     int // fase AKTIF yang belum di-acknowledge
+	UnconfirmedCount int // fase lama diserahkan tanpa acknowledge
 }
 
 // dashboard -- inti perhitungan, dipanggil kedua entry point di atas
@@ -453,9 +455,10 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 
 	// --- Handoff Delay per project ---
 	type handoffAgg struct {
-		name    string
-		hours   []float64
-		pending int
+		name        string
+		hours       []float64
+		pending     int
+		unconfirmed int
 	}
 	byProject := map[string]*handoffAgg{}
 	for i := range picPhases {
@@ -465,14 +468,19 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 			agg = &handoffAgg{name: h.ProjectName}
 			byProject[h.ProjectID] = agg
 		}
-		if h.AcknowledgedAt != nil {
-			agg.hours = append(agg.hours, h.AcknowledgedAt.Sub(h.ActivatedAt).Hours())
-		} else {
+		switch kind, hours := classifyAck(h); kind {
+		case ackAuto:
+			// bukan serah terima nyata: tidak ikut metrik
+		case ackDone:
+			agg.hours = append(agg.hours, hours)
+		case ackPending:
 			agg.pending++
+		case ackUnconfirmed:
+			agg.unconfirmed++
 		}
 	}
 	for projID, agg := range byProject {
-		stat := HandoffStat{ProjectID: projID, ProjectName: agg.name, PendingCount: agg.pending}
+		stat := HandoffStat{ProjectID: projID, ProjectName: agg.name, PendingCount: agg.pending, UnconfirmedCount: agg.unconfirmed}
 		if len(agg.hours) > 0 {
 			v := mean(agg.hours)
 			stat.AvgHours = &v
@@ -485,6 +493,37 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 }
 
 var priorityOrder = []string{"critical", "high", "medium", "low"}
+
+type ackKind int
+
+const (
+	ackAuto        ackKind = iota // tidak ada serah terima nyata: tidak ikut metrik
+	ackDone                       // di-acknowledge: jeda masuk rata-rata
+	ackPending                    // fase AKTIF belum di-acknowledge
+	ackUnconfirmed                // fase lama diserahkan tanpa pernah di-acknowledge
+)
+
+// classifyAck -- klasifikasi satu fase PIC untuk Acknowledge Rate / Handoff Delay.
+// Fase yang ditetapkan sendiri (PIC backlog otomatis pembuat task) dan fase yang
+// diterima otomatis saat itu juga (mis. hasil import: acknowledged_at = activated_at)
+// bukan serah terima nyata -- tidak ikut rata-rata maupun hitungan pending.
+// Fase lama yang tidak pernah di-acknowledge tidak lagi "pending" (tombol
+// Acknowledge hanya ada selama fase aktif): dihitung terpisah sebagai tidak dikonfirmasi.
+func classifyAck(h *repository.PerfPicPhase) (kind ackKind, hours float64) {
+	if h.SelfAssigned {
+		return ackAuto, 0
+	}
+	if h.AcknowledgedAt != nil {
+		if !h.AcknowledgedAt.After(h.ActivatedAt) {
+			return ackAuto, 0
+		}
+		return ackDone, h.AcknowledgedAt.Sub(h.ActivatedAt).Hours()
+	}
+	if h.IsActive {
+		return ackPending, 0
+	}
+	return ackUnconfirmed, 0
+}
 
 // nonWorkPhaseStatuses -- fase PIC di status ini BUKAN fase kerja: BACKLOG
 // dinilai terpisah (Kesiapan Task), DONE/CANCELED status akhir, BLOCKED menunggu.
@@ -591,13 +630,19 @@ func memberPerformance(tasks []repository.PerfTask, phases []repository.PerfMemb
 
 	ackByUser := map[string][]float64{}
 	ackPendingByUser := map[string]int{}
+	ackUnconfirmedByUser := map[string]int{}
 	for i := range ackPhases {
 		h := &ackPhases[i]
 		get(h.UserID, h.UserName)
-		if h.AcknowledgedAt != nil {
-			ackByUser[h.UserID] = append(ackByUser[h.UserID], h.AcknowledgedAt.Sub(h.ActivatedAt).Hours())
-		} else {
+		switch kind, hours := classifyAck(h); kind {
+		case ackAuto:
+			// bukan serah terima nyata: tidak ikut metrik
+		case ackDone:
+			ackByUser[h.UserID] = append(ackByUser[h.UserID], hours)
+		case ackPending:
 			ackPendingByUser[h.UserID]++
+		case ackUnconfirmed:
+			ackUnconfirmedByUser[h.UserID]++
 		}
 	}
 
@@ -605,7 +650,7 @@ func memberPerformance(tasks []repository.PerfTask, phases []repository.PerfMemb
 	for userID, m := range members {
 		stat := MemberStat{
 			UserID: userID, UserName: m.name, ActiveByPriority: map[string]int{},
-			TotalCount: len(m.work), DoneCount: len(m.done), AckPendingCount: ackPendingByUser[userID],
+			TotalCount: len(m.work), DoneCount: len(m.done), AckPendingCount: ackPendingByUser[userID], AckUnconfirmedCount: ackUnconfirmedByUser[userID],
 			ReadinessCount: len(m.readyHours), ReadinessPreparing: m.preparing, ReadinessReopens: m.reopens,
 		}
 		for _, p := range m.load {

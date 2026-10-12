@@ -100,7 +100,7 @@ func dashboardToMap(d *service.DashboardResult) fiber.Map {
 			"user_id": m.UserID, "user_name": m.UserName, "active_by_priority": m.ActiveByPriority,
 			"total_count": m.TotalCount, "done_count": m.DoneCount,
 			"completion_rate_raw": m.CompletionRateRaw, "completion_rate_weighted": m.CompletionRateWeighted,
-			"avg_completion_hours": m.AvgCompletionHours, "ack_avg_hours": m.AckAvgHours, "ack_pending_count": m.AckPendingCount,
+			"avg_completion_hours": m.AvgCompletionHours, "ack_avg_hours": m.AckAvgHours, "ack_pending_count": m.AckPendingCount, "ack_unconfirmed_count": m.AckUnconfirmedCount,
 			"readiness_count": m.ReadinessCount, "readiness_avg_hours": m.ReadinessAvgHours,
 			"readiness_preparing": m.ReadinessPreparing, "readiness_reopens": m.ReadinessReopens,
 		}
@@ -122,7 +122,7 @@ func dashboardToMap(d *service.DashboardResult) fiber.Map {
 	handoff := make([]fiber.Map, len(d.HandoffDelay))
 	for i, h := range d.HandoffDelay {
 		handoff[i] = fiber.Map{
-			"project_id": h.ProjectID, "project_name": h.ProjectName, "avg_hours": h.AvgHours, "pending_count": h.PendingCount,
+			"project_id": h.ProjectID, "project_name": h.ProjectName, "avg_hours": h.AvgHours, "pending_count": h.PendingCount, "unconfirmed_count": h.UnconfirmedCount,
 		}
 	}
 
