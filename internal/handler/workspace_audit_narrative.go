@@ -146,6 +146,8 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 			workspaceAuditMetaNumber(meta, "success_count"), workspaceAuditMetaNumber(meta, "failed_count"))
 	case "project_import.report_downloaded":
 		return fmt.Sprintf(`Laporan import %q diunduh`, target)
+	case "timesheet.estimates_recalculated":
+		return fmt.Sprintf(`Estimasi jam tercatat project %q dihitung ulang dari riwayat tanggal status (%s entri, %s task)`, target, workspaceAuditMetaNumber(workspaceAuditStateAfter(e), "entries"), workspaceAuditMetaNumber(workspaceAuditStateAfter(e), "tasks"))
 	case "timesheet.report_downloaded":
 		return fmt.Sprintf(`Timesheet project %q diekspor (CSV, %s baris)`, target, workspaceAuditMetaNumber(meta, "rows"))
 	case "user.login":
@@ -173,6 +175,17 @@ func parseWorkspaceAuditMetadata(e *repository.WorkspaceAuditLogEntry) map[strin
 	}
 	var m map[string]any
 	if err := json.Unmarshal(e.Metadata, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+func workspaceAuditStateAfter(e *repository.WorkspaceAuditLogEntry) map[string]any {
+	if len(e.StateAfter) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(e.StateAfter, &m); err != nil {
 		return nil
 	}
 	return m

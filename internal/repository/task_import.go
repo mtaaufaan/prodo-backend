@@ -81,8 +81,8 @@ func (r *TaskRepository) CreateImported(ctx context.Context, exec db.Executor, i
 		completedAt = time.Now()
 	}
 	err = exec.QueryRow(ctx, `
-		INSERT INTO tasks (project_id, sprint_id, status_id, title, priority, completeness, start_date, due_date, estimated_hours, story_points, task_code, created_by, completed_at, created_at, description, position)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()), $15,
+		INSERT INTO tasks (project_id, sprint_id, status_id, title, priority, completeness, start_date, due_date, estimated_hours, story_points, task_code, created_by, completed_at, created_at, description, is_imported, position)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()), $15, TRUE,
 			COALESCE((SELECT MAX(position) FROM tasks WHERE project_id = $1 AND status_id = $3), 0) + 1)
 		RETURNING id
 	`, in.ProjectID, in.SprintID, in.StatusID, in.Title, in.Priority, completeness, in.StartDate, in.DueDate, in.EstimatedHours, in.StoryPoints,

@@ -27,14 +27,20 @@ type timesheetReportRepository interface {
 	LogExport(ctx context.Context, exec db.Executor, actorID, actorRole, projectID, workspaceID, projectName string, rows, loggedMinutes int) error
 }
 
-type TimesheetReportService struct {
-	repo timesheetReportRepository
-	pm   performancePMChecker
-	rbac sprintWorkspaceRoleChecker
+// timesheetRecalculator -- TimesheetEstimateService.Recalculate (IG-129).
+type timesheetRecalculator interface {
+	Recalculate(ctx context.Context, exec db.Executor, projectID, workspaceID, projectName, actorID, actorRole string) (*EstimateResult, error)
 }
 
-func NewTimesheetReportService(repo timesheetReportRepository, pm performancePMChecker, rbac sprintWorkspaceRoleChecker) *TimesheetReportService {
-	return &TimesheetReportService{repo: repo, pm: pm, rbac: rbac}
+type TimesheetReportService struct {
+	repo      timesheetReportRepository
+	pm        performancePMChecker
+	rbac      sprintWorkspaceRoleChecker
+	estimator timesheetRecalculator
+}
+
+func NewTimesheetReportService(repo timesheetReportRepository, pm performancePMChecker, rbac sprintWorkspaceRoleChecker, estimator timesheetRecalculator) *TimesheetReportService {
+	return &TimesheetReportService{repo: repo, pm: pm, rbac: rbac, estimator: estimator}
 }
 
 // TimesheetStatusHours -- satu batang "JAM TERCATAT PER STATUS".
@@ -58,62 +64,65 @@ type TimesheetTaskRow struct {
 
 // TimesheetMemberRow -- satu baris Per-Member.
 type TimesheetMemberRow struct {
-	UserID      string
-	Name        string
-	Role        string
-	TaskCount   int
-	Hours       float64
-	ActiveCount int
+	UserID        string
+	Name          string
+	Role          string
+	TaskCount     int
+	Hours         float64
+	EstimateHours float64 // bagian Hours dari estimasi import
+	ActiveCount   int
 }
 
 type TimesheetSummary struct {
-	ProjectName     string
-	LoggedHours     float64
-	EstimateHours   float64
-	OverCount       int
-	OverCodes       []string // maks 2 kode pertama (catatan kartu)
-	MembersInvolved int
-	PendingCount    int
-	ByStatus        []TimesheetStatusHours
-	Tasks           []TimesheetTaskRow
-	Members         []TimesheetMemberRow
+	ProjectName         string
+	LoggedHours         float64
+	EstimatedFromImport float64 // bagian LoggedHours dari estimasi import (IG-129)
+	EstimateHours       float64
+	OverCount           int
+	OverCodes           []string // maks 2 kode pertama (catatan kartu)
+	MembersInvolved     int
+	PendingCount        int
+	ByStatus            []TimesheetStatusHours
+	Tasks               []TimesheetTaskRow
+	Members             []TimesheetMemberRow
 }
 
 func minutesToHours(m int) float64 { return float64(m) / 60 }
 
 // authorize -- PM project ini, Admin Workspace, atau GA/PA. Mengembalikan
 // workspaceID + nama project (dipakai audit export + nama berkas).
-func (s *TimesheetReportService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (workspaceID, name string, err error) {
+// Juga mengembalikan role EFEKTIF untuk audit (rute project tanpa RequireRole).
+func (s *TimesheetReportService) authorize(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (workspaceID, name, auditRole string, err error) {
 	if projectID == "" {
-		return "", "", fmt.Errorf("service.TimesheetReport: %w", domain.ErrInvalidInput)
+		return "", "", "", fmt.Errorf("service.TimesheetReport: %w", domain.ErrInvalidInput)
 	}
 	workspaceID, name, err = s.repo.ProjectInfo(ctx, exec, projectID)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if actorRole == "platform_admin" || actorRole == "group_admin" {
-		return workspaceID, name, nil
+		return workspaceID, name, actorRole, nil
 	}
 	isPM, err := s.pm.IsPM(ctx, exec, projectID, actorID)
 	if err != nil {
-		return "", "", fmt.Errorf("service.TimesheetReport: %w", err)
+		return "", "", "", fmt.Errorf("service.TimesheetReport: %w", err)
 	}
 	if isPM {
-		return workspaceID, name, nil
+		return workspaceID, name, "project_manager", nil
 	}
 	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
 	if err != nil {
-		return "", "", fmt.Errorf("service.TimesheetReport: %w", err)
+		return "", "", "", fmt.Errorf("service.TimesheetReport: %w", err)
 	}
 	if role != "admin_workspace" {
-		return "", "", fmt.Errorf("service.TimesheetReport: %w", domain.ErrForbidden)
+		return "", "", "", fmt.Errorf("service.TimesheetReport: %w", domain.ErrForbidden)
 	}
-	return workspaceID, name, nil
+	return workspaceID, name, role, nil
 }
 
 // Summary -- GET /projects/:id/timesheet.
 func (s *TimesheetReportService) Summary(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (*TimesheetSummary, error) {
-	_, name, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	_, name, _, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return nil, err
 	}
@@ -151,10 +160,11 @@ func buildTimesheetSummary(projectName string, statuses []repository.TimesheetSt
 		out.ByStatus = append(out.ByStatus, TimesheetStatusHours{Name: st.Name, ColorToken: st.ColorToken, IsUndefined: st.IsUndefined})
 		statusIdx[st.Name] = i
 	}
-	totalMinutes := 0
+	totalMinutes, importMinutes := 0, 0
 	for i := range tasks {
 		t := &tasks[i]
 		totalMinutes += t.LoggedMinutes
+		importMinutes += t.EstimateMinutes
 		out.EstimateHours += t.EstimatedHours
 		if i, ok := statusIdx[t.StatusName]; ok {
 			out.ByStatus[i].Hours += minutesToHours(t.LoggedMinutes)
@@ -172,11 +182,12 @@ func buildTimesheetSummary(projectName string, statuses []repository.TimesheetSt
 		}
 	}
 	out.LoggedHours = minutesToHours(totalMinutes)
+	out.EstimatedFromImport = minutesToHours(importMinutes)
 	for i := range members {
 		m := &members[i]
 		out.Members = append(out.Members, TimesheetMemberRow{
 			UserID: m.UserID, Name: m.Name, Role: m.Role, TaskCount: m.TaskCount,
-			Hours: minutesToHours(m.LoggedMinutes), ActiveCount: m.ActiveCount,
+			Hours: minutesToHours(m.LoggedMinutes), EstimateHours: minutesToHours(m.EstimateMinutes), ActiveCount: m.ActiveCount,
 		})
 	}
 	return out
@@ -185,7 +196,7 @@ func buildTimesheetSummary(projectName string, statuses []repository.TimesheetSt
 // Entries -- GET /projects/:id/timesheet/entries: antrian persetujuan
 // (entri manual) dengan filter approval_status.
 func (s *TimesheetReportService) Entries(ctx context.Context, exec db.Executor, projectID, approvalStatus, actorID, actorRole string) ([]repository.TimesheetPendingEntry, error) {
-	if _, _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	if _, _, _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
 		return nil, err
 	}
 	switch approvalStatus {
@@ -210,7 +221,7 @@ type ExportRow struct {
 // Export -- GET /projects/:id/timesheet/export: seluruh task + jam, dan
 // mencatat aksi ekspor di audit trail (desain: aksi ACCESS "Ekspor timesheet").
 func (s *TimesheetReportService) Export(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (projectName string, rows []ExportRow, err error) {
-	workspaceID, name, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	workspaceID, name, auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return "", nil, err
 	}
@@ -225,10 +236,20 @@ func (s *TimesheetReportService) Export(ctx context.Context, exec db.Executor, p
 		totalMinutes += t.LoggedMinutes
 		rows = append(rows, ExportRow{Code: t.Code, Title: t.Title, StatusName: t.StatusName, ActivePICs: t.ActivePICs, EstimatedHours: t.EstimatedHours, LoggedHours: minutesToHours(t.LoggedMinutes)})
 	}
-	if err := s.repo.LogExport(ctx, exec, actorID, actorRole, projectID, workspaceID, name, len(rows), totalMinutes); err != nil {
+	if err := s.repo.LogExport(ctx, exec, actorID, auditRole, projectID, workspaceID, name, len(rows), totalMinutes); err != nil {
 		return "", nil, fmt.Errorf("service.TimesheetExport: audit: %w", err)
 	}
 	return name, rows, nil
+}
+
+// RecalculateEstimates -- POST /projects/:id/timesheet/estimates/recalculate:
+// hitung ulang estimasi jam task hasil import (PM/AW/GA/PA).
+func (s *TimesheetReportService) RecalculateEstimates(ctx context.Context, exec db.Executor, projectID, actorID, actorRole string) (*EstimateResult, error) {
+	workspaceID, name, auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	return s.estimator.Recalculate(ctx, exec, projectID, workspaceID, name, actorID, auditRole)
 }
 
 // Mine -- GET /me/timesheets: timesheet pribadi, semua project. from/to

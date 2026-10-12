@@ -28,23 +28,25 @@ type TimesheetStatus struct {
 
 // TimesheetTask -- satu task project + jam tercatat (menit) dan PIC aktif.
 type TimesheetTask struct {
-	TaskID         string
-	Code           string
-	Title          string
-	StatusName     string
-	EstimatedHours float64
-	LoggedMinutes  int
-	ActivePICs     []string
+	TaskID          string
+	Code            string
+	Title           string
+	StatusName      string
+	EstimatedHours  float64
+	LoggedMinutes   int
+	EstimateMinutes int // bagian LoggedMinutes yang berasal dari estimasi import (IG-129)
+	ActivePICs      []string
 }
 
 // TimesheetMember -- satu baris tabel Per-Member.
 type TimesheetMember struct {
-	UserID        string
-	Name          string
-	Role          string
-	LoggedMinutes int
-	TaskCount     int // task berbeda yang dicatat jamnya
-	ActiveCount   int // task belum selesai yang dipegang sebagai PIC aktif
+	UserID          string
+	Name            string
+	Role            string
+	LoggedMinutes   int
+	EstimateMinutes int // bagian LoggedMinutes yang berasal dari estimasi import
+	TaskCount       int // task berbeda yang dicatat jamnya
+	ActiveCount     int // task belum selesai yang dipegang sebagai PIC aktif
 }
 
 // TimesheetPendingEntry -- entri manual + konteks task untuk antrian
@@ -101,6 +103,8 @@ func (r *TimesheetReportRepository) ListTasks(ctx context.Context, exec db.Execu
 		SELECT t.id, t.task_code, t.title, cs.name, COALESCE(t.estimated_hours, 0)::float8,
 		       COALESCE((SELECT SUM(te.duration_minutes) FROM time_entries te
 		                 WHERE te.task_id = t.id AND te.is_approved = TRUE), 0)::int,
+		       COALESCE((SELECT SUM(te.duration_minutes) FROM time_entries te
+		                 WHERE te.task_id = t.id AND te.is_approved = TRUE AND te.is_estimate), 0)::int,
 		       COALESCE((SELECT array_agg(u.display_name ORDER BY u.display_name)
 		                 FROM task_pic_phases tpp JOIN users u ON u.id = tpp.user_id
 		                 WHERE tpp.task_id = t.id AND tpp.is_active), ARRAY[]::text[])
@@ -116,7 +120,7 @@ func (r *TimesheetReportRepository) ListTasks(ctx context.Context, exec db.Execu
 	list := make([]TimesheetTask, 0)
 	for rows.Next() {
 		var t TimesheetTask
-		if err := rows.Scan(&t.TaskID, &t.Code, &t.Title, &t.StatusName, &t.EstimatedHours, &t.LoggedMinutes, &t.ActivePICs); err != nil {
+		if err := rows.Scan(&t.TaskID, &t.Code, &t.Title, &t.StatusName, &t.EstimatedHours, &t.LoggedMinutes, &t.EstimateMinutes, &t.ActivePICs); err != nil {
 			return nil, fmt.Errorf("repository.TimesheetListTasks: scan: %w", err)
 		}
 		list = append(list, t)
@@ -131,7 +135,8 @@ func (r *TimesheetReportRepository) ListTasks(ctx context.Context, exec db.Execu
 func (r *TimesheetReportRepository) ListMembers(ctx context.Context, exec db.Executor, projectID string) ([]TimesheetMember, error) {
 	rows, err := exec.Query(ctx, `
 		WITH logged AS (
-			SELECT te.user_id, COUNT(DISTINCT te.task_id) AS task_count, SUM(te.duration_minutes)::int AS minutes
+			SELECT te.user_id, COUNT(DISTINCT te.task_id) AS task_count, SUM(te.duration_minutes)::int AS minutes,
+			       COALESCE(SUM(te.duration_minutes) FILTER (WHERE te.is_estimate), 0)::int AS est_minutes
 			FROM time_entries te JOIN tasks t ON t.id = te.task_id
 			WHERE t.project_id = $1 AND t.deleted_at IS NULL AND te.is_approved = TRUE
 			GROUP BY te.user_id
@@ -149,7 +154,7 @@ func (r *TimesheetReportRepository) ListMembers(ctx context.Context, exec db.Exe
 		                (SELECT pm.role::text FROM project_members pm WHERE pm.project_id = $1 AND pm.user_id = u.id),
 		                CASE WHEN EXISTS (SELECT 1 FROM project_managers pg WHERE pg.project_id = $1 AND pg.user_id = u.id)
 		                     THEN 'project_manager' END, ''),
-		       COALESCE(l.minutes, 0), COALESCE(l.task_count, 0), COALESCE(a.active_count, 0)
+		       COALESCE(l.minutes, 0), COALESCE(l.est_minutes, 0), COALESCE(l.task_count, 0), COALESCE(a.active_count, 0)
 		FROM users u
 		LEFT JOIN logged l ON l.user_id = u.id
 		LEFT JOIN active a ON a.user_id = u.id
@@ -165,7 +170,7 @@ func (r *TimesheetReportRepository) ListMembers(ctx context.Context, exec db.Exe
 	list := make([]TimesheetMember, 0)
 	for rows.Next() {
 		var m TimesheetMember
-		if err := rows.Scan(&m.UserID, &m.Name, &m.Role, &m.LoggedMinutes, &m.TaskCount, &m.ActiveCount); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Name, &m.Role, &m.LoggedMinutes, &m.EstimateMinutes, &m.TaskCount, &m.ActiveCount); err != nil {
 			return nil, fmt.Errorf("repository.TimesheetListMembers: scan: %w", err)
 		}
 		list = append(list, m)
@@ -178,7 +183,7 @@ func (r *TimesheetReportRepository) PendingCount(ctx context.Context, exec db.Ex
 	var n int
 	err := exec.QueryRow(ctx, `
 		SELECT COUNT(*) FROM time_entries te JOIN tasks t ON t.id = te.task_id
-		WHERE t.project_id = $1 AND t.deleted_at IS NULL AND te.entry_type = 'manual' AND te.is_approved IS NULL
+		WHERE t.project_id = $1 AND t.deleted_at IS NULL AND te.entry_type = 'manual' AND te.is_approved IS NULL AND NOT te.is_estimate
 	`, projectID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("repository.TimesheetPendingCount: %w", err)
@@ -191,12 +196,12 @@ func (r *TimesheetReportRepository) PendingCount(ctx context.Context, exec db.Ex
 func (r *TimesheetReportRepository) ListManualEntries(ctx context.Context, exec db.Executor, projectID, approvalStatus string) ([]TimesheetPendingEntry, error) {
 	query := `
 		SELECT te.id, te.task_id, te.user_id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
-		       te.started_at, te.ended_at, te.duration_minutes, te.entry_type, te.note, te.is_approved, te.rejection_note,
+		       te.started_at, te.ended_at, te.duration_minutes, te.entry_type, te.note, te.is_approved, te.rejection_note, te.is_estimate,
 		       te.created_at, te.updated_at, t.task_code, t.title
 		FROM time_entries te
 		JOIN tasks t ON t.id = te.task_id
 		JOIN users u ON u.id = te.user_id
-		WHERE t.project_id = $1 AND t.deleted_at IS NULL AND te.entry_type = 'manual'`
+		WHERE t.project_id = $1 AND t.deleted_at IS NULL AND te.entry_type = 'manual' AND NOT te.is_estimate`
 	switch approvalStatus {
 	case "pending":
 		query += " AND te.is_approved IS NULL"
@@ -215,7 +220,7 @@ func (r *TimesheetReportRepository) ListManualEntries(ctx context.Context, exec 
 	for rows.Next() {
 		var e TimesheetPendingEntry
 		if err := rows.Scan(&e.ID, &e.TaskID, &e.UserID, &e.UserName, &e.UserEmail, &e.StartedAt, &e.EndedAt, &e.DurationMinutes,
-			&e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.CreatedAt, &e.UpdatedAt, &e.TaskCode, &e.TaskTitle); err != nil {
+			&e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.IsEstimate, &e.CreatedAt, &e.UpdatedAt, &e.TaskCode, &e.TaskTitle); err != nil {
 			return nil, fmt.Errorf("repository.TimesheetListManualEntries: scan: %w", err)
 		}
 		list = append(list, e)
@@ -229,7 +234,7 @@ func (r *TimesheetReportRepository) ListManualEntries(ctx context.Context, exec 
 func (r *TimesheetReportRepository) ListMine(ctx context.Context, exec db.Executor, userID string, from, to *time.Time) ([]MyTimesheetEntry, error) {
 	query := `
 		SELECT te.id, te.task_id, te.user_id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
-		       te.started_at, te.ended_at, te.duration_minutes, te.entry_type, te.note, te.is_approved, te.rejection_note,
+		       te.started_at, te.ended_at, te.duration_minutes, te.entry_type, te.note, te.is_approved, te.rejection_note, te.is_estimate,
 		       te.created_at, te.updated_at, t.task_code, t.title, p.id, p.name
 		FROM time_entries te
 		JOIN tasks t ON t.id = te.task_id
@@ -255,7 +260,7 @@ func (r *TimesheetReportRepository) ListMine(ctx context.Context, exec db.Execut
 	for rows.Next() {
 		var e MyTimesheetEntry
 		if err := rows.Scan(&e.ID, &e.TaskID, &e.UserID, &e.UserName, &e.UserEmail, &e.StartedAt, &e.EndedAt, &e.DurationMinutes,
-			&e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.CreatedAt, &e.UpdatedAt,
+			&e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.IsEstimate, &e.CreatedAt, &e.UpdatedAt,
 			&e.TaskCode, &e.TaskTitle, &e.ProjectID, &e.ProjectName); err != nil {
 			return nil, fmt.Errorf("repository.TimesheetListMine: scan: %w", err)
 		}

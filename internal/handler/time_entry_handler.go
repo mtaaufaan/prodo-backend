@@ -45,6 +45,7 @@ func timeEntryJSON(e *repository.TimeEntry) fiber.Map {
 		"note":             e.Note,
 		"approval_status":  status,
 		"rejection_note":   e.RejectionNote,
+		"is_estimate":      e.IsEstimate,
 		"created_at":       e.CreatedAt,
 		"updated_at":       e.UpdatedAt,
 	}

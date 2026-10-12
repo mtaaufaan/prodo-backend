@@ -30,6 +30,7 @@ type TimeEntry struct {
 	Note            *string
 	IsApproved      *bool // nil=pending, true=approved, false=rejected
 	RejectionNote   *string
+	IsEstimate      bool // entri hasil estimasi import (IG-129), bukan jam yang dicatat orangnya
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -160,9 +161,9 @@ func (r *TimeEntryRepository) HasOverlap(ctx context.Context, exec db.Executor, 
 func (r *TimeEntryRepository) Get(ctx context.Context, exec db.Executor, id string) (*TimeEntry, error) {
 	var e TimeEntry
 	err := exec.QueryRow(ctx, `
-		SELECT id, task_id, user_id, started_at, ended_at, duration_minutes, entry_type, note, is_approved, rejection_note, created_at, updated_at
+		SELECT id, task_id, user_id, started_at, ended_at, duration_minutes, entry_type, note, is_approved, rejection_note, is_estimate, created_at, updated_at
 		FROM time_entries WHERE id = $1
-	`, id).Scan(&e.ID, &e.TaskID, &e.UserID, &e.StartedAt, &e.EndedAt, &e.DurationMinutes, &e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.CreatedAt, &e.UpdatedAt)
+	`, id).Scan(&e.ID, &e.TaskID, &e.UserID, &e.StartedAt, &e.EndedAt, &e.DurationMinutes, &e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.IsEstimate, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("repository.Get: %w", domain.ErrTaskNotFound)
@@ -222,7 +223,7 @@ func (r *TimeEntryRepository) Reject(ctx context.Context, exec db.Executor, id, 
 func (r *TimeEntryRepository) ListForTask(ctx context.Context, exec db.Executor, taskID, approvalStatus, userID string) ([]TimeEntry, error) {
 	query := `
 		SELECT te.id, te.task_id, te.user_id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
-		       te.started_at, te.ended_at, te.duration_minutes, te.entry_type, te.note, te.is_approved, te.rejection_note, te.created_at, te.updated_at
+		       te.started_at, te.ended_at, te.duration_minutes, te.entry_type, te.note, te.is_approved, te.rejection_note, te.is_estimate, te.created_at, te.updated_at
 		FROM time_entries te
 		JOIN users u ON u.id = te.user_id
 		WHERE te.task_id = $1
@@ -251,7 +252,7 @@ func (r *TimeEntryRepository) ListForTask(ctx context.Context, exec db.Executor,
 	list := make([]TimeEntry, 0)
 	for rows.Next() {
 		var e TimeEntry
-		if err := rows.Scan(&e.ID, &e.TaskID, &e.UserID, &e.UserName, &e.UserEmail, &e.StartedAt, &e.EndedAt, &e.DurationMinutes, &e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.UserID, &e.UserName, &e.UserEmail, &e.StartedAt, &e.EndedAt, &e.DurationMinutes, &e.EntryType, &e.Note, &e.IsApproved, &e.RejectionNote, &e.IsEstimate, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("repository.ListForTask: scan: %w", err)
 		}
 		list = append(list, e)

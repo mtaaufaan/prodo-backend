@@ -264,7 +264,9 @@ func run() error {
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc)
 	timesheetReportRepo := repository.NewTimesheetReportRepository()
-	timesheetReportSvc := service.NewTimesheetReportService(timesheetReportRepo, projectRepo, rbacSvc)
+	timesheetEstimateSvc := service.NewTimesheetEstimateService(repository.NewTimesheetEstimateRepository())
+	timesheetReportSvc := service.NewTimesheetReportService(timesheetReportRepo, projectRepo, rbacSvc, timesheetEstimateSvc)
+	projectImportSvc.SetTimesheetEstimator(timesheetEstimateSvc)
 	checklistItemSvc := service.NewTaskChecklistItemService(checklistItemRepo)
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
@@ -872,6 +874,7 @@ func run() error {
 	v1.Get("/projects/:projectId/timesheet", jwtAuth, dbCtx, timesheetReportHandler.Summary)
 	v1.Get("/projects/:projectId/timesheet/entries", jwtAuth, dbCtx, timesheetReportHandler.Entries)
 	v1.Get("/projects/:projectId/timesheet/export", jwtAuth, dbCtx, timesheetReportHandler.Export)
+	v1.Post("/projects/:projectId/timesheet/estimates/recalculate", jwtAuth, dbCtx, timesheetReportHandler.RecalculateEstimates)
 	v1.Get("/me/timesheets", jwtAuth, dbCtx, timesheetReportHandler.Mine)
 
 	// SUB-TASK / checklist item (IG-97 susulan).

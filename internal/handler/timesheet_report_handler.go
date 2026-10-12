@@ -53,10 +53,10 @@ func (h *TimesheetReportHandler) Summary(c *fiber.Ctx) error {
 	members := make([]fiber.Map, len(sum.Members))
 	for i := range sum.Members {
 		m := &sum.Members[i]
-		members[i] = fiber.Map{"user_id": m.UserID, "user_name": m.Name, "role": m.Role, "task_count": m.TaskCount, "hours": m.Hours, "active_count": m.ActiveCount}
+		members[i] = fiber.Map{"user_id": m.UserID, "user_name": m.Name, "role": m.Role, "task_count": m.TaskCount, "hours": m.Hours, "estimate_hours": m.EstimateHours, "active_count": m.ActiveCount}
 	}
 	return c.JSON(response.Success(fiber.Map{
-		"project_name": sum.ProjectName, "logged_hours": sum.LoggedHours, "estimate_hours": sum.EstimateHours,
+		"project_name": sum.ProjectName, "logged_hours": sum.LoggedHours, "import_estimated_hours": sum.EstimatedFromImport, "estimate_hours": sum.EstimateHours,
 		"over_count": sum.OverCount, "over_codes": sum.OverCodes, "members_involved": sum.MembersInvolved,
 		"pending_count": sum.PendingCount, "by_status": byStatus, "tasks": tasks, "members": members,
 	}))
@@ -81,6 +81,19 @@ func (h *TimesheetReportHandler) Entries(c *fiber.Ctx) error {
 		data[i] = item
 	}
 	return c.JSON(response.Success(fiber.Map{"items": data, "total": len(data)}))
+}
+
+// RecalculateEstimates menangani POST /projects/:projectId/timesheet/estimates/recalculate.
+func (h *TimesheetReportHandler) RecalculateEstimates(c *fiber.Ctx) error {
+	actorID, actorRole, exec, errResp := h.actorAndExec(c)
+	if errResp != nil {
+		return errResp
+	}
+	res, err := h.report.RecalculateEstimates(c.Context(), exec, c.Params("projectId"), actorID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal menghitung ulang estimasi jam")
+	}
+	return c.JSON(response.Success(fiber.Map{"entries": res.Entries, "tasks": res.Tasks, "hours": float64(res.Minutes) / 60}))
 }
 
 var nonSlugChars = regexp.MustCompile(`[^a-z0-9]+`)

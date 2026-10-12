@@ -88,7 +88,7 @@ func TestBuildTimesheetSummary(t *testing.T) {
 }
 
 func newTestTimesheetService(repo *fakeTimesheetRepo, pmID, role string) *TimesheetReportService {
-	return NewTimesheetReportService(repo, &fakePerformancePMChecker{pmUserID: pmID}, &fakePerformanceRoleChecker{role: role})
+	return NewTimesheetReportService(repo, &fakePerformancePMChecker{pmUserID: pmID}, &fakePerformanceRoleChecker{role: role}, nil)
 }
 
 func TestTimesheetAuthorize(t *testing.T) {
