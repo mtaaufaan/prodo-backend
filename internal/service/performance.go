@@ -28,7 +28,7 @@ type performanceRepository interface {
 	ListTasks(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfTask, error)
 	ListStatusSessions(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfSession, error)
 	FirstWorkStarted(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) (map[string]time.Time, error)
-	ListAssignees(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfAssignee, error)
+	ListMemberPhases(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfMemberPhase, error)
 	ListPicPhases(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]repository.PerfPicPhase, error)
 	ListBacklog(ctx context.Context, exec db.Executor, workspaceID, projectID string) ([]repository.PerfBacklogItem, error)
 }
@@ -176,6 +176,12 @@ type OverdueTask struct {
 	DaysLate    int
 }
 
+// MemberStat -- Member Performance BERBASIS PIC (IG-126), bukan assignee:
+// Task Load = task belum selesai yang SEKARANG dipegang member sebagai PIC aktif;
+// TotalCount/DoneCount/CompletionRate = task yang pernah dipegang di FASE KERJA
+// (bukan BACKLOG/DONE/BLOCKED/CANCELED); AvgCompletionHours = lama member
+// memegang fase kerja pada task yang selesai; Readiness* = Kesiapan Task untuk
+// PIC backlog (task terbentuk -> dinyatakan lengkap).
 type MemberStat struct {
 	UserID                 string
 	UserName               string
@@ -187,6 +193,10 @@ type MemberStat struct {
 	AvgCompletionHours     *float64
 	AckAvgHours            *float64
 	AckPendingCount        int
+	ReadinessCount         int      // task yang selesai disiapkan (sudah dinyatakan lengkap)
+	ReadinessAvgHours      *float64 // rata-rata jam task terbentuk -> lengkap (kali terakhir)
+	ReadinessPreparing     int      // task BACKLOG belum lengkap yang sedang dipegang (tidak masuk rata-rata)
+	ReadinessReopens       int      // total lengkap -> belum lengkap pada task-task di atas
 }
 
 type RegressionStat struct {
@@ -248,7 +258,7 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 	if err != nil {
 		return nil, fmt.Errorf("service.dashboard: %w", err)
 	}
-	assignees, err := s.repo.ListAssignees(ctx, exec, workspaceID, projectID, since)
+	memberPhases, err := s.repo.ListMemberPhases(ctx, exec, workspaceID, projectID, since)
 	if err != nil {
 		return nil, fmt.Errorf("service.dashboard: %w", err)
 	}
@@ -438,72 +448,8 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 		result.CycleTimeAvgHours = &v
 	}
 
-	// --- Member Performance ---
-	type memberAgg struct {
-		name                    string
-		activeByPriority        map[string]int
-		total, done             int
-		sumWeight, doneWeighted float64
-		completionHours         []float64
-	}
-	members := map[string]*memberAgg{}
-	for i := range assignees {
-		a := &assignees[i]
-		m := members[a.UserID]
-		if m == nil {
-			m = &memberAgg{name: a.UserName, activeByPriority: map[string]int{}}
-			members[a.UserID] = m
-		}
-		m.total++
-		w := priorityWeight[a.Priority]
-		m.sumWeight += w
-		isDone := a.StatusName == "DONE"
-		if isDone {
-			m.done++
-			m.doneWeighted += w
-			if a.CompletedAt != nil {
-				if fw, ok := firstWork[a.TaskID]; ok {
-					m.completionHours = append(m.completionHours, a.CompletedAt.Sub(fw).Hours())
-				}
-			}
-		} else {
-			m.activeByPriority[a.Priority]++
-		}
-	}
-	ackByUser := map[string][]float64{}
-	ackPendingByUser := map[string]int{}
-	for i := range picPhases {
-		h := &picPhases[i]
-		if h.AcknowledgedAt != nil {
-			ackByUser[h.UserID] = append(ackByUser[h.UserID], h.AcknowledgedAt.Sub(h.ActivatedAt).Hours())
-		} else {
-			ackPendingByUser[h.UserID]++
-		}
-	}
-	for userID, m := range members {
-		stat := MemberStat{
-			UserID: userID, UserName: m.name, ActiveByPriority: m.activeByPriority,
-			TotalCount: m.total, DoneCount: m.done, AckPendingCount: ackPendingByUser[userID],
-		}
-		if m.total > 0 {
-			stat.CompletionRateRaw = float64(m.done) / float64(m.total) * 100
-		}
-		if m.sumWeight > 0 {
-			stat.CompletionRateWeighted = m.doneWeighted / m.sumWeight * 100
-		}
-		if len(m.completionHours) > 0 {
-			v := mean(m.completionHours)
-			stat.AvgCompletionHours = &v
-		}
-		if acks := ackByUser[userID]; len(acks) > 0 {
-			v := mean(acks)
-			stat.AckAvgHours = &v
-		}
-		result.Members = append(result.Members, stat)
-	}
-	sort.Slice(result.Members, func(i, j int) bool {
-		return activeTotal(&result.Members[i]) > activeTotal(&result.Members[j])
-	})
+	// --- Member Performance (berbasis PIC, IG-126) ---
+	result.Members = memberPerformance(tasks, memberPhases, picPhases, now)
 
 	// --- Handoff Delay per project ---
 	type handoffAgg struct {
@@ -539,6 +485,170 @@ func (s *PerformanceService) dashboard(ctx context.Context, exec db.Executor, wo
 }
 
 var priorityOrder = []string{"critical", "high", "medium", "low"}
+
+// nonWorkPhaseStatuses -- fase PIC di status ini BUKAN fase kerja: BACKLOG
+// dinilai terpisah (Kesiapan Task), DONE/CANCELED status akhir, BLOCKED menunggu.
+// Status kustom lain (mis. QA) otomatis dianggap fase kerja.
+var nonWorkPhaseStatuses = map[string]bool{"BACKLOG": true, "DONE": true, "BLOCKED": true, "CANCELED": true}
+
+type memberAgg struct {
+	name        string
+	load        map[string]string  // taskID -> priority (PIC aktif, task belum selesai)
+	work        map[string]string  // taskID -> priority (pernah memegang fase kerja)
+	done        map[string]bool    // taskID selesai (subset work)
+	holdHours   map[string]float64 // taskID -> jam memegang fase kerja
+	readyHours  []float64
+	preparing   int
+	reopens     int
+	hasActivity bool
+}
+
+// memberPerformance -- hitung Member Performance dari fase PIC. tasks = task
+// dalam cakupan (tanpa CANCELED), phases = seluruh fase PIC task itu, ackPhases =
+// fase PIC dalam rentang aktivasi (untuk Acknowledge). Semua orang yang
+// memegang fase PIC ikut tampil (tidak hanya assignee).
+func memberPerformance(tasks []repository.PerfTask, phases []repository.PerfMemberPhase, ackPhases []repository.PerfPicPhase, now time.Time) []MemberStat {
+	members := map[string]*memberAgg{}
+	get := func(userID, name string) *memberAgg {
+		m := members[userID]
+		if m == nil {
+			m = &memberAgg{name: name, load: map[string]string{}, work: map[string]string{}, done: map[string]bool{}, holdHours: map[string]float64{}}
+			members[userID] = m
+		}
+		return m
+	}
+
+	backlogPhases := map[string][]*repository.PerfMemberPhase{}
+	for i := range phases {
+		ph := &phases[i]
+		isDone := ph.TaskStatus == "DONE"
+		isWork := !nonWorkPhaseStatuses[ph.PhaseStatus]
+		isBacklog := ph.PhaseStatus == backlogStatusName
+		activeLoad := ph.IsActive && !isDone
+		if !isWork && !isBacklog && !activeLoad {
+			continue // fase DONE/BLOCKED lama: tidak menyumbang apa pun
+		}
+		m := get(ph.UserID, ph.UserName)
+		m.hasActivity = true
+		if activeLoad {
+			m.load[ph.TaskID] = ph.Priority
+		}
+		if isWork {
+			m.work[ph.TaskID] = ph.Priority
+			if isDone {
+				m.done[ph.TaskID] = true
+			}
+			end := now
+			if ph.DeactivatedAt != nil {
+				end = *ph.DeactivatedAt
+			}
+			if h := end.Sub(ph.ActivatedAt).Hours(); h > 0 {
+				m.holdHours[ph.TaskID] += h
+			}
+		}
+		if isBacklog {
+			backlogPhases[ph.TaskID] = append(backlogPhases[ph.TaskID], ph)
+		}
+	}
+
+	// Kesiapan Task: PIC backlog yang aktif saat task dinyatakan lengkap
+	// (ready_at) dinilai dari task terbentuk sampai ready_at; task BACKLOG yang
+	// belum lengkap dihitung "sedang disiapkan" (tidak masuk rata-rata).
+	for i := range tasks {
+		t := &tasks[i]
+		bps := backlogPhases[t.TaskID]
+		if len(bps) == 0 {
+			continue
+		}
+		credited := map[string]bool{}
+		switch {
+		case t.ReadyAt != nil:
+			for _, ph := range bps {
+				if !ph.ActivatedAt.After(*t.ReadyAt) && (ph.DeactivatedAt == nil || !ph.DeactivatedAt.Before(*t.ReadyAt)) {
+					credited[ph.UserID] = true
+				}
+			}
+			hours := t.ReadyAt.Sub(t.CreatedAt).Hours()
+			if hours < 0 {
+				hours = 0
+			}
+			for userID := range credited {
+				m := members[userID]
+				m.readyHours = append(m.readyHours, hours)
+				m.reopens += t.ReopenCount
+			}
+		case t.StatusName == backlogStatusName && t.Completeness != nil && *t.Completeness == "incomplete":
+			for _, ph := range bps {
+				if ph.IsActive && !credited[ph.UserID] {
+					credited[ph.UserID] = true
+					m := members[ph.UserID]
+					m.preparing++
+					m.reopens += t.ReopenCount
+				}
+			}
+		}
+	}
+
+	ackByUser := map[string][]float64{}
+	ackPendingByUser := map[string]int{}
+	for i := range ackPhases {
+		h := &ackPhases[i]
+		get(h.UserID, h.UserName)
+		if h.AcknowledgedAt != nil {
+			ackByUser[h.UserID] = append(ackByUser[h.UserID], h.AcknowledgedAt.Sub(h.ActivatedAt).Hours())
+		} else {
+			ackPendingByUser[h.UserID]++
+		}
+	}
+
+	out := make([]MemberStat, 0, len(members))
+	for userID, m := range members {
+		stat := MemberStat{
+			UserID: userID, UserName: m.name, ActiveByPriority: map[string]int{},
+			TotalCount: len(m.work), DoneCount: len(m.done), AckPendingCount: ackPendingByUser[userID],
+			ReadinessCount: len(m.readyHours), ReadinessPreparing: m.preparing, ReadinessReopens: m.reopens,
+		}
+		for _, p := range m.load {
+			stat.ActiveByPriority[p]++
+		}
+		var sumWeight, doneWeight float64
+		var doneHours []float64
+		for taskID, p := range m.work {
+			sumWeight += priorityWeight[p]
+			if m.done[taskID] {
+				doneWeight += priorityWeight[p]
+				doneHours = append(doneHours, m.holdHours[taskID])
+			}
+		}
+		if stat.TotalCount > 0 {
+			stat.CompletionRateRaw = float64(stat.DoneCount) / float64(stat.TotalCount) * 100
+		}
+		if sumWeight > 0 {
+			stat.CompletionRateWeighted = doneWeight / sumWeight * 100
+		}
+		if len(doneHours) > 0 {
+			v := mean(doneHours)
+			stat.AvgCompletionHours = &v
+		}
+		if len(m.readyHours) > 0 {
+			v := mean(m.readyHours)
+			stat.ReadinessAvgHours = &v
+		}
+		if acks := ackByUser[userID]; len(acks) > 0 {
+			v := mean(acks)
+			stat.AckAvgHours = &v
+		}
+		out = append(out, stat)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ai, aj := activeTotal(&out[i]), activeTotal(&out[j])
+		if ai != aj {
+			return ai > aj
+		}
+		return out[i].UserName < out[j].UserName
+	})
+	return out
+}
 
 // backlogStatusName -- status sistem BACKLOG (tempat menunggu, bukan tahap kerja).
 const backlogStatusName = "BACKLOG"

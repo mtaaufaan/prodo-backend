@@ -481,6 +481,12 @@ var (
 	// lengkap tidak boleh mulai dikerjakan.
 	ErrTaskIncomplete = errors.New("task is marked incomplete and cannot change status")
 
+	// ErrNotBacklogPic dikembalikan PUT /tasks/:id/completeness (IG-126): hanya
+	// PIC aktif fase BACKLOG task itu yang boleh menyatakan lengkap/belum lengkap
+	// (sebelumnya pembuat task atau PIC aktif mana pun) -- penilaian "Kesiapan
+	// Task" Member Performance melekat pada PIC backlog tersebut.
+	ErrNotBacklogPic = errors.New("only an active backlog pic can change task completeness")
+
 	// ErrTaskNotInSprint dikembalikan PUT /tasks/:id/status (susulan,
 	// diminta user "task board dengan status backlog yang bukan sprint
 	// backlog dan sprint berjalan tidak dapat dipindahkan statusnya",
