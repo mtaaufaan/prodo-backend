@@ -146,6 +146,8 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 			workspaceAuditMetaNumber(meta, "success_count"), workspaceAuditMetaNumber(meta, "failed_count"))
 	case "project_import.report_downloaded":
 		return fmt.Sprintf(`Laporan import %q diunduh`, target)
+	case "timesheet.report_downloaded":
+		return fmt.Sprintf(`Timesheet project %q diekspor (CSV, %s baris)`, target, workspaceAuditMetaNumber(meta, "rows"))
 	case "user.login":
 		return "Login berhasil"
 	case "user.backup_code_used":

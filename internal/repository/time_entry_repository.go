@@ -172,14 +172,18 @@ func (r *TimeEntryRepository) Get(ctx context.Context, exec db.Executor, id stri
 	return &e, nil
 }
 
-// UpdateManual -- hanya dipanggil service setelah verifikasi is_approved
-// IS NULL (pending) -- guard DI SINI juga (WHERE is_approved IS NULL)
+// UpdateManual -- hanya dipanggil service setelah verifikasi kepemilikan.
+// Entri yang boleh diubah: pending (is_approved IS NULL) ATAU ditolak
+// (is_approved = FALSE, US-037 AC "ditolak dikembalikan ke pengguna untuk
+// diperbaiki"); entri ditolak yang diubah kembali jadi pending (catatan
+// penolakan dikosongkan, ck_rejection_note). Guard DI SINI juga (WHERE)
 // sebagai defense-in-depth kalau ada race condition approve bersamaan.
 func (r *TimeEntryRepository) UpdateManual(ctx context.Context, exec db.Executor, id string, startedAt, endedAt time.Time, note *string) (*TimeEntry, error) {
 	durationMinutes := int(endedAt.Sub(startedAt).Minutes())
 	tag, err := exec.Exec(ctx, `
-		UPDATE time_entries SET started_at = $2, ended_at = $3, duration_minutes = $4, note = $5, updated_at = NOW()
-		WHERE id = $1 AND is_approved IS NULL
+		UPDATE time_entries SET started_at = $2, ended_at = $3, duration_minutes = $4, note = $5,
+		       is_approved = NULL, rejection_note = NULL, updated_at = NOW()
+		WHERE id = $1 AND (is_approved IS NULL OR is_approved = FALSE)
 	`, id, startedAt, endedAt, durationMinutes, note)
 	if err != nil {
 		return nil, fmt.Errorf("repository.UpdateManual: %w", err)
@@ -270,4 +274,55 @@ func (r *TimeEntryRepository) SumLoggedMinutesForTask(ctx context.Context, exec 
 		return 0, fmt.Errorf("repository.SumLoggedMinutesForTask: %w", err)
 	}
 	return total, nil
+}
+
+// ListApproverIDs -- penerima notifikasi "entri menunggu persetujuan" (US-037
+// AC): PM project task ini + member project-scoped berperan approver.
+func (r *TimeEntryRepository) ListApproverIDs(ctx context.Context, exec db.Executor, taskID string) ([]string, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT user_id FROM project_managers WHERE project_id = (SELECT project_id FROM tasks WHERE id = $1)
+		UNION
+		SELECT user_id FROM project_members WHERE role = 'approver' AND project_id = (SELECT project_id FROM tasks WHERE id = $1)
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.ListApproverIDs: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("repository.ListApproverIDs: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// TaskLabel -- kode + judul task untuk teks notifikasi.
+func (r *TimeEntryRepository) TaskLabel(ctx context.Context, exec db.Executor, taskID string) (code, title string, err error) {
+	err = exec.QueryRow(ctx, `SELECT COALESCE(task_code, ''), title FROM tasks WHERE id = $1`, taskID).Scan(&code, &title)
+	if err != nil {
+		return "", "", fmt.Errorf("repository.TaskLabel: %w", err)
+	}
+	return code, title, nil
+}
+
+// Notify -- notifikasi in-app timesheet (pola INSERT langsung ke
+// notifications, sama RetentionNotifyHandler/AttachmentService.RequestQuota).
+func (r *TimeEntryRepository) Notify(ctx context.Context, exec db.Executor, userID, actorID, notifType, entryID, title, body string) error {
+	_, err := exec.Exec(ctx, `
+		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+		VALUES ($1, $2, $3, 'time_entry', $4, $5, $6)
+	`, userID, actorID, notifType, entryID, title, body)
+	if err != nil {
+		return fmt.Errorf("repository.TimeEntryNotify: %w", err)
+	}
+	return nil
+}
+
+// LogAudit -- audit trail aksi timesheet pada task (entity task, sama
+// chokepoint insertTaskAudit): task.time_entry_added/updated/approved/rejected.
+func (r *TimeEntryRepository) LogAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, taskID, workspaceID string, before, after map[string]any) error {
+	return insertTaskAudit(ctx, exec, actorID, actorRole, action, taskID, workspaceID, before, after)
 }

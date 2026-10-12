@@ -263,6 +263,8 @@ func run() error {
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo, customStatusRepo, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc)
+	timesheetReportRepo := repository.NewTimesheetReportRepository()
+	timesheetReportSvc := service.NewTimesheetReportService(timesheetReportRepo, projectRepo, rbacSvc)
 	checklistItemSvc := service.NewTaskChecklistItemService(checklistItemRepo)
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
@@ -327,6 +329,7 @@ func run() error {
 	sprintHandler := handler.NewSprintHandler(sprintSvc, logger)
 	projectImportHandler := handler.NewProjectImportHandler(projectImportSvc, logger)
 	timeEntryHandler := handler.NewTimeEntryHandler(timeEntrySvc, logger)
+	timesheetReportHandler := handler.NewTimesheetReportHandler(timesheetReportSvc, logger)
 	checklistItemHandler := handler.NewTaskChecklistItemHandler(checklistItemSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, timeEntrySvc, logger)
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
@@ -863,6 +866,13 @@ func run() error {
 	v1.Patch("/time-entries/:entryId", jwtAuth, dbCtx, timeEntryHandler.UpdateManual)
 	v1.Post("/time-entries/:entryId/approve", jwtAuth, dbCtx, timeEntryHandler.Approve)
 	v1.Post("/time-entries/:entryId/reject", jwtAuth, dbCtx, timeEntryHandler.Reject)
+
+	// Timesheet & Analitik PM (IG-128, "PM Timesheet.dc.html"): agregat per
+	// project (gerbang di service: PM project / AW / GA / PA) + timesheet pribadi.
+	v1.Get("/projects/:projectId/timesheet", jwtAuth, dbCtx, timesheetReportHandler.Summary)
+	v1.Get("/projects/:projectId/timesheet/entries", jwtAuth, dbCtx, timesheetReportHandler.Entries)
+	v1.Get("/projects/:projectId/timesheet/export", jwtAuth, dbCtx, timesheetReportHandler.Export)
+	v1.Get("/me/timesheets", jwtAuth, dbCtx, timesheetReportHandler.Mine)
 
 	// SUB-TASK / checklist item (IG-97 susulan).
 	v1.Post("/tasks/:id/checklist-items", jwtAuth, dbCtx, checklistItemHandler.Create)

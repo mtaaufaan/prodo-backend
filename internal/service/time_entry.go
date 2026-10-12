@@ -29,6 +29,10 @@ type timeEntryRepository interface {
 	Reject(ctx context.Context, exec db.Executor, id, rejectedBy, note string) error
 	ListForTask(ctx context.Context, exec db.Executor, taskID, approvalStatus, userID string) ([]repository.TimeEntry, error)
 	SumLoggedMinutesForTask(ctx context.Context, exec db.Executor, taskID string) (int, error)
+	ListApproverIDs(ctx context.Context, exec db.Executor, taskID string) ([]string, error)
+	TaskLabel(ctx context.Context, exec db.Executor, taskID string) (code, title string, err error)
+	Notify(ctx context.Context, exec db.Executor, userID, actorID, notifType, entryID, title, body string) error
+	LogAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, taskID, workspaceID string, before, after map[string]any) error
 }
 
 // timeEntryTaskResolver -- reuse TaskRepository.GetProjectID.
@@ -67,6 +71,60 @@ func (s *TimeEntryService) isApprover(ctx context.Context, exec db.Executor, tas
 		return false, err
 	}
 	return role == "admin_workspace" || role == "project_manager", nil
+}
+
+// maxManualEntry -- batas satu entri manual (kolom duration_minutes SMALLINT
+// juga tidak muat > ~22 hari; 24 jam cukup untuk satu sesi kerja).
+const maxManualEntry = 24 * time.Hour
+
+func validEntryRange(startedAt, endedAt time.Time) bool {
+	return endedAt.After(startedAt) && endedAt.Sub(startedAt) <= maxManualEntry
+}
+
+// workspaceOf -- workspace pemilik task (kolom workspace_id audit_logs).
+func (s *TimeEntryService) workspaceOf(ctx context.Context, exec db.Executor, taskID string) (string, error) {
+	projectID, err := s.tasks.GetProjectID(ctx, exec, taskID)
+	if err != nil {
+		return "", err
+	}
+	return s.projects.GetWorkspaceID(ctx, exec, projectID)
+}
+
+// entrySnapshot -- state audit: menit + status, cukup untuk narasi.
+func entrySnapshot(e *repository.TimeEntry, status string) map[string]any {
+	m := map[string]any{"entry_id": e.ID, "approval_status": status, "entry_type": e.EntryType}
+	if e.DurationMinutes != nil {
+		m["duration_minutes"] = *e.DurationMinutes
+	}
+	return m
+}
+
+// notifyApprovers -- US-037 AC: PM/Approver menerima notifikasi in-app saat
+// ada entri menunggu persetujuan (pembuat entri sendiri dikecualikan).
+func (s *TimeEntryService) notifyApprovers(ctx context.Context, exec db.Executor, e *repository.TimeEntry, actorID, verb string) error {
+	ids, err := s.repo.ListApproverIDs(ctx, exec, e.TaskID)
+	if err != nil {
+		return err
+	}
+	code, title, err := s.repo.TaskLabel(ctx, exec, e.TaskID)
+	if err != nil {
+		return err
+	}
+	mins := 0
+	if e.DurationMinutes != nil {
+		mins = *e.DurationMinutes
+	}
+	heading := fmt.Sprintf("Entri waktu menunggu persetujuan -- %s", code)
+	body := fmt.Sprintf("Entri waktu manual %s: %s (%d menit) pada task %q.", verb, e.StartedAt.Format("02 Jan 2006 15:04"), mins, title)
+	for _, id := range ids {
+		if id == actorID {
+			continue
+		}
+		if err := s.repo.Notify(ctx, exec, id, actorID, "timesheet_pending", e.ID, heading, body); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // StartTimer menangani POST /tasks/:id/time-entries/start.
@@ -112,8 +170,8 @@ func (s *TimeEntryService) StopTimer(ctx context.Context, exec db.Executor, task
 }
 
 // CreateManual menangani POST /tasks/:id/time-entries.
-func (s *TimeEntryService) CreateManual(ctx context.Context, exec db.Executor, taskID, actorID string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error) {
-	if taskID == "" || !endedAt.After(startedAt) {
+func (s *TimeEntryService) CreateManual(ctx context.Context, exec db.Executor, taskID, actorID, actorRole string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error) {
+	if taskID == "" || !validEntryRange(startedAt, endedAt) {
 		return nil, fmt.Errorf("service.CreateManual: %w", domain.ErrInvalidInput)
 	}
 	overlap, err := s.repo.HasOverlap(ctx, exec, actorID, startedAt, endedAt, "00000000-0000-0000-0000-000000000000")
@@ -127,14 +185,24 @@ func (s *TimeEntryService) CreateManual(ctx context.Context, exec db.Executor, t
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateManual: %w", err)
 	}
+	workspaceID, err := s.workspaceOf(ctx, exec, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("service.CreateManual: %w", err)
+	}
+	if err := s.repo.LogAudit(ctx, exec, actorID, actorRole, "task.time_entry_added", taskID, workspaceID, nil, entrySnapshot(entry, "pending")); err != nil {
+		return nil, fmt.Errorf("service.CreateManual: audit: %w", err)
+	}
+	if err := s.notifyApprovers(ctx, exec, entry, actorID, "ditambahkan"); err != nil {
+		return nil, fmt.Errorf("service.CreateManual: notify: %w", err)
+	}
 	return entry, nil
 }
 
 // UpdateManual menangani PATCH /time-entries/:id -- hanya pemilik entri,
-// hanya saat masih pending (repo.UpdateManual sudah menggerbangi
-// is_approved IS NULL, di sini cukup cek kepemilikan).
-func (s *TimeEntryService) UpdateManual(ctx context.Context, exec db.Executor, entryID, actorID string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error) {
-	if entryID == "" || !endedAt.After(startedAt) {
+// hanya saat masih pending atau ditolak (repo.UpdateManual menggerbangi
+// is_approved, di sini cukup cek kepemilikan).
+func (s *TimeEntryService) UpdateManual(ctx context.Context, exec db.Executor, entryID, actorID, actorRole string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error) {
+	if entryID == "" || !validEntryRange(startedAt, endedAt) {
 		return nil, fmt.Errorf("service.UpdateManual: %w", domain.ErrInvalidInput)
 	}
 	current, err := s.repo.Get(ctx, exec, entryID)
@@ -155,7 +223,67 @@ func (s *TimeEntryService) UpdateManual(ctx context.Context, exec db.Executor, e
 	if err != nil {
 		return nil, fmt.Errorf("service.UpdateManual: %w", err)
 	}
+	workspaceID, err := s.workspaceOf(ctx, exec, entry.TaskID)
+	if err != nil {
+		return nil, fmt.Errorf("service.UpdateManual: %w", err)
+	}
+	if err := s.repo.LogAudit(ctx, exec, actorID, actorRole, "task.time_entry_updated", entry.TaskID, workspaceID,
+		entrySnapshot(current, approvalStatusOf(current)), entrySnapshot(entry, "pending")); err != nil {
+		return nil, fmt.Errorf("service.UpdateManual: audit: %w", err)
+	}
+	// Entri yang diperbaiki setelah ditolak masuk antrian lagi -> approver diberi tahu.
+	if err := s.notifyApprovers(ctx, exec, entry, actorID, "diperbarui"); err != nil {
+		return nil, fmt.Errorf("service.UpdateManual: notify: %w", err)
+	}
 	return entry, nil
+}
+
+func approvalStatusOf(e *repository.TimeEntry) string {
+	switch {
+	case e.IsApproved == nil:
+		return "pending"
+	case *e.IsApproved:
+		return "approved"
+	default:
+		return "rejected"
+	}
+}
+
+// afterDecision -- audit trail + notifikasi ke pemilik entri setelah approve/
+// reject (US-037 AC "seluruh aksi approval dicatat di audit trail", S8-15
+// "entry ditolak -> notify user").
+func (s *TimeEntryService) afterDecision(ctx context.Context, exec db.Executor, entry *repository.TimeEntry, actorID, actorRole, decision, note string) error {
+	workspaceID, err := s.workspaceOf(ctx, exec, entry.TaskID)
+	if err != nil {
+		return err
+	}
+	after := entrySnapshot(entry, decision)
+	if note != "" {
+		after["rejection_note"] = note
+	}
+	action := "task.time_entry_approved"
+	if decision == "rejected" {
+		action = "task.time_entry_rejected"
+	}
+	if err := s.repo.LogAudit(ctx, exec, actorID, actorRole, action, entry.TaskID, workspaceID, entrySnapshot(entry, "pending"), after); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	if entry.UserID == actorID {
+		return nil
+	}
+	code, title, err := s.repo.TaskLabel(ctx, exec, entry.TaskID)
+	if err != nil {
+		return err
+	}
+	heading := fmt.Sprintf("Entri waktu disetujui -- %s", code)
+	body := fmt.Sprintf("Entri waktu Anda pada task %q disetujui dan kini terhitung di jam tercatat.", title)
+	notifType := "timesheet_approved"
+	if decision == "rejected" {
+		heading = fmt.Sprintf("Entri waktu ditolak -- %s", code)
+		body = fmt.Sprintf("Entri waktu Anda pada task %q ditolak. Catatan: %s. Anda dapat memperbaikinya lalu mengirim ulang.", title, note)
+		notifType = "timesheet_rejected"
+	}
+	return s.repo.Notify(ctx, exec, entry.UserID, actorID, notifType, entry.ID, heading, body)
 }
 
 // Approve menangani POST /time-entries/:id/approve -- AW/PM saja.
@@ -175,6 +303,9 @@ func (s *TimeEntryService) Approve(ctx context.Context, exec db.Executor, entryI
 		return fmt.Errorf("service.Approve: %w", domain.ErrForbidden)
 	}
 	if err := s.repo.Approve(ctx, exec, entryID, actorID); err != nil {
+		return fmt.Errorf("service.Approve: %w", err)
+	}
+	if err := s.afterDecision(ctx, exec, entry, actorID, actorRole, "approved", ""); err != nil {
 		return fmt.Errorf("service.Approve: %w", err)
 	}
 	return nil
@@ -198,6 +329,9 @@ func (s *TimeEntryService) Reject(ctx context.Context, exec db.Executor, entryID
 		return fmt.Errorf("service.Reject: %w", domain.ErrForbidden)
 	}
 	if err := s.repo.Reject(ctx, exec, entryID, actorID, note); err != nil {
+		return fmt.Errorf("service.Reject: %w", err)
+	}
+	if err := s.afterDecision(ctx, exec, entry, actorID, actorRole, "rejected", note); err != nil {
 		return fmt.Errorf("service.Reject: %w", err)
 	}
 	return nil
