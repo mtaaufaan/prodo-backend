@@ -72,6 +72,10 @@ type PerfPicPhase struct {
 	UserName       string
 	ActivatedAt    time.Time
 	AcknowledgedAt *time.Time
+	IsActive       bool
+	// SelfAssigned = fase ditetapkan oleh orangnya sendiri (mis. PIC backlog otomatis
+	// pembuat task): tidak ada serah terima yang perlu dikonfirmasi.
+	SelfAssigned bool
 }
 
 type PerformanceRepository struct{}
@@ -269,7 +273,7 @@ func (r *PerformanceRepository) ListMemberPhases(ctx context.Context, exec db.Ex
 func (r *PerformanceRepository) ListPicPhases(ctx context.Context, exec db.Executor, workspaceID, projectID string, since *time.Time) ([]PerfPicPhase, error) {
 	where, args := perfScopeClause(workspaceID, projectID, "tpp.activated_at", since)
 	rows, err := exec.Query(ctx, `
-		SELECT p.id, p.name, u.id, u.display_name, tpp.activated_at, tpp.acknowledged_at
+		SELECT p.id, p.name, u.id, u.display_name, tpp.activated_at, tpp.acknowledged_at, tpp.is_active, COALESCE(tpp.assigned_by = tpp.user_id, FALSE)
 		FROM task_pic_phases tpp
 		JOIN tasks t ON t.id = tpp.task_id
 		JOIN projects p ON p.id = t.project_id
@@ -283,7 +287,7 @@ func (r *PerformanceRepository) ListPicPhases(ctx context.Context, exec db.Execu
 	list := make([]PerfPicPhase, 0)
 	for rows.Next() {
 		var h PerfPicPhase
-		if err := rows.Scan(&h.ProjectID, &h.ProjectName, &h.UserID, &h.UserName, &h.ActivatedAt, &h.AcknowledgedAt); err != nil {
+		if err := rows.Scan(&h.ProjectID, &h.ProjectName, &h.UserID, &h.UserName, &h.ActivatedAt, &h.AcknowledgedAt, &h.IsActive, &h.SelfAssigned); err != nil {
 			return nil, fmt.Errorf("repository.ListPicPhases: scan: %w", err)
 		}
 		list = append(list, h)

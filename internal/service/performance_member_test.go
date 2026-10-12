@@ -191,3 +191,47 @@ func TestSetCompleteness_OnlyActiveBacklogPIC(t *testing.T) {
 		t.Errorf("task bukan BACKLOG: err = %v, want ErrNotBacklogPic", err)
 	}
 }
+
+// Acknowledge Rate / Handoff Delay (IG-126 susulan): hanya serah terima NYATA yang
+// dihitung; fase lama tanpa acknowledge bukan "pending".
+func TestClassifyAck(t *testing.T) {
+	act := memAt(0)
+	later := memAt(0.25) // 6 jam
+	cases := []struct {
+		name  string
+		phase repository.PerfPicPhase
+		want  ackKind
+		hours float64
+	}{
+		{"di-acknowledge 6 jam kemudian", repository.PerfPicPhase{ActivatedAt: act, AcknowledgedAt: &later}, ackDone, 6},
+		{"fase aktif belum acknowledge", repository.PerfPicPhase{ActivatedAt: act, IsActive: true}, ackPending, 0},
+		{"fase lama diserahkan tanpa acknowledge", repository.PerfPicPhase{ActivatedAt: act, IsActive: false}, ackUnconfirmed, 0},
+		{"PIC backlog otomatis pembuat task (ditetapkan sendiri)", repository.PerfPicPhase{ActivatedAt: act, IsActive: true, SelfAssigned: true}, ackAuto, 0},
+		{"diterima otomatis saat itu juga (import)", repository.PerfPicPhase{ActivatedAt: act, AcknowledgedAt: &act}, ackAuto, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, hours := classifyAck(&tc.phase)
+			if kind != tc.want || !near(hours, tc.hours) {
+				t.Errorf("classifyAck = (%v, %.2f), want (%v, %.2f)", kind, hours, tc.want, tc.hours)
+			}
+		})
+	}
+}
+
+func TestMemberPerformance_AckCounts(t *testing.T) {
+	act := memAt(0)
+	ackAt := memAt(0.5) // 12 jam
+	acks := []repository.PerfPicPhase{
+		{UserID: "u", UserName: "Budi", ActivatedAt: act, AcknowledgedAt: &ackAt},             // delay 12 jam
+		{UserID: "u", UserName: "Budi", ActivatedAt: act, IsActive: true},                     // pending
+		{UserID: "u", UserName: "Budi", ActivatedAt: act},                                     // tidak dikonfirmasi
+		{UserID: "u", UserName: "Budi", ActivatedAt: act, IsActive: true, SelfAssigned: true}, // otomatis: tidak dihitung
+		{UserID: "u", UserName: "Budi", ActivatedAt: act, AcknowledgedAt: &act},               // import: tidak dihitung
+	}
+	out := memberPerformance(nil, nil, acks, memAt(1))
+	m := memberByName(out, "Budi")
+	if m == nil || m.AckAvgHours == nil || !near(*m.AckAvgHours, 12) || m.AckPendingCount != 1 || m.AckUnconfirmedCount != 1 {
+		t.Errorf("Budi = %+v, want ack rata-rata 12 jam, 1 pending, 1 tidak dikonfirmasi", m)
+	}
+}
