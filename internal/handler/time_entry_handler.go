@@ -45,6 +45,7 @@ func timeEntryJSON(e *repository.TimeEntry) fiber.Map {
 		"note":             e.Note,
 		"approval_status":  status,
 		"rejection_note":   e.RejectionNote,
+		"is_estimate":      e.IsEstimate,
 		"created_at":       e.CreatedAt,
 		"updated_at":       e.UpdatedAt,
 	}
@@ -126,7 +127,7 @@ type manualTimeEntryRequest struct {
 
 // CreateManual menangani POST /tasks/:id/time-entries.
 func (h *TimeEntryHandler) CreateManual(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
@@ -138,7 +139,7 @@ func (h *TimeEntryHandler) CreateManual(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
-	entry, err := h.entries.CreateManual(c.Context(), exec, c.Params("id"), actorUserID, body.StartedAt, body.EndedAt, body.Note)
+	entry, err := h.entries.CreateManual(c.Context(), exec, c.Params("id"), actorUserID, actorRole, body.StartedAt, body.EndedAt, body.Note)
 	if err != nil {
 		return h.mapError(c, err, "Gagal menambah entri waktu")
 	}
@@ -147,7 +148,7 @@ func (h *TimeEntryHandler) CreateManual(c *fiber.Ctx) error {
 
 // UpdateManual menangani PATCH /time-entries/:entryId.
 func (h *TimeEntryHandler) UpdateManual(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
@@ -159,7 +160,7 @@ func (h *TimeEntryHandler) UpdateManual(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
-	entry, err := h.entries.UpdateManual(c.Context(), exec, c.Params("entryId"), actorUserID, body.StartedAt, body.EndedAt, body.Note)
+	entry, err := h.entries.UpdateManual(c.Context(), exec, c.Params("entryId"), actorUserID, actorRole, body.StartedAt, body.EndedAt, body.Note)
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengubah entri waktu")
 	}
