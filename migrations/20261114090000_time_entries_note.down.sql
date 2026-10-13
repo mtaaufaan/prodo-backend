@@ -1,0 +1,1 @@
+ALTER TABLE time_entries DROP COLUMN IF EXISTS note;

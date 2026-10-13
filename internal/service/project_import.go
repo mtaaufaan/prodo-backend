@@ -215,20 +215,30 @@ type projectImportProjects interface {
 	IsPM(ctx context.Context, exec db.Executor, projectID, userID string) (bool, error)
 }
 
+// projectImportEstimator -- TimesheetEstimateService.Recalculate (IG-129): setelah
+// import task, jam tercatat diestimasi dari riwayat tanggal status.
+type projectImportEstimator interface {
+	Recalculate(ctx context.Context, exec db.Executor, projectID, workspaceID, projectName, actorID, actorRole string) (*EstimateResult, error)
+}
+
 type ProjectImportService struct {
-	repo     projectImportRepo
-	sprints  projectImportSprints
-	projects projectImportProjects
-	rbac     sprintWorkspaceRoleChecker
-	statuses projectImportStatuses
-	members  projectImportMembers
-	tasks    projectImportTasks
+	estimator projectImportEstimator // opsional (nil di test)
+	repo      projectImportRepo
+	sprints   projectImportSprints
+	projects  projectImportProjects
+	rbac      sprintWorkspaceRoleChecker
+	statuses  projectImportStatuses
+	members   projectImportMembers
+	tasks     projectImportTasks
 }
 
 func NewProjectImportService(repo projectImportRepo, sprints projectImportSprints, projects projectImportProjects, rbac sprintWorkspaceRoleChecker,
 	statuses projectImportStatuses, members projectImportMembers, tasks projectImportTasks) *ProjectImportService {
 	return &ProjectImportService{repo: repo, sprints: sprints, projects: projects, rbac: rbac, statuses: statuses, members: members, tasks: tasks}
 }
+
+// SetTimesheetEstimator -- pasang penghitung estimasi jam (opsional).
+func (s *ProjectImportService) SetTimesheetEstimator(e projectImportEstimator) { s.estimator = e }
 
 // authorize -- PM project ini, Admin Workspace, atau GA/PA (bypass). Editor/
 // Approver/Viewer ditolak. Mengembalikan role EFEKTIF untuk audit (rute
@@ -386,6 +396,13 @@ func (s *ProjectImportService) Execute(ctx context.Context, exec db.Executor, pr
 		rowsJSON, success, total, err = s.executeSprintImport(ctx, exec, imp, projectID, workspaceID, actorID, auditRole)
 	case "task":
 		rowsJSON, success, total, err = s.executeTaskImport(ctx, exec, imp, projectID, workspaceID, actorID, auditRole)
+		if err == nil && success > 0 && s.estimator != nil {
+			// Task import membawa tanggal riwayat + PIC fase, bukan jam kerja:
+			// jam tercatat diestimasi (1 hari kerja = 8 jam, IG-129).
+			if _, estErr := s.estimator.Recalculate(ctx, exec, projectID, workspaceID, "", actorID, auditRole); estErr != nil {
+				err = fmt.Errorf("service.Execute: estimasi jam: %w", estErr)
+			}
+		}
 	default:
 		err = fmt.Errorf("service.Execute: %w", domain.ErrInvalidInput)
 	}
