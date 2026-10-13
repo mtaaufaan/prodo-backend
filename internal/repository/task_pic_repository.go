@@ -193,8 +193,12 @@ func (r *TaskPicRepository) AddPic(ctx context.Context, exec db.Executor, taskID
 	if err != nil {
 		return fmt.Errorf("repository.AddPic: %w", err)
 	}
+	userName, err := auditUserName(ctx, exec, userID)
+	if err != nil {
+		return fmt.Errorf("repository.AddPic: snapshot: %w", err)
+	}
 	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.pic_added", taskID, workspaceID, nil,
-		map[string]any{"status_name": statusName, "user_id": userID}); err != nil {
+		map[string]any{"status_name": statusName, "user_id": userID, "user_name": userName}); err != nil {
 		return fmt.Errorf("repository.AddPic: audit: %w", err)
 	}
 	return nil
@@ -213,8 +217,12 @@ func (r *TaskPicRepository) RemovePic(ctx context.Context, exec db.Executor, tas
 	}
 	ok := tag.RowsAffected() > 0
 	if ok {
+		userName, nameErr := auditUserName(ctx, exec, userID)
+		if nameErr != nil {
+			return false, fmt.Errorf("repository.RemovePic: snapshot: %w", nameErr)
+		}
 		if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.pic_removed", taskID, workspaceID, nil,
-			map[string]any{"status_name": statusName, "user_id": userID}); err != nil {
+			map[string]any{"status_name": statusName, "user_id": userID, "user_name": userName}); err != nil {
 			return false, fmt.Errorf("repository.RemovePic: audit: %w", err)
 		}
 	}
@@ -255,8 +263,20 @@ func (r *TaskPicRepository) HandoffPic(ctx context.Context, exec db.Executor, ta
 	if err != nil {
 		return fmt.Errorf("repository.HandoffPic: %w", err)
 	}
+	toName, err := auditUserName(ctx, exec, toUserID)
+	if err != nil {
+		return fmt.Errorf("repository.HandoffPic: snapshot: %w", err)
+	}
+	fromNames := make([]string, 0, len(fromUserIDs))
+	for _, id := range fromUserIDs {
+		n, nameErr := auditUserName(ctx, exec, id)
+		if nameErr != nil {
+			return fmt.Errorf("repository.HandoffPic: snapshot: %w", nameErr)
+		}
+		fromNames = append(fromNames, n)
+	}
 	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.pic_handoff", taskID, workspaceID, nil,
-		map[string]any{"status_name": statusName, "from_user_ids": fromUserIDs, "to_user_id": toUserID}); err != nil {
+		map[string]any{"status_name": statusName, "from_user_ids": fromUserIDs, "from_user_names": fromNames, "to_user_id": toUserID, "to_user_name": toName}); err != nil {
 		return fmt.Errorf("repository.HandoffPic: audit: %w", err)
 	}
 	return nil

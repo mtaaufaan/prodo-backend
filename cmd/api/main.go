@@ -274,6 +274,7 @@ func run() error {
 	performanceSvc := service.NewPerformanceService(performanceRepo, projectRepo, projectRepo, rbacSvc)
 	workspaceAuditRepo := repository.NewWorkspaceAuditRepository()
 	workspaceAuditSvc := service.NewWorkspaceAuditService(workspaceAuditRepo, ruleRepo, rbacSvc)
+	projectAuditSvc := service.NewProjectAuditService(workspaceAuditRepo, ruleRepo, projectRepo, rbacSvc)
 	platformAuditSvc := service.NewPlatformAuditService(platformAuditRepo)
 	platformDashboardSvc := service.NewPlatformDashboardService(platformDashboardRepo)
 	erasureSvc := service.NewErasureService(erasureRepo)
@@ -337,6 +338,7 @@ func run() error {
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
 	performanceHandler := handler.NewPerformanceHandler(performanceSvc, logger)
 	workspaceAuditHandler := handler.NewWorkspaceAuditHandler(workspaceAuditSvc, logger)
+	projectAuditHandler := handler.NewProjectAuditHandler(projectAuditSvc, logger)
 	picGroupHandler := handler.NewPicGroupHandler(taskPicSvc, logger)
 
 	v1 := app.Group("/api/v1")
@@ -914,6 +916,10 @@ func run() error {
 	v1.Get("/workspaces/:wsId/audit-logs", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceAuditHandler.List)
 	v1.Get("/workspaces/:wsId/audit-logs/actors", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceAuditHandler.Actors)
 	v1.Get("/workspaces/:wsId/audit-logs/rule-executions", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceAuditHandler.Executions)
+	// Audit Trail PM (IG-130): cakupan satu project; gerbang (PM project / AW / GA / PA) di service.
+	v1.Get("/projects/:projectId/audit-logs", jwtAuth, dbCtx, projectAuditHandler.List)
+	v1.Get("/projects/:projectId/audit-logs/actors", jwtAuth, dbCtx, projectAuditHandler.Actors)
+	v1.Get("/projects/:projectId/audit-logs/rule-executions", jwtAuth, dbCtx, projectAuditHandler.Executions)
 
 	serverErr := make(chan error, 1)
 	go func() {

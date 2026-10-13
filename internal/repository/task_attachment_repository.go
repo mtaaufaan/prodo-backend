@@ -419,7 +419,11 @@ func (r *TaskAttachmentRepository) LogQuotaRequest(ctx context.Context, exec db.
 
 // insertAttachmentAudit -- reuse writeAuditLog (chokepoint audit_logs),
 // pola PERSIS insertRuleAudit/insertWebhookAudit.
-func insertAttachmentAudit(ctx context.Context, exec execer, actorID, actorRole, action, attachmentID, workspaceID string, stateAfter map[string]any) error {
+func insertAttachmentAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, attachmentID, workspaceID string, stateAfter map[string]any) error {
+	snap, err := auditSnapshotAttachment(ctx, exec, attachmentID)
+	if err != nil {
+		return fmt.Errorf("insertAttachmentAudit: snapshot: %w", err)
+	}
 	return writeAuditLog(ctx, exec, "audit_logs", actorID, actorRole, action, "task_attachment", &attachmentID,
-		map[string]any{"workspace_id": workspaceID}, nil, stateAfter)
+		mergeMeta(snap, map[string]any{"workspace_id": workspaceID}), nil, stateAfter)
 }
