@@ -139,6 +139,16 @@ func (r *TaskDependencyRepository) WouldCreateCycle(ctx context.Context, exec db
 	return append(path, successorID), nil
 }
 
+// dependencyAuditState -- id + kode + judul predecessor (snapshot supaya audit
+// terbaca tanpa live JOIN, IG-130).
+func dependencyAuditState(ctx context.Context, exec db.Executor, predecessorID string) (map[string]any, error) {
+	snap, err := auditSnapshotTask(ctx, exec, predecessorID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"predecessor_task_id": predecessorID, "predecessor_code": snap["task_code"], "predecessor_title": snap["name"]}, nil
+}
+
 // Create -- tambah dependency (US-018, S4-51). Pemanggil (service) WAJIB
 // sudah lolos cek self-reference dan WouldCreateCycle sebelum ini.
 func (r *TaskDependencyRepository) Create(ctx context.Context, exec db.Executor, predecessorID, successorID string, createdBy *string, actorRole, workspaceID string) error {
@@ -153,8 +163,11 @@ func (r *TaskDependencyRepository) Create(ctx context.Context, exec db.Executor,
 	if createdBy != nil {
 		actorID = *createdBy
 	}
-	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.dependency_added", successorID, workspaceID, nil,
-		map[string]any{"predecessor_task_id": predecessorID}); err != nil {
+	pre, err := dependencyAuditState(ctx, exec, predecessorID)
+	if err != nil {
+		return fmt.Errorf("repository.Create: snapshot: %w", err)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.dependency_added", successorID, workspaceID, nil, pre); err != nil {
 		return fmt.Errorf("repository.Create: audit: %w", err)
 	}
 	return nil
@@ -168,8 +181,11 @@ func (r *TaskDependencyRepository) Delete(ctx context.Context, exec db.Executor,
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Delete: %w", domain.ErrDependencyNotFound)
 	}
-	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.dependency_removed", successorID, workspaceID, nil,
-		map[string]any{"predecessor_task_id": predecessorID}); err != nil {
+	pre, err := dependencyAuditState(ctx, exec, predecessorID)
+	if err != nil {
+		return fmt.Errorf("repository.Delete: snapshot: %w", err)
+	}
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.dependency_removed", successorID, workspaceID, nil, pre); err != nil {
 		return fmt.Errorf("repository.Delete: audit: %w", err)
 	}
 	return nil

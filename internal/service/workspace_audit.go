@@ -16,8 +16,9 @@ import (
 
 // workspaceAuditRepository -- interface didefinisikan di consumer, §3.9.
 type workspaceAuditRepository interface {
-	List(ctx context.Context, exec db.Executor, f repository.WorkspaceAuditLogFilter) ([]repository.WorkspaceAuditLogEntry, int, error)
+	List(ctx context.Context, exec db.Executor, f *repository.WorkspaceAuditLogFilter) ([]repository.WorkspaceAuditLogEntry, int, error)
 	ListActors(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.WorkspaceAuditActor, error)
+	LogExport(ctx context.Context, exec db.Executor, actorID, actorRole, workspaceID, projectID, name string, rows int) error
 }
 
 // workspaceAuditRuleExecutions -- reuse RuleRepository.ListExecutions (S4W-11)
@@ -75,7 +76,7 @@ func (s *WorkspaceAuditService) List(ctx context.Context, exec db.Executor, work
 	if offset < 0 {
 		offset = 0
 	}
-	entries, total, err := s.repo.List(ctx, exec, repository.WorkspaceAuditLogFilter{
+	entries, total, err := s.repo.List(ctx, exec, &repository.WorkspaceAuditLogFilter{
 		WorkspaceID: workspaceID, ActorID: actorFilterID, ActionType: actionType, Days: days, Limit: limit, Offset: offset,
 	})
 	if err != nil {
@@ -92,11 +93,19 @@ func (s *WorkspaceAuditService) ExportCSV(ctx context.Context, exec db.Executor,
 	if err := s.authorizeWorkspace(ctx, exec, workspaceID, actorID, actorRole); err != nil {
 		return nil, err
 	}
-	entries, _, err := s.repo.List(ctx, exec, repository.WorkspaceAuditLogFilter{
+	entries, _, err := s.repo.List(ctx, exec, &repository.WorkspaceAuditLogFilter{
 		WorkspaceID: workspaceID, ActorID: actorFilterID, ActionType: actionType, Days: days, Limit: WorkspaceAuditCSVExportLimit, Offset: 0,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("service.ExportCSV: %w", err)
+	}
+	// Desain "AW Audit Trail": "Aksi ekspor ini juga dicatat" (IG-130).
+	auditRole := actorRole
+	if actorRole != "platform_admin" && actorRole != "group_admin" {
+		auditRole = "admin_workspace" // authorizeWorkspace hanya meloloskan AW
+	}
+	if err := s.repo.LogExport(ctx, exec, actorID, auditRole, workspaceID, "", "", len(entries)); err != nil {
+		return nil, fmt.Errorf("service.ExportCSV: audit: %w", err)
 	}
 	return entries, nil
 }

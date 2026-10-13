@@ -353,7 +353,11 @@ func (r *CustomStatusRepository) SetRequirePic(ctx context.Context, exec db.Exec
 // project).
 func insertCustomStatusAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, statusID, workspaceID string, stateBefore, stateAfter map[string]any) error {
 	ip, path := requestMetaFromContext(ctx)
-	metadata := map[string]any{}
+	// Snapshot nama status + project_id (hanya status scope project), IG-130.
+	metadata, err := auditSnapshotStatus(ctx, exec, statusID)
+	if err != nil {
+		return fmt.Errorf("insertCustomStatusAudit: snapshot: %w", err)
+	}
 	if path != "" {
 		metadata["request_path"] = path
 	}

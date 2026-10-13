@@ -369,7 +369,11 @@ func (r *RuleRepository) HasExecutionForTask(ctx context.Context, exec db.Execut
 // di sini, TAPI snapshot tetap ditambah supaya Audit Trail Workspace tidak
 // perlu JOIN sama sekali untuk resolusi nama (satu sumber kebenaran yang
 // sama dipakai attachment/custom_status/project, bukan pengecualian).
-func insertRuleAudit(ctx context.Context, exec execer, actorID, actorRole, action, ruleID, workspaceID, name string, stateAfter map[string]any) error {
+func insertRuleAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, ruleID, workspaceID, name string, stateAfter map[string]any) error {
+	snap, err := auditSnapshotRule(ctx, exec, ruleID)
+	if err != nil {
+		return fmt.Errorf("insertRuleAudit: snapshot: %w", err)
+	}
 	return writeAuditLog(ctx, exec, "audit_logs", actorID, actorRole, action, "automation_rule", &ruleID,
-		map[string]any{"workspace_id": workspaceID, "rule_name": name}, nil, stateAfter)
+		mergeMeta(snap, map[string]any{"workspace_id": workspaceID, "rule_name": name}), nil, stateAfter)
 }
