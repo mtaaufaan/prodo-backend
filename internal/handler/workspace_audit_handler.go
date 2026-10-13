@@ -10,6 +10,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
+	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
@@ -56,7 +57,7 @@ func (h *WorkspaceAuditHandler) List(c *fiber.Ctx) error {
 		if err != nil {
 			return h.mapError(c, err, "Gagal mengekspor audit trail")
 		}
-		return h.writeCSV(c, entries)
+		return writeWorkspaceAuditCSV(c, entries, "audit-trail-workspace.csv")
 	}
 
 	page := c.QueryInt("page", 1)
@@ -130,23 +131,30 @@ func (h *WorkspaceAuditHandler) Executions(c *fiber.Ctx) error {
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil log eksekusi rule")
 	}
-	data := make([]fiber.Map, len(list))
-	for i := range list {
-		e := &list[i]
-		data[i] = fiber.Map{
-			"id": e.ID, "rule_id": e.RuleID, "rule_name": e.RuleName,
-			"trigger_event": json.RawMessage(e.TriggerEvent), "triggered_by": e.TriggeredBy,
-			"executed_at": e.ExecutedAt.UTC().Format(time.RFC3339), "status": e.Status,
-			"action_taken": json.RawMessage(e.ActionTaken), "error_message": e.ErrorMessage,
-			"task_code": e.TaskCode, "task_title": e.TaskTitle,
-		}
-	}
-	return c.JSON(response.Success(data))
+	return c.JSON(response.Success(ruleExecutionsToMaps(list)))
 }
 
-func (h *WorkspaceAuditHandler) writeCSV(c *fiber.Ctx, entries []repository.WorkspaceAuditLogEntry) error {
+// auditActorAndExec -- actor + transaksi RLS dari request (dipakai handler audit
+// workspace dan project).
+func auditActorAndExec(c *fiber.Ctx, logger *zap.Logger, who string) (actorID, actorRole string, exec db.Executor, errResp error) {
+	actorID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		logger.Error(who + " dipanggil tanpa jwtAuth -- actor belum diresolve")
+		return "", "", nil, c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok = middleware.DBTxFromContext(c)
+	if !ok {
+		logger.Error(who + " dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
+		return "", "", nil, c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	return actorID, actorRole, exec, nil
+}
+
+// writeWorkspaceAuditCSV -- ekspor CSV audit (workspace dan project): kolom sama,
+// kalimat narasi diproduksi server (workspaceAuditNarrativeText).
+func writeWorkspaceAuditCSV(c *fiber.Ctx, entries []repository.WorkspaceAuditLogEntry, filename string) error {
 	c.Set("Content-Type", "text/csv; charset=utf-8")
-	c.Set("Content-Disposition", `attachment; filename="audit-trail-workspace.csv"`)
+	c.Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 
 	w := csv.NewWriter(c.Response().BodyWriter())
 	if err := w.Write([]string{"entry_id", "timestamp_utc", "actor_name", "actor_id", "action_type", "action", "entity_type", "entity_id", "entity_name", "value_before", "value_after", "ip_address", "request_path"}); err != nil {

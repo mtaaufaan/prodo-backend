@@ -220,6 +220,12 @@ func (r *SprintRepository) SetStatus(ctx context.Context, exec db.Executor, spri
 }
 
 func (r *SprintRepository) Delete(ctx context.Context, exec db.Executor, sprintID, workspaceID, actorID, actorRole, name string) error {
+	// Snapshot project SEBELUM baris dihapus (hard delete): tanpa ini audit
+	// sprint.deleted tak bisa lagi dikaitkan ke project.
+	snap, err := auditSnapshotSprint(ctx, exec, sprintID)
+	if err != nil {
+		return fmt.Errorf("repository.Delete: snapshot: %w", err)
+	}
 	tag, err := exec.Exec(ctx, `DELETE FROM sprints WHERE id = $1`, sprintID)
 	if err != nil {
 		return fmt.Errorf("repository.Delete: %w", err)
@@ -227,8 +233,8 @@ func (r *SprintRepository) Delete(ctx context.Context, exec db.Executor, sprintI
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Delete: %w", domain.ErrSprintNotFound)
 	}
-	if err := insertSprintAudit(ctx, exec, actorID, actorRole, "sprint.deleted", sprintID, workspaceID,
-		map[string]any{"name": name}, nil); err != nil {
+	if err := insertSprintAuditMeta(ctx, exec, actorID, actorRole, "sprint.deleted", sprintID, workspaceID,
+		map[string]any{"name": name}, nil, snap); err != nil {
 		return fmt.Errorf("repository.Delete: audit: %w", err)
 	}
 	return nil
@@ -299,8 +305,20 @@ func (r *SprintRepository) AssignTasks(ctx context.Context, exec db.Executor, sp
 // sprint dicatat di audit trail" -- sebelumnya TIDAK PERNAH ditulis sama
 // sekali (ditemukan IG-92 saat audit sebelum implementasi, bukan regresi).
 func insertSprintAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, sprintID, workspaceID string, stateBefore, stateAfter map[string]any) error {
+	snap, err := auditSnapshotSprint(ctx, exec, sprintID)
+	if err != nil {
+		return fmt.Errorf("insertSprintAudit: snapshot: %w", err)
+	}
+	return insertSprintAuditMeta(ctx, exec, actorID, actorRole, action, sprintID, workspaceID, stateBefore, stateAfter, snap)
+}
+
+// insertSprintAuditMeta -- sama insertSprintAudit tetapi snapshot (project_id +
+// nama) disuplai pemanggil: dipakai sprint.deleted, saat barisnya sudah hilang.
+func insertSprintAuditMeta(ctx context.Context, exec db.Executor, actorID, actorRole, action, sprintID, workspaceID string, stateBefore, stateAfter, metadata map[string]any) error {
 	ip, path := requestMetaFromContext(ctx)
-	metadata := map[string]any{}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
 	if path != "" {
 		metadata["request_path"] = path
 	}

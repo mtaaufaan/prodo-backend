@@ -331,6 +331,12 @@ func (r *TaskRepository) List(ctx context.Context, exec db.Executor, projectID s
 }
 
 func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, priority string, startDate, dueDate *time.Time, estimatedHours *float64, storyPoints *int, sprintID *string, actorID, actorRole, workspaceID string) error {
+	// Nilai SEBELUM dibaca di transaksi yang sama sebelum UPDATE (standar audit
+	// trail: perubahan nilai skalar wajib punya before/after, IG-130).
+	var oldTitle, oldPriority string
+	if _, err := scanOptional(exec.QueryRow(ctx, `SELECT title, priority::text FROM tasks WHERE id = $1 AND deleted_at IS NULL`, taskID), &oldTitle, &oldPriority); err != nil {
+		return fmt.Errorf("repository.Update: nilai sebelum: %w", err)
+	}
 	tag, err := exec.Exec(ctx, `
 		UPDATE tasks SET title = $2, description = $3, priority = $4, start_date = $5, due_date = $6,
 		       estimated_hours = $7, story_points = $8, sprint_id = $9, updated_at = NOW()
@@ -342,8 +348,8 @@ func (r *TaskRepository) Update(ctx context.Context, exec db.Executor, taskID, t
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.Update: %w", domain.ErrTaskNotFound)
 	}
-	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.updated", taskID, workspaceID, nil,
-		map[string]any{"title": title, "priority": priority}); err != nil {
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.updated", taskID, workspaceID,
+		map[string]any{"title": oldTitle, "priority": oldPriority}, map[string]any{"title": title, "priority": priority}); err != nil {
 		return fmt.Errorf("repository.Update: audit: %w", err)
 	}
 	return nil
@@ -393,6 +399,10 @@ func (r *TaskRepository) SetPosition(ctx context.Context, exec db.Executor, task
 // Lengkap", dipanggil setelah service memverifikasi actor = pembuat task
 // atau PIC aktif.
 func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole, workspaceID string) error {
+	var oldCompleteness string
+	if _, err := scanOptional(exec.QueryRow(ctx, `SELECT completeness::text FROM tasks WHERE id = $1 AND deleted_at IS NULL`, taskID), &oldCompleteness); err != nil {
+		return fmt.Errorf("repository.SetCompleteness: nilai sebelum: %w", err)
+	}
 	// ready_at = kali TERAKHIR dinyatakan lengkap (NULL kalau dibuka lagi);
 	// completeness_reopen_count naik tiap lengkap -> belum lengkap (IG-126).
 	// Kolom completeness di sisi kanan CASE = nilai SEBELUM update.
@@ -410,8 +420,8 @@ func (r *TaskRepository) SetCompleteness(ctx context.Context, exec db.Executor, 
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("repository.SetCompleteness: %w", domain.ErrTaskNotFound)
 	}
-	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.completeness_changed", taskID, workspaceID, nil,
-		map[string]any{"completeness": completeness}); err != nil {
+	if err := insertTaskAudit(ctx, exec, actorID, actorRole, "task.completeness_changed", taskID, workspaceID,
+		map[string]any{"completeness": oldCompleteness}, map[string]any{"completeness": completeness}); err != nil {
 		return fmt.Errorf("repository.SetCompleteness: audit: %w", err)
 	}
 	return nil
@@ -462,7 +472,12 @@ func (r *TaskRepository) AssignUser(ctx context.Context, exec db.Executor, taskI
 // tidak diperbaiki di titik ini).
 func insertTaskAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, taskID, workspaceID string, stateBefore, stateAfter map[string]any) error {
 	ip, path := requestMetaFromContext(ctx)
-	metadata := map[string]any{}
+	// Snapshot project_id + kode + judul task (IG-130): identitas target tidak
+	// boleh bergantung pada live JOIN -- audit project menyaring lewat project_id ini.
+	metadata, err := auditSnapshotTask(ctx, exec, taskID)
+	if err != nil {
+		return fmt.Errorf("insertTaskAudit: snapshot: %w", err)
+	}
 	if path != "" {
 		metadata["request_path"] = path
 	}
