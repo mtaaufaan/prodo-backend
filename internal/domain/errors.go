@@ -610,6 +610,19 @@ var (
 	// ErrTimeEntryNotPending dikembalikan approve/reject saat entri BUKAN
 	// timer/manual is_approved=NULL (sudah diputuskan sebelumnya).
 	ErrTimeEntryNotPending = errors.New("time entry is not pending approval")
+
+	// ErrCommentNotFound -- komentar tidak ada / sudah dihapus (S6E-04, IG-135).
+	ErrCommentNotFound = errors.New("comment not found")
+
+	// ErrCommentInvalid -- isi komentar kosong (< 2 karakter setelah trim) atau > 1000 karakter.
+	ErrCommentInvalid = errors.New("comment text is invalid")
+
+	// ErrCommentForbidden -- role tidak boleh berkomentar, atau bukan penulis (edit) / bukan
+	// penulis/PM/Admin Workspace (hapus).
+	ErrCommentForbidden = errors.New("comment action is not allowed for this user")
+
+	// ErrCommentEditLocked -- PATCH komentar setelah jendela 3 menit sejak dikirim (waktu server).
+	ErrCommentEditLocked = errors.New("comment can no longer be edited")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id
