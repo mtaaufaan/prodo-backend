@@ -309,7 +309,10 @@ func run() error {
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	stepUpHandler := handler.NewStepUpHandler(stepUpSvc, accountSvc, logger)
 	requireStepUp := middleware.RequireStepUp(stepUpSvc)
-	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, logger)
+	editorAccessRepo := repository.NewEditorProjectAccessRepository()
+	editorProjectGate := middleware.RequireEditorProjectAccess(editorAccessRepo, false) // S6E-02, IG-133
+	editorTaskGate := middleware.RequireEditorProjectAccess(editorAccessRepo, true)
+	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, editorAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 	accountSettingsHandler := handler.NewAccountSettingsHandler(accountSvc, profileSvc, logger)
@@ -440,6 +443,7 @@ func run() error {
 	// (selalu "workspace", ga_console_enabled selalu false untuk mereka).
 	v1.Get("/me/context", jwtAuth, dbCtx, contextHandler.Get)
 	v1.Patch("/me/context", jwtAuth, dbCtx, contextHandler.Switch)
+	v1.Get("/me/projects", jwtAuth, dbCtx, contextHandler.Projects)
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
 	// S3-15, US-009. Param :userId (bukan :account_id seperti wording asli
 	// task, konsisten koreksi S2-01/04). Otorisasi sama seperti UpdateMemberRole.
@@ -495,7 +499,7 @@ func run() error {
 	// presisi di service (authorizeScope). Mutasi selain Create reuse
 	// endpoint /statuses/:id/* di atas apa adanya (statusID sudah cukup
 	// meresolve scope-nya sendiri lewat CustomStatusRepository.Get).
-	v1.Get("/projects/:id/statuses", jwtAuth, dbCtx, customStatusHandler.ListForProject)
+	v1.Get("/projects/:id/statuses", jwtAuth, dbCtx, editorProjectGate, customStatusHandler.ListForProject)
 	v1.Post("/projects/:id/statuses", jwtAuth, dbCtx, customStatusHandler.CreateForProject)
 	// S4W-14, US-054 ("AW Webhook.dc.html"+"AW Add Webhook.dc.html") -- reuse
 	// WebhookService (Track S4G), AW-only (ditegakkan service, sama pola
@@ -777,7 +781,7 @@ func run() error {
 	v1.Put("/projects/:id/unarchive", jwtAuth, dbCtx, projectHandler.Unarchive)
 	v1.Delete("/projects/:id", jwtAuth, dbCtx, projectHandler.Delete)
 	v1.Post("/projects/:id/restore", jwtAuth, dbCtx, projectHandler.Restore)
-	v1.Get("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.ListMembers)
+	v1.Get("/projects/:id/members", jwtAuth, dbCtx, editorProjectGate, projectMemberHandler.ListMembers)
 	v1.Post("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.AddMember)
 	// IG-100 susulan, tombol "+ MEMBER" -- daftar email sekaligus, boleh
 	// dari luar workspace/organisasi ini (lihat service/project_member.go).
@@ -814,7 +818,7 @@ func run() error {
 		}),
 		projectImportHandler.Execute)
 	v1.Post("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.Create)
-	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.List)
+	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, editorProjectGate, sprintHandler.List)
 	v1.Put("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Update)
 	v1.Post("/sprints/:id/start", jwtAuth, dbCtx, sprintHandler.Start)
 	v1.Post("/sprints/:id/complete", jwtAuth, dbCtx, sprintHandler.Complete)
@@ -823,8 +827,8 @@ func run() error {
 	v1.Delete("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Delete)
 
 	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.Create)
-	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.List)
-	v1.Get("/tasks/:id", jwtAuth, dbCtx, taskHandler.Get)
+	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, editorProjectGate, taskHandler.List)
+	v1.Get("/tasks/:id", jwtAuth, dbCtx, editorTaskGate, taskHandler.Get)
 	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
 	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
 	v1.Put("/tasks/:id/reorder", jwtAuth, dbCtx, taskHandler.Reorder)
@@ -832,8 +836,8 @@ func run() error {
 	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
 	// Menu Board tab Gantt (US-039/H22-24): bulk per-project, bukan per-task
 	// (N+1) -- lihat komentar handler ProjectStatusSessions/ProjectDependencies.
-	v1.Get("/projects/:id/status-sessions", jwtAuth, dbCtx, taskHandler.ProjectStatusSessions)
-	v1.Get("/projects/:id/dependencies", jwtAuth, dbCtx, taskHandler.ProjectDependencies)
+	v1.Get("/projects/:id/status-sessions", jwtAuth, dbCtx, editorProjectGate, taskHandler.ProjectStatusSessions)
+	v1.Get("/projects/:id/dependencies", jwtAuth, dbCtx, editorProjectGate, taskHandler.ProjectDependencies)
 
 	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
 	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
