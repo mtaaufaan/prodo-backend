@@ -263,7 +263,10 @@ func (h *TaskHandler) BulkSetStatus(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "Body request tidak valid", nil))
 	}
-	results := h.tasks.BulkSetStatus(c.Context(), exec, body.TaskIDs, body.StatusID, body.PicIDs, actorUserID, actorRole)
+	results, err := h.tasks.BulkSetStatus(c.Context(), exec, c.Params("id"), body.TaskIDs, body.StatusID, body.PicIDs, actorUserID, actorRole)
+	if err != nil {
+		return h.mapError(c, err, "Gagal memproses bulk status")
+	}
 	data := make([]fiber.Map, len(results))
 	successCount := 0
 	for i, r := range results {
@@ -691,6 +694,10 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusConflict).JSON(response.Error("CIRCULAR_DEPENDENCY", "Menambahkan dependency ini akan membuat circular dependency.", fiber.Map{"cycle_path": cycleErr.CyclePath}))
 	case errors.Is(err, domain.ErrTaskIncomplete):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TASK_INCOMPLETE", "Task ini masih ditandai Belum Lengkap -- selesaikan kelengkapannya dulu sebelum mengubah status.", nil))
+	case errors.Is(err, domain.ErrNotYourTask):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_YOUR_TASK", "Anda hanya dapat mengubah task yang ditugaskan kepada Anda.", nil))
+	case errors.Is(err, domain.ErrBulkNotAllowed):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("BULK_NOT_ALLOWED", "Role Anda tidak dapat memakai aksi bulk.", nil))
 	case errors.Is(err, domain.ErrNotBacklogPic):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_BACKLOG_PIC", "Hanya PIC backlog task ini yang dapat menyatakan lengkap atau belum lengkap.", nil))
 	case errors.Is(err, domain.ErrTaskNotInSprint):

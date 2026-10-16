@@ -42,6 +42,7 @@ type picGroupMemberLister interface {
 // task SAAT INI, sama seperti Acknowledge/ListActive).
 type taskPicTaskResolver interface {
 	Get(ctx context.Context, exec db.Executor, taskID string) (*repository.Task, error)
+	IsOwner(ctx context.Context, exec db.Executor, taskID, userID string) (bool, error)
 }
 
 type TaskPicService struct {
@@ -267,6 +268,9 @@ func (s *TaskPicService) AddPic(ctx context.Context, exec db.Executor, taskID, u
 	if err != nil {
 		return err
 	}
+	if err := requireOwnTask(ctx, exec, s.tasks, role, taskID, actorID); err != nil {
+		return err
+	}
 	if err := s.checkPicGroupAllowed(ctx, exec, task.ProjectID, task.StatusID, role, userID); err != nil {
 		return err
 	}
@@ -344,6 +348,9 @@ func (s *TaskPicService) HandoffPic(ctx context.Context, exec db.Executor, taskI
 	}
 	role, err := s.authorizeProject(ctx, exec, task.ProjectID, actorID, actorRole)
 	if err != nil {
+		return err
+	}
+	if err := requireOwnTask(ctx, exec, s.tasks, role, taskID, actorID); err != nil {
 		return err
 	}
 	if err := s.checkPicGroupAllowed(ctx, exec, task.ProjectID, task.StatusID, role, toUserID); err != nil {

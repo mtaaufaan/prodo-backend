@@ -623,6 +623,13 @@ var (
 
 	// ErrCommentEditLocked -- PATCH komentar setelah jendela 3 menit sejak dikirim (waktu server).
 	ErrCommentEditLocked = errors.New("comment can no longer be edited")
+
+	// ErrNotYourTask -- role Editor mengubah task yang BUKAN miliknya (bukan assignee dan bukan PIC aktif):
+	// pindah status, ubah, urutkan, tandai lengkap, tambah/serahkan PIC (S6E-06, IG-137).
+	ErrNotYourTask = errors.New("task is not assigned to this editor")
+
+	// ErrBulkNotAllowed -- aksi bulk (pindah status banyak task) ditolak untuk role Editor (S6E-06, IG-137).
+	ErrBulkNotAllowed = errors.New("bulk actions are not allowed for this role")
 )
 
 // StorageQuotaBelowUsageError dikembalikan PUT /platform/group-admins/:id

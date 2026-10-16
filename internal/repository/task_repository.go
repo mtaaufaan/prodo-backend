@@ -766,6 +766,19 @@ func (r *TaskRepository) ListDueForProject(ctx context.Context, exec db.Executor
 	return list, nil
 }
 
+// IsOwner -- user adalah assignee ATAU PIC aktif task ini ("milik saya", sama dengan Task Saya dan
+// isOwnTask di frontend). Dasar gerbang role Editor (S6E-06, IG-137).
+func (r *TaskRepository) IsOwner(ctx context.Context, exec db.Executor, taskID, userID string) (bool, error) {
+	var owner bool
+	if err := exec.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = $1 AND user_id = $2)
+		    OR EXISTS (SELECT 1 FROM task_pic_phases WHERE task_id = $1 AND user_id = $2 AND is_active)
+	`, taskID, userID).Scan(&owner); err != nil {
+		return false, fmt.Errorf("repository.IsOwner: %w", err)
+	}
+	return owner, nil
+}
+
 func (r *TaskRepository) GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error) {
 	var projectID string
 	err := exec.QueryRow(ctx, `SELECT project_id FROM tasks WHERE id = $1 AND deleted_at IS NULL`, taskID).Scan(&projectID)
