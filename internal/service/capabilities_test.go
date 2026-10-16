@@ -10,7 +10,7 @@ func TestCapabilitiesForRole(t *testing.T) {
 		{"editor", Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true}},
 		{"approver", Capabilities{Comment: true}},
 		{"viewer", Capabilities{}},
-		{"division_viewer", Capabilities{}},
+		{"division_viewer", Capabilities{Comment: true}},
 		{"", Capabilities{}},
 		{"project_manager", Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true, ManageProject: true, ManageRules: true}},
 		{"admin_workspace", Capabilities{true, true, true, true, true, true, true, true}},

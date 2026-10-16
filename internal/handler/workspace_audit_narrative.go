@@ -190,6 +190,17 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Entri waktu task %s disetujui (%s menit)`, workspaceAuditTaskLabel(e, meta), workspaceAuditMetaNumber(workspaceAuditStateAfter(e), "duration_minutes"))
 	case "task.time_entry_rejected":
 		return fmt.Sprintf(`Entri waktu task %s ditolak: %s`, workspaceAuditTaskLabel(e, meta), workspaceAuditMetaString(workspaceAuditStateAfter(e), "rejection_note", "tanpa catatan"))
+	case "comment.created":
+		text := fmt.Sprintf(`Komentar ditambahkan pada task %s`, workspaceAuditTaskLabel(e, meta))
+		if list, _ := workspaceAuditStateAfter(e)["mentions"].([]any); len(list) > 0 {
+			text += fmt.Sprintf(` (mention: %s)`, workspaceAuditJoinNames(list))
+		}
+		return text
+	case "comment.edited":
+		return fmt.Sprintf(`Komentar pada task %s diedit dari %q menjadi %q`, workspaceAuditTaskLabel(e, meta),
+			workspaceAuditShortText(workspaceAuditMetaString(workspaceAuditStateBefore(e), "text", "")), workspaceAuditShortText(workspaceAuditMetaString(workspaceAuditStateAfter(e), "text", "")))
+	case "comment.deleted":
+		return fmt.Sprintf(`Komentar pada task %s dihapus`, workspaceAuditTaskLabel(e, meta))
 	case "audit.report_downloaded":
 		return fmt.Sprintf(`Audit Trail %s %q diekspor (CSV, %s baris)`, workspaceAuditMetaString(workspaceAuditStateAfter(e), "scope", "workspace"), target, workspaceAuditMetaNumber(workspaceAuditStateAfter(e), "rows"))
 	case "timesheet.estimates_recalculated":
@@ -265,6 +276,16 @@ func workspaceAuditCompletenessLabel(v string) string {
 	default:
 		return "?"
 	}
+}
+
+// workspaceAuditShortText -- potong teks komentar untuk narasi (80 karakter + "..."), sama dengan
+// shortText di features/workspace-audit/narrative.ts.
+func workspaceAuditShortText(s string) string {
+	r := []rune(s)
+	if len(r) <= 80 {
+		return s
+	}
+	return string(r[:80]) + "..."
 }
 
 func workspaceAuditJoinNames(v any) string {
