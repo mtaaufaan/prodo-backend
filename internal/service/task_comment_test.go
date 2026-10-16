@@ -70,7 +70,9 @@ func (f *fakeCommentStore) SoftDelete(context.Context, db.Executor, string) erro
 	f.deleted = true
 	return nil
 }
-func (f *fakeCommentStore) CountForTask(context.Context, db.Executor, string) (int, error) { return 3, nil }
+func (f *fakeCommentStore) CountForTask(context.Context, db.Executor, string) (int, error) {
+	return 3, nil
+}
 func (f *fakeCommentStore) EnsureFollower(_ context.Context, _ db.Executor, _, userID, source string) error {
 	if _, ok := f.followers[userID]; !ok {
 		f.followers[userID] = source
