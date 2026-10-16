@@ -32,6 +32,7 @@ type taskRepository interface {
 	SetCompleteness(ctx context.Context, exec db.Executor, taskID, completeness, actorID, actorRole, workspaceID string) error
 	SoftDelete(ctx context.Context, exec db.Executor, taskID, actorID, actorRole, workspaceID string) error
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
+	IsOwner(ctx context.Context, exec db.Executor, taskID, userID string) (bool, error)
 	AssignUser(ctx context.Context, exec db.Executor, taskID, userID, assignedBy string) error
 	CreateVersionSnapshot(ctx context.Context, exec db.Executor, taskID, title string, description json.RawMessage, changedBy, trigger string) error
 	ListVersionSnapshots(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskVersionSnapshot, error)
@@ -176,6 +177,34 @@ func (s *TaskService) resolveRole(ctx context.Context, exec db.Executor, project
 	return role, nil
 }
 
+// taskOwnerChecker -- cukup IsOwner; dipakai TaskService dan TaskPicService.
+type taskOwnerChecker interface {
+	IsOwner(ctx context.Context, exec db.Executor, taskID, userID string) (bool, error)
+}
+
+// requireOwnTask -- gerbang role Editor (S6E-06, IG-137; desain "PM Board.dc.html" limitToMine): Editor hanya
+// boleh mengubah task miliknya (assignee atau PIC aktif); selain itu ErrNotYourTask. Role lain tidak
+// terpengaruh. role = hasil resolveRole/authorizeProject (editor workspace ATAU project-scoped editor).
+func requireOwnTask(ctx context.Context, exec db.Executor, owners taskOwnerChecker, role, taskID, userID string) error {
+	if role != "editor" {
+		return nil
+	}
+	owner, err := owners.IsOwner(ctx, exec, taskID, userID)
+	if err != nil {
+		return fmt.Errorf("service.requireOwnTask: %w", err)
+	}
+	if !owner {
+		return fmt.Errorf("service.requireOwnTask: %w", domain.ErrNotYourTask)
+	}
+	return nil
+}
+
+// canDeleteTask -- matriks RBAC baris 14 "Hapus task": hanya Admin Workspace dan Project Manager
+// (role kosong = Platform/Group Admin). Editor dan Approver tidak.
+func canDeleteTask(role string) bool {
+	return role == "" || role == "admin_workspace" || role == "project_manager"
+}
+
 func validatePriority(priority string) (string, error) {
 	priority = strings.ToLower(strings.TrimSpace(priority))
 	if priority == "" {
@@ -302,6 +331,9 @@ func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, titl
 	if err != nil {
 		return err
 	}
+	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
+		return err
+	}
 	if !equalIntPtr(current.StoryPoints, storyPoints) {
 		allowEditorSP, err := s.projects.GetAllowEditorStoryPoints(ctx, exec, current.ProjectID)
 		if err != nil {
@@ -394,6 +426,9 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	}
 	role, err := s.resolveRole(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
+		return err
+	}
+	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
 		return err
 	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
@@ -573,7 +608,11 @@ func (s *TaskService) Reorder(ctx context.Context, exec db.Executor, taskID, tar
 	if src.StatusID != target.StatusID {
 		return fmt.Errorf("service.Reorder: %w", domain.ErrInvalidInput)
 	}
-	if _, err := s.authorize(ctx, exec, src.ProjectID, actorID, actorRole); err != nil {
+	role, err := s.authorize(ctx, exec, src.ProjectID, actorID, actorRole)
+	if err != nil {
+		return err
+	}
+	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
 		return err
 	}
 	siblings, err := s.repo.List(ctx, exec, src.ProjectID, repository.TaskFilter{StatusID: src.StatusID})
@@ -627,13 +666,21 @@ type BulkStatusResult struct {
 // task (guard dependency/completeness/PIC-Group SAMA PERSIS, tidak ada
 // jalur pintas) -- satu task gagal tidak menggagalkan task lain dalam
 // batch yang sama.
-func (s *TaskService) BulkSetStatus(ctx context.Context, exec db.Executor, taskIDs []string, statusID string, picIDs []string, actorID, actorRole string) []BulkStatusResult {
+func (s *TaskService) BulkSetStatus(ctx context.Context, exec db.Executor, projectID string, taskIDs []string, statusID string, picIDs []string, actorID, actorRole string) ([]BulkStatusResult, error) {
+	// Role Editor tidak boleh bulk (S6E-06, IG-137): ditolak SELURUHNYA, tidak satu task pun diproses.
+	role, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	if role == "editor" {
+		return nil, fmt.Errorf("service.BulkSetStatus: %w", domain.ErrBulkNotAllowed)
+	}
 	results := make([]BulkStatusResult, 0, len(taskIDs))
 	for _, id := range taskIDs {
 		err := s.SetStatus(ctx, exec, id, statusID, picIDs, actorID, actorRole)
 		results = append(results, BulkStatusResult{TaskID: id, Err: err})
 	}
-	return results
+	return results, nil
 }
 
 // AssignUserForRule (S4W-11, action rule "Assign ke user") -- idempotent
@@ -762,6 +809,13 @@ func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, tas
 	// IG-126: hanya PIC aktif fase BACKLOG (task harus berstatus BACKLOG, jadi
 	// PIC aktifnya adalah PIC backlog). Pembuat task / PM yang bukan PIC tidak
 	// lagi boleh -- PM dapat menambahkan diri sebagai PIC paralel dulu.
+	role, err := s.resolveRole(ctx, exec, task.ProjectID, actorID, actorRole)
+	if err != nil {
+		return err
+	}
+	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
+		return err
+	}
 	if task.StatusName != "BACKLOG" {
 		return fmt.Errorf("service.SetCompleteness: %w", domain.ErrNotBacklogPic)
 	}
@@ -771,10 +825,6 @@ func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, tas
 	}
 	if !isPic {
 		return fmt.Errorf("service.SetCompleteness: %w", domain.ErrNotBacklogPic)
-	}
-	role, err := s.resolveRole(ctx, exec, task.ProjectID, actorID, actorRole)
-	if err != nil {
-		return err
 	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, task.ProjectID)
 	if err != nil {
@@ -797,6 +847,9 @@ func (s *TaskService) Delete(ctx context.Context, exec db.Executor, taskID, acto
 	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return err
+	}
+	if !canDeleteTask(auditRole) {
+		return fmt.Errorf("service.Delete: %w", domain.ErrForbidden)
 	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
 	if err != nil {

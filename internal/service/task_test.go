@@ -14,6 +14,7 @@ import (
 
 type fakeTaskRepo struct {
 	byID               map[string]*repository.Task
+	owners             map[string]bool // taskID -> aktor adalah assignee/PIC aktif (S6E-06)
 	setPositions       map[string]float64
 	setStatusCall      []struct{ id, statusID string }
 	setStatusAuditRole string
@@ -80,6 +81,9 @@ func (f *fakeTaskRepo) GetProjectID(_ context.Context, _ db.Executor, taskID str
 		return "", domain.ErrTaskNotFound
 	}
 	return t.ProjectID, nil
+}
+func (f *fakeTaskRepo) IsOwner(_ context.Context, _ db.Executor, taskID, _ string) (bool, error) {
+	return f.owners[taskID], nil
 }
 func (f *fakeTaskRepo) AssignUser(_ context.Context, _ db.Executor, _, _, _ string) error { return nil }
 func (f *fakeTaskRepo) CreateVersionSnapshot(_ context.Context, _ db.Executor, _, _ string, _ json.RawMessage, _, _ string) error {
@@ -238,7 +242,10 @@ func TestTaskService_BulkSetStatus_PartialFailure(t *testing.T) {
 		"real": {ID: "real", ProjectID: "p1", StatusID: "backlog-status", SprintID: &sprintID},
 	}}
 	svc := newTaskServiceForTest(repo, statuses)
-	results := svc.BulkSetStatus(context.Background(), nil, []string{"ok1", "missing", "ok2"}, "done-status", []string{"pic1"}, "user1", "member")
+	results, err := svc.BulkSetStatus(context.Background(), nil, "p1", []string{"ok1", "missing", "ok2"}, "done-status", []string{"pic1"}, "user1", "member")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
