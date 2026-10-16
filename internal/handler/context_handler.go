@@ -12,6 +12,7 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
 	"github.com/mtaaufaan/prodo-backend/internal/middleware"
 	"github.com/mtaaufaan/prodo-backend/internal/pkg/response"
+	"github.com/mtaaufaan/prodo-backend/internal/repository"
 	"github.com/mtaaufaan/prodo-backend/internal/service"
 )
 
@@ -20,7 +21,14 @@ import (
 type ContextHandler struct {
 	contexts *service.ContextService
 	audit    contextAuditLogger
+	followed followedProjectLister
 	logger   *zap.Logger
+}
+
+// followedProjectLister -- interface didefinisikan di consumer, diimplementasikan
+// *repository.EditorProjectAccessRepository (S6E-02).
+type followedProjectLister interface {
+	ListFollowedProjects(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]repository.FollowedProject, error)
 }
 
 // contextAuditLogger -- interface didefinisikan di consumer, diimplementasikan
@@ -29,8 +37,8 @@ type contextAuditLogger interface {
 	LogSwitch(ctx context.Context, exec db.Executor, userID, fromContext, toContext string) error
 }
 
-func NewContextHandler(contexts *service.ContextService, audit contextAuditLogger, logger *zap.Logger) *ContextHandler {
-	return &ContextHandler{contexts: contexts, audit: audit, logger: logger}
+func NewContextHandler(contexts *service.ContextService, audit contextAuditLogger, followed followedProjectLister, logger *zap.Logger) *ContextHandler {
+	return &ContextHandler{contexts: contexts, audit: audit, followed: followed, logger: logger}
 }
 
 func (h *ContextHandler) Get(c *fiber.Ctx) error {
@@ -62,6 +70,7 @@ func (h *ContextHandler) Get(c *fiber.Ctx) error {
 			"name":         w.Name,
 			"org_name":     w.OrgName,
 			"role":         w.Role,
+			"capabilities": service.CapabilitiesForRole(w.Role),
 			"joined_at":    dateOnly(&joined),
 		})
 	}
@@ -78,6 +87,7 @@ func (h *ContextHandler) Get(c *fiber.Ctx) error {
 			"workspace_name": p.WorkspaceName,
 			"org_name":       p.OrgName,
 			"role":           p.Role,
+			"capabilities":   service.CapabilitiesForRole(p.Role),
 		})
 	}
 
@@ -88,6 +98,32 @@ func (h *ContextHandler) Get(c *fiber.Ctx) error {
 		"workspace_memberships":   workspaces,
 		"project_scoped_projects": projectScoped,
 	}))
+}
+
+// Projects menangani GET /me/projects?workspace_id= (S6E-02, IG-133): project non-arsip di
+// workspace itu yang diikuti user (anggota project, assignee, atau PIC aktif). Data milik
+// user sendiri, jadi tanpa gerbang role: non-anggota mendapat daftar kosong.
+func (h *ContextHandler) Projects(c *fiber.Ctx) error {
+	workspaceID := c.Query("workspace_id")
+	if workspaceID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("VALIDATION_ERROR", "workspace_id wajib diisi", nil))
+	}
+	userID, _, ok := middleware.ActorFromContext(c)
+	exec, txOK := middleware.DBTxFromContext(c)
+	if !ok || !txOK {
+		h.logger.Error("ContextHandler.Projects dipanggil tanpa DBContextMiddleware")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	list, err := h.followed.ListFollowedProjects(c.Context(), exec, workspaceID, userID)
+	if err != nil {
+		h.logger.Error("ContextHandler.Projects gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal memuat project", nil))
+	}
+	data := make([]fiber.Map, 0, len(list))
+	for _, p := range list {
+		data = append(data, fiber.Map{"id": p.ID, "workspace_id": p.WorkspaceID, "name": p.Name, "code": p.Code})
+	}
+	return c.JSON(response.Success(data))
 }
 
 type switchContextRequest struct {
