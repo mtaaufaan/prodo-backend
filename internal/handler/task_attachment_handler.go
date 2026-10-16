@@ -442,6 +442,8 @@ func (h *TaskAttachmentHandler) mapError(c *fiber.Ctx, err error, fallbackMessag
 		return c.Status(fiber.StatusConflict).JSON(response.Error("ALREADY_PURGED", "Lampiran sudah dihapus permanen dan tidak dapat dipulihkan", nil))
 	case errors.Is(err, domain.ErrWorkspaceNameConfirmMismatch):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("CONFIRM_MISMATCH", "Nama workspace yang diketik tidak cocok", nil))
+	case errors.Is(err, domain.ErrNotYourTask):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_YOUR_TASK", "Anda hanya dapat melampirkan berkas pada task yang ditugaskan kepada Anda.", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas lampiran ini", nil))
 	default:
