@@ -26,7 +26,8 @@ func CapabilitiesForRole(role string) Capabilities {
 		return Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true, ManageProject: true, ManageRules: true}
 	case "editor":
 		return Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true}
-	case "approver":
+	case "approver", "division_viewer":
+		// Division Viewer boleh berkomentar dan mention (PRD 2.1), tidak lebih.
 		return Capabilities{Comment: true}
 	}
 	return Capabilities{}

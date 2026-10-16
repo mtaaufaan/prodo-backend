@@ -311,6 +311,9 @@ func run() error {
 	requireStepUp := middleware.RequireStepUp(stepUpSvc)
 	editorAccessRepo := repository.NewEditorProjectAccessRepository()
 	editorProjectGate := middleware.RequireEditorProjectAccess(editorAccessRepo, false) // S6E-02, IG-133
+	taskCommentRepo := repository.NewTaskCommentRepository()
+	taskCommentHandler := handler.NewTaskCommentHandler(service.NewTaskCommentService(taskCommentRepo), logger) // S6E-04, IG-135
+	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
 	editorTaskGate := middleware.RequireEditorProjectAccess(editorAccessRepo, true)
 	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, editorAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
@@ -444,6 +447,7 @@ func run() error {
 	v1.Get("/me/context", jwtAuth, dbCtx, contextHandler.Get)
 	v1.Patch("/me/context", jwtAuth, dbCtx, contextHandler.Switch)
 	v1.Get("/me/projects", jwtAuth, dbCtx, contextHandler.Projects)
+	v1.Get("/me/tasks", jwtAuth, dbCtx, myTaskHandler.List) // Task Saya Editor, S6E-04
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
 	// S3-15, US-009. Param :userId (bukan :account_id seperti wording asli
 	// task, konsisten koreksi S2-01/04). Otorisasi sama seperti UpdateMemberRole.
@@ -829,6 +833,13 @@ func run() error {
 	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.Create)
 	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, editorProjectGate, taskHandler.List)
 	v1.Get("/tasks/:id", jwtAuth, dbCtx, editorTaskGate, taskHandler.Get)
+	// Komentar + ikuti task (S6E-04, IG-135). Edit/hapus lewat id komentar: penulis/PM/AW ditegakkan di service.
+	v1.Post("/tasks/:id/comments", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.Create)
+	v1.Get("/tasks/:id/comments", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.List)
+	v1.Patch("/comments/:id", jwtAuth, dbCtx, taskCommentHandler.Edit)
+	v1.Delete("/comments/:id", jwtAuth, dbCtx, taskCommentHandler.Delete)
+	v1.Put("/tasks/:id/follow", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.Follow)
+	v1.Delete("/tasks/:id/follow", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.Unfollow)
 	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
 	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
 	v1.Put("/tasks/:id/reorder", jwtAuth, dbCtx, taskHandler.Reorder)

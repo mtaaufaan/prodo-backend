@@ -54,7 +54,7 @@ func (r *TaskPicRepository) CreatePhase(ctx context.Context, exec db.Executor, t
 	if err != nil {
 		return fmt.Errorf("repository.CreatePhase: %w", err)
 	}
-	return nil
+	return ensureFollower(ctx, exec, taskID, userID, "assignment")
 }
 
 // DeactivateActiveForTask -- dipanggil SEBELUM membuat fase baru saat
@@ -193,6 +193,9 @@ func (r *TaskPicRepository) AddPic(ctx context.Context, exec db.Executor, taskID
 	if err != nil {
 		return fmt.Errorf("repository.AddPic: %w", err)
 	}
+	if err := ensureFollower(ctx, exec, taskID, userID, "assignment"); err != nil {
+		return fmt.Errorf("repository.AddPic: %w", err)
+	}
 	userName, err := auditUserName(ctx, exec, userID)
 	if err != nil {
 		return fmt.Errorf("repository.AddPic: snapshot: %w", err)
@@ -261,6 +264,9 @@ func (r *TaskPicRepository) HandoffPic(ctx context.Context, exec db.Executor, ta
 		VALUES ($1, $2, $3, $4)
 	`, taskID, statusID, toUserID, actorID)
 	if err != nil {
+		return fmt.Errorf("repository.HandoffPic: %w", err)
+	}
+	if err := ensureFollower(ctx, exec, taskID, toUserID, "assignment"); err != nil {
 		return fmt.Errorf("repository.HandoffPic: %w", err)
 	}
 	toName, err := auditUserName(ctx, exec, toUserID)

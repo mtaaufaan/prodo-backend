@@ -12,7 +12,7 @@ import (
 // NewMux membuat ServeMux Asynq -- task StorageQuotaCheck (S4G-08, Track
 // S4G) adalah handler pertama yang benar-benar diisi (skeleton S0-21
 // sebelumnya kosong).
-func NewMux(pool *pgxpool.Pool, emailer *service.EmailService, csvImport *CSVImportHandler, webhookDelivery *WebhookDeliveryHandler, ruleDueDateCheck *RuleDueDateCheckHandler, refreshOrgStorage *RefreshOrgStorageHandler, logger *zap.Logger) *asynq.ServeMux {
+func NewMux(pool *pgxpool.Pool, emailer *service.EmailService, csvImport *CSVImportHandler, webhookDelivery *WebhookDeliveryHandler, ruleDueDateCheck *RuleDueDateCheckHandler, refreshOrgStorage *RefreshOrgStorageHandler, mentionDigest *MentionDigestHandler, logger *zap.Logger) *asynq.ServeMux {
 	mux := asynq.NewServeMux()
 	quotaHandler := NewStorageQuotaCheckHandler(pool, emailer, logger)
 	mux.HandleFunc(TypeStorageQuotaCheck, quotaHandler.Handle)
@@ -22,5 +22,6 @@ func NewMux(pool *pgxpool.Pool, emailer *service.EmailService, csvImport *CSVImp
 	mux.HandleFunc(TypeWebhookDelivery, webhookDelivery.Handle)
 	mux.HandleFunc(TypeRuleDueDateCheck, ruleDueDateCheck.Handle)
 	mux.HandleFunc(TypeRefreshOrgStorage, refreshOrgStorage.Handle)
+	mux.HandleFunc(TypeMentionDigest, mentionDigest.Handle)
 	return mux
 }

@@ -120,6 +120,9 @@ func run() error {
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	refreshOrgStorageHandlerDeps := worker.NewRefreshOrgStorageHandler(pool, attachmentRepo, organizationRepo)
 
+	// MentionDigestJob (S6E-04, IG-135, US-033) -- ringkasan mention yang diakumulasi selama cooldown.
+	mentionDigestHandlerDeps := worker.NewMentionDigestHandler(pool, repository.NewTaskCommentRepository(), logger)
+
 	// StorageQuotaCheckJob (S4G-08, Track S4G) -- job periodik PERTAMA di
 	// codebase ini, dijalankan tiap jam. Scheduler.Start() non-blocking
 	// (jalan di goroutine cron internal asynq) -- proses tetap blok di
@@ -137,6 +140,10 @@ func run() error {
 	// due_date DATE, bukan timestamp) cukup, sama pola RetentionNotify.
 	if _, err := scheduler.Register("@every 24h", asynq.NewTask(worker.TypeRuleDueDateCheck, nil)); err != nil {
 		return fmt.Errorf("daftar jadwal RuleDueDateCheck: %w", err)
+	}
+	// MentionDigestJob -- tiap menit (cooldown terkecil 10 menit, jadi keterlambatan <= 1 menit).
+	if _, err := scheduler.Register("@every 1m", asynq.NewTask(worker.TypeMentionDigest, nil)); err != nil {
+		return fmt.Errorf("daftar jadwal MentionDigest: %w", err)
 	}
 	if err := scheduler.Start(); err != nil {
 		return fmt.Errorf("start scheduler: %w", err)
@@ -162,7 +169,7 @@ func run() error {
 	})
 
 	log.Printf("PRODO Worker starting — env=%s concurrency=%d\n", cfg.AppEnv, cfg.AsynqConcurrency)
-	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, ruleDueDateCheckHandlerDeps, refreshOrgStorageHandlerDeps, logger)); err != nil {
+	if err := srv.Run(worker.NewMux(pool, emailer, csvImportHandlerDeps, webhookDeliveryHandlerDeps, ruleDueDateCheckHandlerDeps, refreshOrgStorageHandlerDeps, mentionDigestHandlerDeps, logger)); err != nil {
 		return fmt.Errorf("worker error: %w", err)
 	}
 	return nil

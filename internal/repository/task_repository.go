@@ -124,6 +124,9 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 		`, id, userID, createdBy); err != nil {
 			return nil, fmt.Errorf("repository.Create: assignee: %w", err)
 		}
+		if err := ensureFollower(ctx, exec, id, userID, "assignment"); err != nil {
+			return nil, fmt.Errorf("repository.Create: %w", err)
+		}
 	}
 
 	// Task Management Core Phase 2 (S4-30): pembuat task otomatis menjadi
@@ -134,6 +137,9 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 		VALUES ($1, $2, $3, $3)
 	`, id, statusID, createdBy); err != nil {
 		return nil, fmt.Errorf("repository.Create: pic fase awal: %w", err)
+	}
+	if err := ensureFollower(ctx, exec, id, createdBy, "assignment"); err != nil {
+		return nil, fmt.Errorf("repository.Create: %w", err)
 	}
 
 	// Task Management Core Phase 4 (S4-62): sesi status pertama (BACKLOG)
@@ -457,7 +463,7 @@ func (r *TaskRepository) AssignUser(ctx context.Context, exec db.Executor, taskI
 	if err != nil {
 		return fmt.Errorf("repository.AssignUser: %w", err)
 	}
-	return nil
+	return ensureFollower(ctx, exec, taskID, userID, "assignment")
 }
 
 // insertTaskAudit -- IG-94/IG-97, pola SAMA PERSIS insertSprintAudit
