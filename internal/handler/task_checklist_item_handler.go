@@ -33,7 +33,7 @@ type createChecklistItemRequest struct {
 
 // Create menangani POST /tasks/:id/checklist-items.
 func (h *TaskChecklistItemHandler) Create(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
@@ -45,7 +45,7 @@ func (h *TaskChecklistItemHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
-	item, err := h.items.Create(c.Context(), exec, c.Params("id"), body.Title, actorUserID)
+	item, err := h.items.Create(c.Context(), exec, c.Params("id"), body.Title, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal menambah sub-task")
 	}
@@ -76,6 +76,10 @@ type updateChecklistItemRequest struct {
 
 // Update menangani PATCH /tasks/checklist-items/:itemId.
 func (h *TaskChecklistItemHandler) Update(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
@@ -85,7 +89,7 @@ func (h *TaskChecklistItemHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
 	}
 	itemID := c.Params("itemId")
-	if err := h.items.Update(c.Context(), exec, itemID, body.Title, body.IsDone); err != nil {
+	if err := h.items.Update(c.Context(), exec, itemID, body.Title, body.IsDone, actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal mengubah sub-task")
 	}
 	return c.JSON(response.Success(fiber.Map{"id": itemID}))
@@ -93,11 +97,15 @@ func (h *TaskChecklistItemHandler) Update(c *fiber.Ctx) error {
 
 // Delete menangani DELETE /tasks/checklist-items/:itemId.
 func (h *TaskChecklistItemHandler) Delete(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
 	exec, ok := middleware.DBTxFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
-	if err := h.items.Delete(c.Context(), exec, c.Params("itemId")); err != nil {
+	if err := h.items.Delete(c.Context(), exec, c.Params("itemId"), actorUserID, actorRole); err != nil {
 		return h.mapError(c, err, "Gagal menghapus sub-task")
 	}
 	return c.SendStatus(fiber.StatusNoContent)
@@ -109,6 +117,10 @@ func (h *TaskChecklistItemHandler) mapError(c *fiber.Ctx, err error, fallbackMes
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Judul sub-task wajib diisi.", nil))
 	case errors.Is(err, domain.ErrTaskNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(response.Error("NOT_FOUND", "Sub-task tidak ditemukan", nil))
+	case errors.Is(err, domain.ErrNotYourTask):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_YOUR_TASK", "Anda hanya dapat mengubah sub-task pada task yang ditugaskan kepada Anda.", nil))
+	case errors.Is(err, domain.ErrForbidden):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Role Anda tidak dapat mengubah sub-task.", nil))
 	default:
 		h.logger.Error(fallbackMessage, zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", fallbackMessage, nil))

@@ -252,9 +252,6 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 	if projectID == "" || len(title) < 3 {
 		return nil, fmt.Errorf("service.Create: %w", domain.ErrInvalidInput)
 	}
-	if len(assigneeUserIDs) == 0 {
-		return nil, fmt.Errorf("service.Create: %w", domain.ErrTaskAssigneeRequired)
-	}
 	priority, err := validatePriority(priority)
 	if err != nil {
 		return nil, err
@@ -265,6 +262,25 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return nil, err
+	}
+	// S6E-08 (IG-139): Editor yang tidak menyebut assignee otomatis menjadi assignee task-nya sendiri
+	// (spek "assignee default dirinya"); role lain tetap wajib menyebut minimal satu assignee.
+	if len(assigneeUserIDs) == 0 && auditRole == "editor" {
+		assigneeUserIDs = []string{actorID}
+	}
+	if len(assigneeUserIDs) == 0 {
+		return nil, fmt.Errorf("service.Create: %w", domain.ErrTaskAssigneeRequired)
+	}
+	// Story point saat membuat mengikuti aturan yang sama dengan Update (US-018a): Editor hanya bila
+	// project mengizinkan.
+	if storyPoints != nil {
+		allowEditorSP, err := s.projects.GetAllowEditorStoryPoints(ctx, exec, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("service.Create: %w", err)
+		}
+		if !canSetStoryPoints(auditRole, allowEditorSP) {
+			return nil, fmt.Errorf("service.Create: %w", domain.ErrStoryPointsNotAllowed)
+		}
 	}
 
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
