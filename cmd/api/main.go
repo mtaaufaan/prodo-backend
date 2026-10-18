@@ -267,7 +267,7 @@ func run() error {
 	timesheetEstimateSvc := service.NewTimesheetEstimateService(repository.NewTimesheetEstimateRepository())
 	timesheetReportSvc := service.NewTimesheetReportService(timesheetReportRepo, projectRepo, rbacSvc, timesheetEstimateSvc)
 	projectImportSvc.SetTimesheetEstimator(timesheetEstimateSvc)
-	checklistItemSvc := service.NewTaskChecklistItemService(checklistItemRepo)
+	checklistItemSvc := service.NewTaskChecklistItemService(checklistItemRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	attachmentRepo := repository.NewTaskAttachmentRepository()
 	attachmentSvc := service.NewTaskAttachmentService(attachmentRepo, taskRepo, projectRepo, workspaceRepo, organizationRepo, rbacSvc, projectMemberRepo, storageSvc, &asynqAttachmentQuotaRefresher{client: asynqClient})
 	performanceRepo := repository.NewPerformanceRepository()
@@ -830,7 +830,7 @@ func run() error {
 	v1.Post("/sprints/:id/assign-tasks", jwtAuth, dbCtx, sprintHandler.AssignTasks)
 	v1.Delete("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Delete)
 
-	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, taskHandler.Create)
+	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, editorProjectGate, taskHandler.Create)
 	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, editorProjectGate, taskHandler.List)
 	v1.Get("/tasks/:id", jwtAuth, dbCtx, editorTaskGate, taskHandler.Get)
 	// Komentar + ikuti task (S6E-04, IG-135). Edit/hapus lewat id komentar: penulis/PM/AW ditegakkan di service.

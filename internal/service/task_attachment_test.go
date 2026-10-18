@@ -19,6 +19,7 @@ type fakeAttachmentRepo struct {
 
 	createErr   error
 	createCalls int
+	createRole  string // role audit yang diteruskan ke Create (S6E-08, IG-139)
 
 	softDeleteCalls []struct {
 		id      string
@@ -37,11 +38,12 @@ type fakeAttachmentRepo struct {
 	quotaRequestLogged bool
 }
 
-func (f *fakeAttachmentRepo) Create(_ context.Context, _ db.Executor, taskID, uploaderID, originalName, displayName, storageKey, mimeType string, sizeBytes int64, isImage bool, _, _ string) (*repository.TaskAttachment, error) {
+func (f *fakeAttachmentRepo) Create(_ context.Context, _ db.Executor, taskID, uploaderID, originalName, displayName, storageKey, mimeType string, sizeBytes int64, isImage bool, actorRole, _ string) (*repository.TaskAttachment, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
 	f.createCalls++
+	f.createRole = actorRole
 	return &repository.TaskAttachment{ID: "att-new", TaskID: taskID, UploaderID: uploaderID, OriginalName: originalName, DisplayName: displayName, StorageKey: storageKey, MimeType: mimeType, SizeBytes: sizeBytes, IsImage: isImage}, nil
 }
 
@@ -106,6 +108,11 @@ func (f *fakeAttachmentRepo) LogQuotaRequest(_ context.Context, _ db.Executor, _
 type fakeAttachmentTaskResolver struct {
 	projectID string
 	byTask    map[string]string
+	notOwner  bool // true -> IsOwner false (task bukan milik aktor)
+}
+
+func (f *fakeAttachmentTaskResolver) IsOwner(_ context.Context, _ db.Executor, _, _ string) (bool, error) {
+	return !f.notOwner, nil
 }
 
 func (f *fakeAttachmentTaskResolver) GetProjectID(_ context.Context, _ db.Executor, taskID string) (string, error) {

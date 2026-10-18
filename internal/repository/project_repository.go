@@ -86,6 +86,9 @@ type Project struct {
 	// apa pun. Belum ada UI untuk PM mengisinya (US-033 AC project-level,
 	// scope terpisah) -- di sini baca-saja untuk preview AW.
 	MentionCooldownMinutes *int
+	// AllowEditorStoryPoints (S6E-08, IG-139) -- setting project "Editor boleh mengisi story point" (US-018a);
+	// dibaca daftar project supaya frontend tidak mengunci story point Editor secara buta.
+	AllowEditorStoryPoints bool
 }
 
 // GetWorkspaceID mengembalikan workspace_id pemilik projectID -- dasar
@@ -208,7 +211,7 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		       (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.deleted_at IS NULL),
 		       COALESCE(creator.display_name, ''), COALESCE(creator.email, ''),
 		       COALESCE(pms.data, '[]'::json), COALESCE(pending_pms.data, '[]'::json),
-		       p.status, p.end_date, p.mention_cooldown_minutes
+		       p.status, p.end_date, p.mention_cooldown_minutes, p.allow_editor_story_points
 		FROM projects p
 		LEFT JOIN users creator ON creator.id = p.created_by
 		LEFT JOIN LATERAL (
@@ -238,7 +241,7 @@ func (r *ProjectRepository) List(ctx context.Context, exec db.Executor, workspac
 		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Code,
 			&p.IsArchived, &p.CreatedAt, &p.ArchivedAt, &p.MemberCount,
 			&p.SprintCount, &p.TaskCount, &p.CreatedByName, &p.CreatedByEmail,
-			&pmsJSON, &pendingJSON, &p.Status, &p.EndDate, &p.MentionCooldownMinutes); err != nil {
+			&pmsJSON, &pendingJSON, &p.Status, &p.EndDate, &p.MentionCooldownMinutes, &p.AllowEditorStoryPoints); err != nil {
 			return nil, fmt.Errorf("repository.List: scan: %w", err)
 		}
 		if err := json.Unmarshal(pmsJSON, &p.PMs); err != nil {
