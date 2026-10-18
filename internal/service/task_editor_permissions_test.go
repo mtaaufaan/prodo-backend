@@ -127,7 +127,7 @@ func TestCheckChecklistWrite_DecisionTable(t *testing.T) {
 		owned   bool
 		wantErr error
 	}{
-		{"", false, nil}, // PA/GA
+		{"", false, domain.ErrForbidden}, // bukan anggota (PA/GA lolos lebih awal di authorizeWrite)
 		{"admin_workspace", false, nil},
 		{"project_manager", false, nil},
 		{"editor", true, nil},
@@ -193,6 +193,7 @@ func TestChecklistService_WriteGate(t *testing.T) {
 		{"approver", true, "", domain.ErrForbidden},
 		{"project_manager", false, "", nil},
 		{"", false, "platform_admin", nil},
+		{"", true, "", domain.ErrForbidden}, // bukan anggota workspace/project
 	}
 	for _, tc := range cases {
 		name := tc.role + "/" + tc.actorRole + map[bool]string{true: "/milik", false: "/bukan-milik"}[tc.owned]
