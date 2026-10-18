@@ -109,6 +109,8 @@ type attachmentRepository interface {
 // attachmentTaskResolver -- reuse TaskRepository.GetProjectID.
 type attachmentTaskResolver interface {
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
+	// IsOwner -- kepemilikan task (assignee/PIC aktif) untuk gerbang Editor (S6E-08, IG-139).
+	taskOwnerChecker
 }
 
 // attachmentProjectResolver -- reuse ProjectRepository.GetWorkspaceID.
@@ -200,6 +202,15 @@ func canEditAttachment(role string) bool {
 
 // canManageAttachment -- US-064b: rename/hapus/restore hanya pengunggah,
 // PM, atau AW (role "" = PA/GA, selalu Full).
+// auditRoleFor -- role efektif untuk audit: role rute (actorRole) kosong untuk non-PA/GA (pelajaran IG-92),
+// jadi pakai role hasil resolveTaskContext; PA/GA (role "") tetap memakai actorRole-nya (S6E-08, IG-139).
+func auditRoleFor(role, actorRole string) string {
+	if role != "" {
+		return role
+	}
+	return actorRole
+}
+
 func canManageAttachment(role string, isUploader bool) bool {
 	return isUploader || role == "" || role == "admin_workspace" || role == "project_manager"
 }
@@ -226,6 +237,10 @@ func (s *TaskAttachmentService) Upload(ctx context.Context, exec db.Executor, ta
 	if !canEditAttachment(role) {
 		return nil, fmt.Errorf("service.Upload: %w", domain.ErrForbidden)
 	}
+	// Editor hanya boleh melampirkan pada task miliknya (S6E-08, IG-139).
+	if err := requireOwnTask(ctx, exec, s.tasks, role, taskID, actorID); err != nil {
+		return nil, err
+	}
 
 	quota, err := s.orgs.GetAttachmentQuotaInfo(ctx, exec, workspaceID)
 	if err != nil {
@@ -251,7 +266,7 @@ func (s *TaskAttachmentService) Upload(ctx context.Context, exec db.Executor, ta
 		return nil, fmt.Errorf("service.Upload: %w", err)
 	}
 
-	att, err := s.repo.Create(ctx, exec, taskID, actorID, filename, filename, storageKey, mimeType, int64(len(data)), isImage, actorRole, workspaceID)
+	att, err := s.repo.Create(ctx, exec, taskID, actorID, filename, filename, storageKey, mimeType, int64(len(data)), isImage, auditRoleFor(role, actorRole), workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("service.Upload: %w", err)
 	}
@@ -321,7 +336,7 @@ func (s *TaskAttachmentService) Rename(ctx context.Context, exec db.Executor, id
 	if !canManageAttachment(role, before.UploaderID == actorID) {
 		return fmt.Errorf("service.Rename: %w", domain.ErrForbidden)
 	}
-	if err := s.repo.Rename(ctx, exec, id, displayName, actorID, actorRole, workspaceID, before); err != nil {
+	if err := s.repo.Rename(ctx, exec, id, displayName, actorID, auditRoleFor(role, actorRole), workspaceID, before); err != nil {
 		return fmt.Errorf("service.Rename: %w", err)
 	}
 	return nil
@@ -349,7 +364,7 @@ func (s *TaskAttachmentService) Delete(ctx context.Context, exec db.Executor, id
 		return fmt.Errorf("service.Delete: %w", err)
 	}
 	purgeAt := time.Now().Add(time.Duration(quota.RetentionDays) * 24 * time.Hour)
-	if err := s.repo.SoftDelete(ctx, exec, id, purgeAt, actorID, actorRole, workspaceID, before); err != nil {
+	if err := s.repo.SoftDelete(ctx, exec, id, purgeAt, actorID, auditRoleFor(role, actorRole), workspaceID, before); err != nil {
 		return fmt.Errorf("service.Delete: %w", err)
 	}
 	return nil
@@ -368,7 +383,7 @@ func (s *TaskAttachmentService) Restore(ctx context.Context, exec db.Executor, i
 	if !canManageAttachment(role, before.UploaderID == actorID) {
 		return fmt.Errorf("service.Restore: %w", domain.ErrForbidden)
 	}
-	if err := s.repo.Restore(ctx, exec, id, actorID, actorRole, workspaceID, before); err != nil {
+	if err := s.repo.Restore(ctx, exec, id, actorID, auditRoleFor(role, actorRole), workspaceID, before); err != nil {
 		return fmt.Errorf("service.Restore: %w", err)
 	}
 	return nil
