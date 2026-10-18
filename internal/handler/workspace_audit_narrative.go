@@ -183,6 +183,9 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`PIC fase %s task %s diserahkan dari %s kepada %q`, workspaceAuditMetaString(st, "status_name", "?"), workspaceAuditTaskLabel(e, meta),
 			workspaceAuditJoinNames(st["from_user_names"]), workspaceAuditMetaString(st, "to_user_name", "tidak diketahui"))
 	case "task.time_entry_added":
+		if workspaceAuditMetaString(workspaceAuditStateAfter(e), "approval_status", "") == "approved" {
+			return fmt.Sprintf(`Waktu dicatat (%s menit) pada task %s, langsung disetujui`, workspaceAuditMetaNumber(workspaceAuditStateAfter(e), "duration_minutes"), workspaceAuditTaskLabel(e, meta))
+		}
 		return fmt.Sprintf(`Entri waktu manual (%s menit) ditambahkan pada task %s, menunggu persetujuan`, workspaceAuditMetaNumber(workspaceAuditStateAfter(e), "duration_minutes"), workspaceAuditTaskLabel(e, meta))
 	case "task.time_entry_updated":
 		return fmt.Sprintf(`Entri waktu manual task %s diperbarui dan dikirim ulang untuk persetujuan`, workspaceAuditTaskLabel(e, meta))

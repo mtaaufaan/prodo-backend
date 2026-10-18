@@ -53,7 +53,7 @@ func timeEntryJSON(e *repository.TimeEntry) fiber.Map {
 
 // StartTimer menangani POST /tasks/:id/time-entries/start.
 func (h *TimeEntryHandler) StartTimer(c *fiber.Ctx) error {
-	actorUserID, _, ok := middleware.ActorFromContext(c)
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
 	}
@@ -62,7 +62,7 @@ func (h *TimeEntryHandler) StartTimer(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
 	taskID := c.Params("id")
-	timer, err := h.entries.StartTimer(c.Context(), exec, taskID, actorUserID)
+	timer, err := h.entries.StartTimer(c.Context(), exec, taskID, actorUserID, actorRole)
 	if err != nil {
 		if errors.Is(err, domain.ErrTimerAlreadyRunning) {
 			active, _ := h.entries.GetActive(c.Context(), exec, taskID, actorUserID)
@@ -144,6 +144,35 @@ func (h *TimeEntryHandler) CreateManual(c *fiber.Ctx) error {
 		return h.mapError(c, err, "Gagal menambah entri waktu")
 	}
 	return c.Status(fiber.StatusCreated).JSON(response.Success(timeEntryJSON(entry)))
+}
+
+type logHoursRequest struct {
+	Hours float64 `json:"hours"`
+	Note  string  `json:"note"`
+}
+
+// LogHours menangani POST /tasks/:id/time-log (S6E-10, IG-141): catat jam (maks 12) untuk hari ini, langsung disetujui.
+func (h *TimeEntryHandler) LogHours(c *fiber.Ctx) error {
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
+	exec, ok := middleware.DBTxFromContext(c)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
+	}
+	var body logHoursRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(response.Error("INVALID_REQUEST", "Body request tidak valid", nil))
+	}
+	res, err := h.entries.LogHours(c.Context(), exec, c.Params("id"), actorUserID, actorRole, body.Hours, body.Note, time.Now())
+	if err != nil {
+		return h.mapError(c, err, "Gagal mencatat waktu")
+	}
+	return c.Status(fiber.StatusCreated).JSON(response.Success(fiber.Map{
+		"entry_id": res.Entry.ID, "task_code": res.TaskCode, "hours": body.Hours,
+		"task_total_hours": float64(res.TaskTotalMinutes) / 60,
+	}))
 }
 
 // UpdateManual menangani PATCH /time-entries/:entryId.
@@ -242,6 +271,10 @@ func (h *TimeEntryHandler) mapError(c *fiber.Ctx, err error, fallbackMessage str
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TIME_ENTRY_ALREADY_APPROVED", "Entri waktu yang sudah di-approve tidak dapat diubah.", nil))
 	case errors.Is(err, domain.ErrTimeEntryNotPending):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("TIME_ENTRY_NOT_PENDING", "Entri waktu ini sudah diputuskan sebelumnya.", nil))
+	case errors.Is(err, domain.ErrDailyTimeLimit):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("DAILY_LIMIT", "Total jam tercatat hari ini tidak boleh melebihi 24 jam.", nil))
+	case errors.Is(err, domain.ErrNotYourTask):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_YOUR_TASK", "Anda hanya dapat mencatat waktu pada task yang ditugaskan kepada Anda.", nil))
 	case errors.Is(err, domain.ErrForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("FORBIDDEN", "Anda tidak berwenang atas entri waktu ini.", nil))
 	case errors.Is(err, domain.ErrInvalidInput):

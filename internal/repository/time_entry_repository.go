@@ -140,6 +140,50 @@ func (r *TimeEntryRepository) CreateManual(ctx context.Context, exec db.Executor
 	return &e, nil
 }
 
+// CreateLogged -- entri manual yang LANGSUNG disetujui (is_approved=TRUE): pencatatan jam Editor lewat
+// POST /tasks/:id/time-log (S6E-10, IG-141, keputusan sprint: langsung terhitung, PM dapat mengoreksi).
+func (r *TimeEntryRepository) CreateLogged(ctx context.Context, exec db.Executor, taskID, userID string, startedAt, endedAt time.Time, note *string) (*TimeEntry, error) {
+	durationMinutes := int(endedAt.Sub(startedAt).Minutes())
+	approved := true
+	var e TimeEntry
+	e.TaskID, e.UserID, e.StartedAt, e.EndedAt, e.EntryType, e.Note, e.DurationMinutes, e.IsApproved = taskID, userID, startedAt, &endedAt, "manual", note, &durationMinutes, &approved
+	err := exec.QueryRow(ctx, `
+		INSERT INTO time_entries (task_id, user_id, started_at, ended_at, duration_minutes, entry_type, note, is_approved)
+		VALUES ($1, $2, $3, $4, $5, 'manual', $6, TRUE)
+		RETURNING id, created_at, updated_at
+	`, taskID, userID, startedAt, endedAt, durationMinutes, note).Scan(&e.ID, &e.CreatedAt, &e.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("repository.CreateLogged: %w", err)
+	}
+	return &e, nil
+}
+
+// DayUsage -- pemakaian user pada rentang hari [dayStart, dayEnd): total menit entri yang MULAI pada hari itu
+// (entri ditolak tidak dihitung) dan akhir terbesar entri yang menyentuh hari itu (penempatan entri baru
+// berurutan setelahnya supaya tidak tumpang tindih). lastEnd nil bila tidak ada.
+func (r *TimeEntryRepository) DayUsage(ctx context.Context, exec db.Executor, userID string, dayStart, dayEnd time.Time) (minutes int, lastEnd *time.Time, err error) {
+	err = exec.QueryRow(ctx, `
+		SELECT COALESCE(SUM(duration_minutes) FILTER (WHERE started_at >= $2 AND started_at < $3), 0)::int,
+		       MAX(COALESCE(ended_at, started_at)) FILTER (WHERE COALESCE(ended_at, started_at) > $2 AND started_at < $3)
+		FROM time_entries
+		WHERE user_id = $1 AND started_at < $3 AND is_approved IS DISTINCT FROM FALSE
+	`, userID, dayStart, dayEnd).Scan(&minutes, &lastEnd)
+	if err != nil {
+		return 0, nil, fmt.Errorf("repository.DayUsage: %w", err)
+	}
+	return minutes, lastEnd, nil
+}
+
+// SumUserMinutesForTask -- jam disetujui milik SATU user pada task (Editor hanya melihat entri miliknya
+// karena RLS time_entries_select, IG-141).
+func (r *TimeEntryRepository) SumUserMinutesForTask(ctx context.Context, exec db.Executor, taskID, userID string) (int, error) {
+	var total int
+	if err := exec.QueryRow(ctx, `SELECT COALESCE(SUM(duration_minutes), 0)::int FROM time_entries WHERE task_id = $1 AND user_id = $2 AND is_approved = TRUE`, taskID, userID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("repository.SumUserMinutesForTask: %w", err)
+	}
+	return total, nil
+}
+
 // HasOverlap -- rentang [startedAt, endedAt) user ini overlap dengan
 // entri time_entries lain (timer maupun manual, status apa pun) --
 // excludeID dipakai UpdateManual (jangan bentrok dengan diri sendiri).
