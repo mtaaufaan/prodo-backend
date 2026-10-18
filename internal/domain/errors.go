@@ -603,6 +603,10 @@ var (
 	// user yang sama (timer maupun manual, apa pun statusnya).
 	ErrTimeEntryOverlap = errors.New("time entry overlaps with an existing entry")
 
+	// ErrDailyTimeLimit dikembalikan POST /tasks/:id/time-log saat total jam tercatat user pada hari itu
+	// (WIB) akan melebihi 24 jam (S6E-10, IG-141).
+	ErrDailyTimeLimit = errors.New("daily time limit exceeded")
+
 	// ErrTimeEntryAlreadyApproved dikembalikan PATCH /time-entries/:id saat
 	// entri sudah is_approved=TRUE (locked, US-037 AC).
 	ErrTimeEntryAlreadyApproved = errors.New("approved time entry cannot be edited")

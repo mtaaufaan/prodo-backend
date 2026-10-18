@@ -262,7 +262,7 @@ func run() error {
 	ruleSvc.SetTaskActions(taskSvc)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo, customStatusRepo, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
-	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc)
+	timeEntrySvc := service.NewTimeEntryService(timeEntryRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
 	timesheetReportRepo := repository.NewTimesheetReportRepository()
 	timesheetEstimateSvc := service.NewTimesheetEstimateService(repository.NewTimesheetEstimateRepository())
 	timesheetReportSvc := service.NewTimesheetReportService(timesheetReportRepo, projectRepo, rbacSvc, timesheetEstimateSvc)
@@ -339,6 +339,7 @@ func run() error {
 	projectImportHandler := handler.NewProjectImportHandler(projectImportSvc, logger)
 	timeEntryHandler := handler.NewTimeEntryHandler(timeEntrySvc, logger)
 	timesheetReportHandler := handler.NewTimesheetReportHandler(timesheetReportSvc, logger)
+	myTimesheetHandler := handler.NewMyTimesheetHandler(service.NewMyTimesheetService(repository.NewMyTimesheetRepository()), logger) // S6E-10, IG-141
 	checklistItemHandler := handler.NewTaskChecklistItemHandler(checklistItemSvc, logger)
 	taskHandler := handler.NewTaskHandler(taskSvc, taskPicSvc, taskDependencySvc, timeEntrySvc, logger)
 	attachmentHandler := handler.NewTaskAttachmentHandler(attachmentSvc, logger)
@@ -881,6 +882,7 @@ func run() error {
 	v1.Post("/tasks/:id/time-entries/stop", jwtAuth, dbCtx, timeEntryHandler.StopTimer)
 	v1.Get("/tasks/:id/time-entries/active", jwtAuth, dbCtx, timeEntryHandler.GetActive)
 	v1.Post("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.CreateManual)
+	v1.Post("/tasks/:id/time-log", jwtAuth, dbCtx, editorTaskGate, timeEntryHandler.LogHours) // catat jam Editor, S6E-10
 	v1.Get("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.List)
 	v1.Patch("/time-entries/:entryId", jwtAuth, dbCtx, timeEntryHandler.UpdateManual)
 	v1.Post("/time-entries/:entryId/approve", jwtAuth, dbCtx, timeEntryHandler.Approve)
@@ -892,7 +894,13 @@ func run() error {
 	v1.Get("/projects/:projectId/timesheet/entries", jwtAuth, dbCtx, timesheetReportHandler.Entries)
 	v1.Get("/projects/:projectId/timesheet/export", jwtAuth, dbCtx, timesheetReportHandler.Export)
 	v1.Post("/projects/:projectId/timesheet/estimates/recalculate", jwtAuth, dbCtx, timesheetReportHandler.RecalculateEstimates)
-	v1.Get("/me/timesheets", jwtAuth, dbCtx, timesheetReportHandler.Mine)
+	// Dua mode: ?workspace_id= -> Timesheet Editor lintas project (S6E-10); tanpa itu -> daftar entri from/to (tab "Timesheet Saya" PM).
+	v1.Get("/me/timesheets", jwtAuth, dbCtx, func(c *fiber.Ctx) error {
+		if c.Query("workspace_id") != "" {
+			return myTimesheetHandler.Get(c)
+		}
+		return timesheetReportHandler.Mine(c)
+	})
 
 	// SUB-TASK / checklist item (IG-97 susulan).
 	v1.Post("/tasks/:id/checklist-items", jwtAuth, dbCtx, checklistItemHandler.Create)
