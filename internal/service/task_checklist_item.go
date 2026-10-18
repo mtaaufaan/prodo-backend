@@ -65,10 +65,11 @@ func (s *TaskChecklistItemService) authorizeWrite(ctx context.Context, exec db.E
 	return checkChecklistWrite(ctx, exec, s.tasks, role, taskID, actorID)
 }
 
-// checkChecklistWrite -- aturan murni (diuji tabel keputusan): "" = PA/GA.
+// checkChecklistWrite -- aturan murni (diuji tabel keputusan). PA/GA sudah lolos lebih awal di authorizeWrite;
+// role kosong di sini berarti BUKAN anggota (tidak punya role di project/workspace) -> ditolak.
 func checkChecklistWrite(ctx context.Context, exec db.Executor, owners taskOwnerChecker, role, taskID, actorID string) error {
 	switch role {
-	case "", "admin_workspace", "project_manager":
+	case "admin_workspace", "project_manager":
 		return nil
 	case "editor":
 		return requireOwnTask(ctx, exec, owners, role, taskID, actorID)

@@ -9,7 +9,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 	"github.com/mtaaufaan/prodo-backend/internal/domain"
@@ -22,6 +25,9 @@ type timeEntryRepository interface {
 	GetActiveTimer(ctx context.Context, exec db.Executor, userID string) (*repository.ActiveTimer, error)
 	StopTimer(ctx context.Context, exec db.Executor, taskID, userID string) (*repository.TimeEntry, error)
 	CreateManual(ctx context.Context, exec db.Executor, taskID, userID string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error)
+	CreateLogged(ctx context.Context, exec db.Executor, taskID, userID string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error)
+	DayUsage(ctx context.Context, exec db.Executor, userID string, dayStart, dayEnd time.Time) (minutes int, lastEnd *time.Time, err error)
+	SumUserMinutesForTask(ctx context.Context, exec db.Executor, taskID, userID string) (int, error)
 	HasOverlap(ctx context.Context, exec db.Executor, userID string, startedAt, endedAt time.Time, excludeID string) (bool, error)
 	Get(ctx context.Context, exec db.Executor, id string) (*repository.TimeEntry, error)
 	UpdateManual(ctx context.Context, exec db.Executor, id string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error)
@@ -35,20 +41,141 @@ type timeEntryRepository interface {
 	LogAudit(ctx context.Context, exec db.Executor, actorID, actorRole, action, taskID, workspaceID string, before, after map[string]any) error
 }
 
-// timeEntryTaskResolver -- reuse TaskRepository.GetProjectID.
+// timeEntryTaskResolver -- reuse TaskRepository.GetProjectID + IsOwner (gerbang Editor, S6E-10).
 type timeEntryTaskResolver interface {
 	GetProjectID(ctx context.Context, exec db.Executor, taskID string) (string, error)
+	taskOwnerChecker
 }
 
 type TimeEntryService struct {
-	repo     timeEntryRepository
-	tasks    timeEntryTaskResolver
-	projects taskProjectResolver
-	rbac     sprintWorkspaceRoleChecker
+	repo         timeEntryRepository
+	tasks        timeEntryTaskResolver
+	projects     taskProjectResolver
+	rbac         sprintWorkspaceRoleChecker
+	projectRoles sprintProjectRoleChecker
 }
 
-func NewTimeEntryService(repo timeEntryRepository, tasks timeEntryTaskResolver, projects taskProjectResolver, rbac sprintWorkspaceRoleChecker) *TimeEntryService {
-	return &TimeEntryService{repo: repo, tasks: tasks, projects: projects, rbac: rbac}
+func NewTimeEntryService(repo timeEntryRepository, tasks timeEntryTaskResolver, projects taskProjectResolver, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker) *TimeEntryService {
+	return &TimeEntryService{repo: repo, tasks: tasks, projects: projects, rbac: rbac, projectRoles: projectRoles}
+}
+
+// authorizeLogger -- siapa yang boleh mencatat waktu pada task (S6E-10, IG-141): PA/GA dan AW/PM boleh;
+// Editor hanya pada task miliknya (assignee atau PIC aktif; selain itu ErrNotYourTask); role lain
+// (Approver, Viewer, Division Viewer, bukan anggota) ErrForbidden. Mengembalikan role efektif untuk audit
+// (role rute kosong untuk non-PA/GA, pelajaran IG-92).
+func (s *TimeEntryService) authorizeLogger(ctx context.Context, exec db.Executor, taskID, actorID, actorRole string) (string, error) {
+	if actorRole == "platform_admin" || actorRole == "group_admin" {
+		return actorRole, nil
+	}
+	projectID, err := s.tasks.GetProjectID(ctx, exec, taskID)
+	if err != nil {
+		return "", err
+	}
+	role, found, err := s.projectRoles.GetRole(ctx, exec, projectID, actorID)
+	if err != nil || !found {
+		workspaceID, werr := s.projects.GetWorkspaceID(ctx, exec, projectID)
+		if werr != nil {
+			return "", werr
+		}
+		if role, err = s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID); err != nil {
+			return "", err
+		}
+	}
+	if err := checkTimeLogger(ctx, exec, s.tasks, role, taskID, actorID); err != nil {
+		return "", err
+	}
+	return role, nil
+}
+
+// checkTimeLogger -- aturan murni (diuji tabel keputusan); role kosong = bukan anggota -> ditolak.
+func checkTimeLogger(ctx context.Context, exec db.Executor, owners taskOwnerChecker, role, taskID, actorID string) error {
+	switch role {
+	case "admin_workspace", "project_manager":
+		return nil
+	case "editor":
+		return requireOwnTask(ctx, exec, owners, role, taskID, actorID)
+	}
+	return fmt.Errorf("service.checkTimeLogger: %w", domain.ErrForbidden)
+}
+
+const (
+	// maxLoggedHours -- batas satu pencatatan jam (desain "TM Catat Waktu": maksimal 12 jam per entri).
+	maxLoggedHours = 12.0
+	// maxNoteRunes -- panjang catatan entri.
+	maxNoteRunes = 500
+	// maxDayMinutes -- total jam tercatat satu user per hari (WIB), mencegah data mustahil.
+	maxDayMinutes = 24 * 60
+)
+
+// wib -- zona waktu pencatatan (Indonesia tidak mengenal DST; sama konvensi estimasi IG-129: 09:00 WIB).
+var wib = time.FixedZone("WIB", 7*3600)
+
+// LoggedHours -- hasil POST /tasks/:id/time-log.
+type LoggedHours struct {
+	Entry            *repository.TimeEntry
+	TaskCode         string
+	TaskTotalMinutes int
+}
+
+// LogHours menangani POST /tasks/:id/time-log (S6E-10, IG-141): catat JAM (maks 12) + catatan sebagai entri
+// manual untuk HARI INI (WIB) yang langsung disetujui. Tanpa jam mulai/selesai dari pengguna: entri
+// ditempatkan berurutan setelah entri terakhir hari itu (paling cepat 09:00 WIB) sehingga tidak tumpang tindih.
+func (s *TimeEntryService) LogHours(ctx context.Context, exec db.Executor, taskID, actorID, actorRole string, hours float64, note string, now time.Time) (*LoggedHours, error) {
+	minutes := int(math.Round(hours * 60))
+	note = strings.TrimSpace(note)
+	if taskID == "" || math.IsNaN(hours) || math.IsInf(hours, 0) || hours <= 0 || hours > maxLoggedHours || minutes < 1 || utf8.RuneCountInString(note) > maxNoteRunes {
+		return nil, fmt.Errorf("service.LogHours: %w", domain.ErrInvalidInput)
+	}
+	role, err := s.authorizeLogger(ctx, exec, taskID, actorID, actorRole)
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+
+	dayStart := time.Date(now.In(wib).Year(), now.In(wib).Month(), now.In(wib).Day(), 0, 0, 0, 0, wib)
+	usedMinutes, lastEnd, err := s.repo.DayUsage(ctx, exec, actorID, dayStart, dayStart.Add(24*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+	if usedMinutes+minutes > maxDayMinutes {
+		return nil, fmt.Errorf("service.LogHours: %w", domain.ErrDailyTimeLimit)
+	}
+	start := dayStart.Add(9 * time.Hour)
+	if lastEnd != nil && lastEnd.After(start) {
+		start = *lastEnd
+	}
+	end := start.Add(time.Duration(minutes) * time.Minute)
+	overlap, err := s.repo.HasOverlap(ctx, exec, actorID, start, end, "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+	if overlap {
+		return nil, fmt.Errorf("service.LogHours: %w", domain.ErrTimeEntryOverlap)
+	}
+
+	var notePtr *string
+	if note != "" {
+		notePtr = &note
+	}
+	entry, err := s.repo.CreateLogged(ctx, exec, taskID, actorID, start, end, notePtr)
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+	workspaceID, err := s.workspaceOf(ctx, exec, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+	if err := s.repo.LogAudit(ctx, exec, actorID, role, "task.time_entry_added", taskID, workspaceID, nil, entrySnapshot(entry, "approved")); err != nil {
+		return nil, fmt.Errorf("service.LogHours: audit: %w", err)
+	}
+	code, _, err := s.repo.TaskLabel(ctx, exec, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+	total, err := s.repo.SumUserMinutesForTask(ctx, exec, taskID, actorID)
+	if err != nil {
+		return nil, fmt.Errorf("service.LogHours: %w", err)
+	}
+	return &LoggedHours{Entry: entry, TaskCode: code, TaskTotalMinutes: total}, nil
 }
 
 // isApprover -- AW/PM di workspace project ini, atau PA/GA (bypass penuh)
@@ -128,9 +255,12 @@ func (s *TimeEntryService) notifyApprovers(ctx context.Context, exec db.Executor
 }
 
 // StartTimer menangani POST /tasks/:id/time-entries/start.
-func (s *TimeEntryService) StartTimer(ctx context.Context, exec db.Executor, taskID, actorID string) (*repository.ActiveTimer, error) {
+func (s *TimeEntryService) StartTimer(ctx context.Context, exec db.Executor, taskID, actorID, actorRole string) (*repository.ActiveTimer, error) {
 	if taskID == "" {
 		return nil, fmt.Errorf("service.StartTimer: %w", domain.ErrInvalidInput)
+	}
+	if _, err := s.authorizeLogger(ctx, exec, taskID, actorID, actorRole); err != nil {
+		return nil, fmt.Errorf("service.StartTimer: %w", err)
 	}
 	timer, err := s.repo.StartTimer(ctx, exec, taskID, actorID)
 	if err != nil {
@@ -174,6 +304,10 @@ func (s *TimeEntryService) CreateManual(ctx context.Context, exec db.Executor, t
 	if taskID == "" || !validEntryRange(startedAt, endedAt) {
 		return nil, fmt.Errorf("service.CreateManual: %w", domain.ErrInvalidInput)
 	}
+	auditRole, err := s.authorizeLogger(ctx, exec, taskID, actorID, actorRole)
+	if err != nil {
+		return nil, fmt.Errorf("service.CreateManual: %w", err)
+	}
 	overlap, err := s.repo.HasOverlap(ctx, exec, actorID, startedAt, endedAt, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateManual: %w", err)
@@ -189,7 +323,7 @@ func (s *TimeEntryService) CreateManual(ctx context.Context, exec db.Executor, t
 	if err != nil {
 		return nil, fmt.Errorf("service.CreateManual: %w", err)
 	}
-	if err := s.repo.LogAudit(ctx, exec, actorID, actorRole, "task.time_entry_added", taskID, workspaceID, nil, entrySnapshot(entry, "pending")); err != nil {
+	if err := s.repo.LogAudit(ctx, exec, actorID, auditRole, "task.time_entry_added", taskID, workspaceID, nil, entrySnapshot(entry, "pending")); err != nil {
 		return nil, fmt.Errorf("service.CreateManual: audit: %w", err)
 	}
 	if err := s.notifyApprovers(ctx, exec, entry, actorID, "ditambahkan"); err != nil {

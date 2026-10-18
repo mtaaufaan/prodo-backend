@@ -150,6 +150,29 @@ type fakeTimeEntryRepo struct {
 	notified  []string // "<userID>:<type>"
 	audits    []string
 	updated   bool
+
+	// S6E-10 (catat jam)
+	dayMinutes  int
+	dayLastEnd  *time.Time
+	logged      *repository.TimeEntry
+	loggedNote  *string
+	auditRoles  []string
+	auditStates []map[string]any
+	userTotal   int
+}
+
+func (f *fakeTimeEntryRepo) CreateLogged(_ context.Context, _ db.Executor, taskID, userID string, startedAt, endedAt time.Time, note *string) (*repository.TimeEntry, error) {
+	mins := int(endedAt.Sub(startedAt).Minutes())
+	approved := true
+	f.logged = &repository.TimeEntry{ID: "e-logged", TaskID: taskID, UserID: userID, StartedAt: startedAt, EndedAt: &endedAt, DurationMinutes: &mins, EntryType: "manual", IsApproved: &approved}
+	f.loggedNote = note
+	return f.logged, nil
+}
+func (f *fakeTimeEntryRepo) DayUsage(context.Context, db.Executor, string, time.Time, time.Time) (int, *time.Time, error) {
+	return f.dayMinutes, f.dayLastEnd, nil
+}
+func (f *fakeTimeEntryRepo) SumUserMinutesForTask(context.Context, db.Executor, string, string) (int, error) {
+	return f.userTotal, nil
 }
 
 func (f *fakeTimeEntryRepo) StartTimer(context.Context, db.Executor, string, string) (*repository.ActiveTimer, error) {
@@ -201,15 +224,20 @@ func (f *fakeTimeEntryRepo) Notify(_ context.Context, _ db.Executor, userID, _, 
 	f.notified = append(f.notified, userID+":"+notifType)
 	return nil
 }
-func (f *fakeTimeEntryRepo) LogAudit(_ context.Context, _ db.Executor, _, _, action, _, _ string, _, _ map[string]any) error {
+func (f *fakeTimeEntryRepo) LogAudit(_ context.Context, _ db.Executor, _, actorRole, action, _, _ string, _, after map[string]any) error {
 	f.audits = append(f.audits, action)
+	f.auditRoles = append(f.auditRoles, actorRole)
+	f.auditStates = append(f.auditStates, after)
 	return nil
 }
 
-type fakeTimeEntryTasks struct{}
+type fakeTimeEntryTasks struct{ notOwner bool }
 
 func (fakeTimeEntryTasks) GetProjectID(context.Context, db.Executor, string) (string, error) {
 	return "p1", nil
+}
+func (f fakeTimeEntryTasks) IsOwner(context.Context, db.Executor, string, string) (bool, error) {
+	return !f.notOwner, nil
 }
 
 type fakeTimeEntryProjects struct{}
@@ -222,7 +250,7 @@ func (fakeTimeEntryProjects) GetAllowEditorStoryPoints(context.Context, db.Execu
 }
 
 func newTestTimeEntryService(repo *fakeTimeEntryRepo, role string) *TimeEntryService {
-	return NewTimeEntryService(repo, fakeTimeEntryTasks{}, fakeTimeEntryProjects{}, &fakePerformanceRoleChecker{role: role})
+	return NewTimeEntryService(repo, fakeTimeEntryTasks{}, fakeTimeEntryProjects{}, &fakePerformanceRoleChecker{role: role}, &fakeSprintProjectRoles{found: false})
 }
 
 func TestCreateManualAuditsAndNotifiesApprovers(t *testing.T) {
