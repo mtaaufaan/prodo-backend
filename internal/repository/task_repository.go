@@ -127,6 +127,9 @@ func (r *TaskRepository) Create(ctx context.Context, exec db.Executor, projectID
 		if err := ensureFollower(ctx, exec, id, userID, "assignment"); err != nil {
 			return nil, fmt.Errorf("repository.Create: %w", err)
 		}
+		if err := notifyTaskAssigned(ctx, exec, id, userID, createdBy); err != nil {
+			return nil, fmt.Errorf("repository.Create: %w", err)
+		}
 	}
 
 	// Task Management Core Phase 2 (S4-30): pembuat task otomatis menjadi
@@ -455,7 +458,7 @@ func (r *TaskRepository) SoftDelete(ctx context.Context, exec db.Executor, taskI
 // TaskService.AssignUserForRule) -- jadi trigger itu tidak pernah benar-
 // benar terpicu sampai ada fitur reassign manusia. Sama nasib comment_added.
 func (r *TaskRepository) AssignUser(ctx context.Context, exec db.Executor, taskID, userID, assignedBy string) error {
-	_, err := exec.Exec(ctx, `
+	tag, err := exec.Exec(ctx, `
 		INSERT INTO task_assignees (task_id, user_id, assignee_role, assigned_by)
 		VALUES ($1, $2, 'contributor', $3)
 		ON CONFLICT (task_id, user_id) DO NOTHING
@@ -463,7 +466,31 @@ func (r *TaskRepository) AssignUser(ctx context.Context, exec db.Executor, taskI
 	if err != nil {
 		return fmt.Errorf("repository.AssignUser: %w", err)
 	}
-	return ensureFollower(ctx, exec, taskID, userID, "assignment")
+	if err := ensureFollower(ctx, exec, taskID, userID, "assignment"); err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 { // sudah assignee: tidak ada penugasan baru, tidak ada notifikasi
+		return nil
+	}
+	return notifyTaskAssigned(ctx, exec, taskID, userID, assignedBy)
+}
+
+// notifyTaskAssigned -- notifikasi in-app `task_assigned` ke assignee baru (S6E-14, IG-145). Tidak dikirim bila
+// penerima = penugas (membuat task untuk diri sendiri). Judul kalimat mandiri; pengirim ada di actor_id.
+func notifyTaskAssigned(ctx context.Context, exec db.Executor, taskID, assigneeID, assignerID string) error {
+	if assigneeID == assignerID {
+		return nil
+	}
+	if _, err := exec.Exec(ctx, `
+		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
+		SELECT $2, NULLIF($3, '')::uuid, 'task_assigned', 'task', t.id,
+		       'Task ditugaskan kepada Anda -- ' || COALESCE(t.task_code, ''),
+		       'Anda ditugaskan pada task "' || t.title || '".'
+		FROM tasks t WHERE t.id = $1
+	`, taskID, assigneeID, assignerID); err != nil {
+		return fmt.Errorf("notifikasi task_assigned: %w", err)
+	}
+	return nil
 }
 
 // insertTaskAudit -- IG-94/IG-97, pola SAMA PERSIS insertSprintAudit

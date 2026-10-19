@@ -615,6 +615,9 @@ var (
 	// timer/manual is_approved=NULL (sudah diputuskan sebelumnya).
 	ErrTimeEntryNotPending = errors.New("time entry is not pending approval")
 
+	// ErrNotificationNotFound -- notifikasi tidak ada atau bukan milik pemanggil (S6E-14, IG-145).
+	ErrNotificationNotFound = errors.New("notification not found")
+
 	// ErrCommentNotFound -- komentar tidak ada / sudah dihapus (S6E-04, IG-135).
 	ErrCommentNotFound = errors.New("comment not found")
 
