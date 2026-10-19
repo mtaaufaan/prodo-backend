@@ -66,11 +66,12 @@ func NewSprintService(repo sprintRepository, projects sprintProjectResolver, sta
 	return &SprintService{repo: repo, projects: projects, statuses: statuses, rbac: rbac, projectRoles: projectRoles}
 }
 
-// authorize -- gate tulis: viewer/division_viewer DITOLAK, selebihnya
-// (admin_workspace/project_manager/editor/approver, atau project-scoped
-// editor/approver) boleh. RLS tetap jadi lapisan pertama (membership),
-// ini menambah gate ROLE yang RLS sendiri sengaja tidak tegakkan
-// (RLS_DESIGN.md §7.6: "role check di application layer").
+// authorize -- gate tulis: HANYA admin_workspace dan project_manager (PA/GA lewat actorRole), sesuai
+// `rbac_matrix.xlsx` baris 24 "Buat / kelola sprint" (Editor, Approver, Viewer: ✗). Sebelumnya gate ini hanya
+// menolak viewer/division_viewer sehingga Editor dan Approver bisa membuat/mengubah/menghapus sprint lewat API
+// walau UI menyembunyikannya (ditemukan penutup Sprint 6, S6E-15, IG-146). RLS tetap lapisan pertama (membership),
+// ini menambah gate ROLE yang RLS sendiri sengaja tidak tegakkan (RLS_DESIGN.md §7.6: "role check di application
+// layer"). Role workspace menjadi penentu -- peran project-scoped (editor/approver/viewer) tidak pernah PM.
 //
 // Mengembalikan role EFEKTIF yang dipakai untuk audit trail (IG-92,
 // ditemukan lewat verifikasi live -- BUKAN review kode: rute sprint/task
@@ -89,12 +90,6 @@ func (s *SprintService) authorize(ctx context.Context, exec db.Executor, project
 	if actorRole == "platform_admin" || actorRole == "group_admin" {
 		return actorRole, nil
 	}
-	if role, found, err := s.projectRoles.GetRole(ctx, exec, projectID, actorID); err == nil && found {
-		if role == "viewer" {
-			return "", fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
-		}
-		return role, nil
-	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)
 	if err != nil {
 		return "", fmt.Errorf("service.authorize: %w", err)
@@ -103,7 +98,7 @@ func (s *SprintService) authorize(ctx context.Context, exec db.Executor, project
 	if err != nil {
 		return "", fmt.Errorf("service.authorize: %w", err)
 	}
-	if role == "viewer" || role == "division_viewer" {
+	if role != "admin_workspace" && role != "project_manager" {
 		return "", fmt.Errorf("service.authorize: %w", domain.ErrForbidden)
 	}
 	return role, nil
