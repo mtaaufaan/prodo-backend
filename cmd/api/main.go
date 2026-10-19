@@ -314,6 +314,7 @@ func run() error {
 	taskCommentRepo := repository.NewTaskCommentRepository()
 	taskCommentHandler := handler.NewTaskCommentHandler(service.NewTaskCommentService(taskCommentRepo), logger) // S6E-04, IG-135
 	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
+	notificationHandler := handler.NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository()), logger)
 	editorTaskGate := middleware.RequireEditorProjectAccess(editorAccessRepo, true)
 	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, editorAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
@@ -449,6 +450,11 @@ func run() error {
 	v1.Patch("/me/context", jwtAuth, dbCtx, contextHandler.Switch)
 	v1.Get("/me/projects", jwtAuth, dbCtx, contextHandler.Projects)
 	v1.Get("/me/tasks", jwtAuth, dbCtx, myTaskHandler.List) // Task Saya Editor, S6E-04
+	// Lonceng notifikasi in-app (US-034, S6E-14): selalu hanya milik pemanggil.
+	v1.Get("/me/notifications", jwtAuth, dbCtx, notificationHandler.List)
+	v1.Get("/me/notifications/unread-count", jwtAuth, dbCtx, notificationHandler.UnreadCount)
+	v1.Post("/me/notifications/read-all", jwtAuth, dbCtx, notificationHandler.MarkAllRead)
+	v1.Patch("/me/notifications/:id/read", jwtAuth, dbCtx, notificationHandler.MarkRead)
 	v1.Put("/workspaces/:wsId/members/:userId/role", jwtAuth, dbCtx, middleware.RequireRole(accountSvc, rbacSvc, "admin_workspace"), workspaceHandler.UpdateMemberRole)
 	// S3-15, US-009. Param :userId (bukan :account_id seperti wording asli
 	// task, konsisten koreksi S2-01/04). Otorisasi sama seperti UpdateMemberRole.
