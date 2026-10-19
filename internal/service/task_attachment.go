@@ -100,6 +100,7 @@ type attachmentRepository interface {
 	SoftDelete(ctx context.Context, exec db.Executor, id string, purgeAt time.Time, actorID, actorRole, workspaceID string, before *repository.TaskAttachment) error
 	PermanentDelete(ctx context.Context, exec db.Executor, id, actorID, actorRole, workspaceID string, before *repository.TaskAttachment) error
 	Restore(ctx context.Context, exec db.Executor, id, actorID, actorRole, workspaceID string, before *repository.TaskAttachment) error
+	LogDownload(ctx context.Context, exec db.Executor, id, actorID, actorRole, workspaceID string, before *repository.TaskAttachment) error
 	OrgUsageBytes(ctx context.Context, exec db.Executor, orgID string) (int64, error)
 	PerProjectUsage(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.ProjectUsage, error)
 	ListGroupAdmins(ctx context.Context, exec db.Executor, groupID string) ([]repository.GroupAdminContact, error)
@@ -306,14 +307,23 @@ func (s *TaskAttachmentService) ListForTask(ctx context.Context, exec db.Executo
 }
 
 // Download -- GET /attachments/:id/download. Tanpa authorize tambahan,
-// sama alasan ListForTask (RLS sudah menjadi gerbang akses).
-func (s *TaskAttachmentService) Download(ctx context.Context, exec db.Executor, id string) (*repository.TaskAttachment, []byte, error) {
+// sama alasan ListForTask (RLS sudah menjadi gerbang akses): siapa pun yang
+// dapat melihat task boleh mengunduh (US-064b, tab Lampiran Task Detail).
+// Setiap unduhan diaudit (S6E-12, IG-143) dengan role efektif.
+func (s *TaskAttachmentService) Download(ctx context.Context, exec db.Executor, id, actorID, actorRole string) (*repository.TaskAttachment, []byte, error) {
 	att, err := s.repo.Get(ctx, exec, id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("service.Download: %w", err)
 	}
+	workspaceID, role, err := s.resolveTaskContext(ctx, exec, att.TaskID, actorID, actorRole)
+	if err != nil {
+		return nil, nil, err
+	}
 	data, err := s.storage.Download(ctx, att.StorageKey)
 	if err != nil {
+		return nil, nil, fmt.Errorf("service.Download: %w", err)
+	}
+	if err := s.repo.LogDownload(ctx, exec, id, actorID, auditRoleFor(role, actorRole), workspaceID, att); err != nil {
 		return nil, nil, fmt.Errorf("service.Download: %w", err)
 	}
 	return att, data, nil
@@ -419,6 +429,22 @@ func (s *TaskAttachmentService) ListForWorkspace(ctx context.Context, exec db.Ex
 		return nil, 0, fmt.Errorf("service.ListForWorkspace: %w", err)
 	}
 	return list, total, nil
+}
+
+// ListMine -- GET /me/attachments?workspace_id=, menu "Lampiran Saya" Editor (S6E-12, IG-143): lampiran
+// yang SAYA unggah, lintas project dalam workspace. Pengunggah dipaksa aktor (uploader_id dari klien diabaikan);
+// RLS tetap membatasi ke project yang dapat dilihat. Tanpa gerbang role -- hasilnya selalu hanya milik sendiri.
+func (s *TaskAttachmentService) ListMine(ctx context.Context, exec db.Executor, workspaceID string, f *repository.AttachmentFilter, actorID string) ([]repository.TaskAttachment, error) {
+	if workspaceID == "" || actorID == "" {
+		return nil, fmt.Errorf("service.ListMine: %w", domain.ErrInvalidInput)
+	}
+	scoped := *f
+	scoped.UploaderID = actorID
+	list, _, err := s.repo.ListForWorkspace(ctx, exec, workspaceID, &scoped)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListMine: %w", err)
+	}
+	return list, nil
 }
 
 // QuotaOverview -- kartu kuota + breakdown per-project "AW Documents.dc.html".

@@ -88,9 +88,14 @@ func (h *TaskAttachmentHandler) Download(c *fiber.Ctx) error {
 		h.logger.Error("TaskAttachmentHandler.Download dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
+	actorUserID, actorRole, ok := middleware.ActorFromContext(c)
+	if !ok {
+		h.logger.Error("TaskAttachmentHandler.Download dipanggil tanpa aktor -- tidak ada identitas untuk audit")
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
 	id := c.Params("id")
 
-	att, data, err := h.attachments.Download(c.Context(), exec, id)
+	att, data, err := h.attachments.Download(c.Context(), exec, id, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengunduh lampiran")
 	}
@@ -195,6 +200,27 @@ func (h *TaskAttachmentHandler) ListForWorkspace(c *fiber.Ctx) error {
 	list, _, err := h.attachments.ListForWorkspace(c.Context(), exec, workspaceID, &f, actorUserID, actorRole)
 	if err != nil {
 		return h.mapError(c, err, "Gagal mengambil daftar dokumen")
+	}
+	return c.JSON(response.Success(documentRowsJSON(list)))
+}
+
+// ListMine menangani GET /me/attachments -- "Lampiran Saya" Editor (S6E-12), query: workspace_id (wajib),
+// project_id, status, ext, sort. Pengunggah selalu aktor sendiri (uploader_id dari klien diabaikan).
+// Seluruh hasil filter+urut dikirim (pola "Grid 1", sama grid dokumen lain).
+func (h *TaskAttachmentHandler) ListMine(c *fiber.Ctx) error {
+	actorUserID, _, exec, ok := h.actorAndTx(c)
+	if !ok {
+		return nil
+	}
+	f := repository.AttachmentFilter{
+		ProjectID: c.Query("project_id"),
+		Status:    c.Query("status"),
+		Ext:       c.Query("ext"),
+		Sort:      c.Query("sort"),
+	}
+	list, err := h.attachments.ListMine(c.Context(), exec, c.Query("workspace_id"), &f, actorUserID)
+	if err != nil {
+		return h.mapError(c, err, "Gagal mengambil daftar lampiran saya")
 	}
 	return c.JSON(response.Success(documentRowsJSON(list)))
 }

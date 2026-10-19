@@ -331,6 +331,12 @@ func (r *TaskAttachmentRepository) Restore(ctx context.Context, exec db.Executor
 	return nil
 }
 
+// LogDownload -- audit unduhan (S6E-12, IG-143): "unduhan tercatat di Audit Trail workspace" (AW Documents.dc.html).
+func (r *TaskAttachmentRepository) LogDownload(ctx context.Context, exec db.Executor, id, actorID, actorRole, workspaceID string, before *TaskAttachment) error {
+	return insertAttachmentAudit(ctx, exec, actorID, actorRole, "attachment.downloaded", id, workspaceID,
+		map[string]any{"name": before.DisplayName, "size_bytes": before.SizeBytes})
+}
+
 // OrgUsageBytes -- total lampiran AKTIF (deleted_at IS NULL) lintas
 // SELURUH workspace organisasi ini. Dipakai gate kuota (US-066) dan
 // OrganizationRepository.RefreshStorageUsedMB.

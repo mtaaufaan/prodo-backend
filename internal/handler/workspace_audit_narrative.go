@@ -98,6 +98,8 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 		return fmt.Sprintf(`Webhook %q dihapus`, target)
 	case "attachment.uploaded":
 		return fmt.Sprintf(`Lampiran %q diunggah`, target)
+	case "attachment.downloaded":
+		return fmt.Sprintf(`Lampiran %q diunduh`, target)
 	case "attachment.renamed":
 		return fmt.Sprintf(`Lampiran diganti nama menjadi %q`, target)
 	case "attachment.deleted":
