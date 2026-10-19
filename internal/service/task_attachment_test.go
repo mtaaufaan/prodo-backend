@@ -36,6 +36,10 @@ type fakeAttachmentRepo struct {
 	groupAdmins []repository.GroupAdminContact
 
 	quotaRequestLogged bool
+
+	downloadLogs []struct{ id, role, workspaceID string }
+	listFilters  []repository.AttachmentFilter
+	listResult   []repository.TaskAttachment
 }
 
 func (f *fakeAttachmentRepo) Create(_ context.Context, _ db.Executor, taskID, uploaderID, originalName, displayName, storageKey, mimeType string, sizeBytes int64, isImage bool, actorRole, _ string) (*repository.TaskAttachment, error) {
@@ -61,7 +65,13 @@ func (f *fakeAttachmentRepo) ListForTask(_ context.Context, _ db.Executor, _ str
 
 func (f *fakeAttachmentRepo) ListForWorkspace(_ context.Context, _ db.Executor, _ string, flt *repository.AttachmentFilter) ([]repository.TaskAttachment, int, error) {
 	f.lastFilter = *flt
-	return nil, 0, nil
+	f.listFilters = append(f.listFilters, *flt)
+	return f.listResult, len(f.listResult), nil
+}
+
+func (f *fakeAttachmentRepo) LogDownload(_ context.Context, _ db.Executor, id, _, actorRole, workspaceID string, _ *repository.TaskAttachment) error {
+	f.downloadLogs = append(f.downloadLogs, struct{ id, role, workspaceID string }{id, actorRole, workspaceID})
+	return nil
 }
 
 func (f *fakeAttachmentRepo) Rename(_ context.Context, _ db.Executor, _, _, _, _, _ string, _ *repository.TaskAttachment) error {

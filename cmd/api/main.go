@@ -920,6 +920,7 @@ func run() error {
 	v1.Post("/attachments/:id/restore", jwtAuth, dbCtx, attachmentHandler.Restore)
 	// Dokumen & Lampiran PM (IG-123): rute project tanpa RequireRole, otorisasi
 	// PM/AW/GA/PA di service. Bulk delete hanya mode retensi (bisa dipulihkan).
+	v1.Get("/me/attachments", jwtAuth, dbCtx, attachmentHandler.ListMine) // Lampiran Saya Editor, S6E-12
 	v1.Get("/projects/:id/documents", jwtAuth, dbCtx, attachmentHandler.ListForProject)
 	v1.Get("/projects/:id/documents/quota", jwtAuth, dbCtx, attachmentHandler.ProjectQuota)
 	v1.Post("/projects/:id/documents/bulk-delete", jwtAuth, dbCtx, attachmentHandler.BulkDeleteForProject)

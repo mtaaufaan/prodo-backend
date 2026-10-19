@@ -43,6 +43,7 @@ func TestWorkspaceAuditNarrativeTaskActions(t *testing.T) {
 		{"komentar dihapus", entry("comment.deleted", "B", meta, `{"comment_id":"c1"}`, ""), `Komentar pada task PRODO-023 "B" dihapus`},
 		{"pic ditambah", entry("task.pic_added", "B", meta, "", `{"status_name":"IN PROGRESS","user_name":"Joyse"}`), `PIC paralel "Joyse" ditambahkan pada fase IN PROGRESS task PRODO-023 "B"`},
 		{"pic diserahkan", entry("task.pic_handoff", "B", meta, "", `{"status_name":"UNDER REVIEW","from_user_names":["Joyse","Amir"],"to_user_name":"Taufan"}`), `PIC fase UNDER REVIEW task PRODO-023 "B" diserahkan dari Joyse, Amir kepada "Taufan"`},
+		{"lampiran diunduh", entry("attachment.downloaded", "wireframe.pdf", "", "", ""), `Lampiran "wireframe.pdf" diunduh`},
 		{"waktu dicatat langsung disetujui", entry("task.time_entry_added", "B", meta, "", `{"duration_minutes":150,"approval_status":"approved"}`), `Waktu dicatat (150 menit) pada task PRODO-023 "B", langsung disetujui`},
 		{"entri manual menunggu persetujuan", entry("task.time_entry_added", "B", meta, "", `{"duration_minutes":90,"approval_status":"pending"}`), `Entri waktu manual (90 menit) ditambahkan pada task PRODO-023 "B", menunggu persetujuan`},
 		{"entri waktu ditolak", entry("task.time_entry_rejected", "B", meta, "", `{"rejection_note":"durasi salah"}`), `Entri waktu task PRODO-023 "B" ditolak: durasi salah`},
