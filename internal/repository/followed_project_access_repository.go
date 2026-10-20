@@ -10,17 +10,17 @@ import (
 	"github.com/mtaaufaan/prodo-backend/internal/db"
 )
 
-// EditorProjectAccessRepository -- S6E-02 (Sprint 6 "Editor Console", IG-133):
+// FollowedProjectAccessRepository -- S6E-02 (Sprint 6 "Editor Console", IG-133):
 // "project yang diikuti" Editor = anggota project (project_members), ATAU
 // assignee, ATAU PIC aktif di salah satu task project itu. Dipakai daftar
-// `GET /me/projects` dan gerbang baca `middleware.RequireEditorProjectAccess`.
+// `GET /me/projects` dan gerbang baca `middleware.RequireFollowedProjectAccess`.
 // Bukan berbasis RLS: RLS mengizinkan SEMUA anggota workspace membaca project
 // workspace-nya (prodo_is_workspace_member_of_project) -- gerbang ini lebih
-// sempit dan hanya berlaku untuk role workspace `editor`.
-type EditorProjectAccessRepository struct{}
+// sempit dan hanya berlaku untuk role workspace `editor` dan `approver` (S7A-02).
+type FollowedProjectAccessRepository struct{}
 
-func NewEditorProjectAccessRepository() *EditorProjectAccessRepository {
-	return &EditorProjectAccessRepository{}
+func NewFollowedProjectAccessRepository() *FollowedProjectAccessRepository {
+	return &FollowedProjectAccessRepository{}
 }
 
 // followedPredicate -- $1 = user id, alias `p` = projects.
@@ -41,7 +41,7 @@ type FollowedProject struct {
 }
 
 // ListFollowedProjects -- project non-arsip di workspaceID yang diikuti userID.
-func (r *EditorProjectAccessRepository) ListFollowedProjects(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]FollowedProject, error) {
+func (r *FollowedProjectAccessRepository) ListFollowedProjects(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]FollowedProject, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT p.id, p.workspace_id, p.name, p.code
 		FROM projects p
@@ -68,40 +68,40 @@ func (r *EditorProjectAccessRepository) ListFollowedProjects(ctx context.Context
 	return list, nil
 }
 
-// EditorProjectAccess -- isEditor true hanya kalau user punya role workspace
-// `editor` di workspace pemilik project; followed = ikut project (lihat
+// FollowedProjectAccess -- restricted true kalau user punya role workspace `editor`
+// atau `approver` di workspace pemilik project; followed = ikut project (lihat
 // followedPredicate). Project tidak ditemukan -> (false, false, nil): gerbang
 // meneruskan, handler yang menjawab 404.
-func (r *EditorProjectAccessRepository) EditorProjectAccess(ctx context.Context, exec db.Executor, projectID, userID string) (isEditor, followed bool, err error) {
+func (r *FollowedProjectAccessRepository) FollowedProjectAccess(ctx context.Context, exec db.Executor, projectID, userID string) (restricted, followed bool, err error) {
 	err = exec.QueryRow(ctx, `
-		SELECT COALESCE(wm.role::text = 'editor', FALSE), `+followedPredicate+`
+		SELECT COALESCE(wm.role::text IN ('editor', 'approver'), FALSE), `+followedPredicate+`
 		FROM projects p
 		LEFT JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $1
 		WHERE p.id = $2
-	`, userID, projectID).Scan(&isEditor, &followed)
+	`, userID, projectID).Scan(&restricted, &followed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {
-		return false, false, fmt.Errorf("repository.EditorProjectAccess: %w", err)
+		return false, false, fmt.Errorf("repository.FollowedProjectAccess: %w", err)
 	}
-	return isEditor, followed, nil
+	return restricted, followed, nil
 }
 
-// EditorTaskAccess -- sama seperti EditorProjectAccess, project diturunkan dari task.
-func (r *EditorProjectAccessRepository) EditorTaskAccess(ctx context.Context, exec db.Executor, taskID, userID string) (isEditor, followed bool, err error) {
+// FollowedTaskAccess -- sama seperti FollowedProjectAccess, project diturunkan dari task.
+func (r *FollowedProjectAccessRepository) FollowedTaskAccess(ctx context.Context, exec db.Executor, taskID, userID string) (restricted, followed bool, err error) {
 	err = exec.QueryRow(ctx, `
-		SELECT COALESCE(wm.role::text = 'editor', FALSE), `+followedPredicate+`
+		SELECT COALESCE(wm.role::text IN ('editor', 'approver'), FALSE), `+followedPredicate+`
 		FROM tasks tk
 		JOIN projects p ON p.id = tk.project_id
 		LEFT JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $1
 		WHERE tk.id = $2
-	`, userID, taskID).Scan(&isEditor, &followed)
+	`, userID, taskID).Scan(&restricted, &followed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {
-		return false, false, fmt.Errorf("repository.EditorTaskAccess: %w", err)
+		return false, false, fmt.Errorf("repository.FollowedTaskAccess: %w", err)
 	}
-	return isEditor, followed, nil
+	return restricted, followed, nil
 }

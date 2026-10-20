@@ -199,6 +199,16 @@ func requireOwnTask(ctx context.Context, exec db.Executor, owners taskOwnerCheck
 	return nil
 }
 
+// requireTaskWriter -- gerbang tulis task (S7A-02, IG-148; matriks RBAC No 8, 9, 10a, 13): Approver
+// tidak membuat/mengubah task. Ubah status/PIC oleh Approver diatur terpisah di endpoint approval
+// (S7A-04/06). Role lain tidak terpengaruh. role = hasil resolveRole/authorize.
+func requireTaskWriter(role string) error {
+	if role == "approver" {
+		return fmt.Errorf("service.requireTaskWriter: %w", domain.ErrForbidden)
+	}
+	return nil
+}
+
 // canDeleteTask -- matriks RBAC baris 14 "Hapus task": hanya Admin Workspace dan Project Manager
 // (role kosong = Platform/Group Admin). Editor dan Approver tidak.
 func canDeleteTask(role string) bool {
@@ -261,6 +271,9 @@ func (s *TaskService) Create(ctx context.Context, exec db.Executor, projectID, t
 	}
 	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireTaskWriter(auditRole); err != nil {
 		return nil, err
 	}
 	// S6E-08 (IG-139): Editor yang tidak menyebut assignee otomatis menjadi assignee task-nya sendiri
@@ -345,6 +358,9 @@ func (s *TaskService) Update(ctx context.Context, exec db.Executor, taskID, titl
 	}
 	role, err := s.resolveRole(ctx, exec, current.ProjectID, actorID, actorRole)
 	if err != nil {
+		return err
+	}
+	if err := requireTaskWriter(role); err != nil {
 		return err
 	}
 	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
@@ -683,12 +699,12 @@ type BulkStatusResult struct {
 // jalur pintas) -- satu task gagal tidak menggagalkan task lain dalam
 // batch yang sama.
 func (s *TaskService) BulkSetStatus(ctx context.Context, exec db.Executor, projectID string, taskIDs []string, statusID string, picIDs []string, actorID, actorRole string) ([]BulkStatusResult, error) {
-	// Role Editor tidak boleh bulk (S6E-06, IG-137): ditolak SELURUHNYA, tidak satu task pun diproses.
+	// Role Editor dan Approver tidak boleh bulk (S6E-06, IG-137; S7A-02, IG-148): ditolak SELURUHNYA, tidak satu task pun diproses.
 	role, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return nil, err
 	}
-	if role == "editor" {
+	if role == "editor" || role == "approver" {
 		return nil, fmt.Errorf("service.BulkSetStatus: %w", domain.ErrBulkNotAllowed)
 	}
 	results := make([]BulkStatusResult, 0, len(taskIDs))

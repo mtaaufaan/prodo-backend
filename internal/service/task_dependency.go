@@ -121,6 +121,9 @@ func (s *TaskDependencyService) Add(ctx context.Context, exec db.Executor, taskI
 	if err != nil {
 		return nil, err
 	}
+	if err := requireTaskWriter(auditRole); err != nil {
+		return nil, err
+	}
 	predecessorProjectID, err := s.tasks.GetProjectID(ctx, exec, predecessorTaskID)
 	if err != nil {
 		return nil, err
@@ -189,6 +192,9 @@ func (s *TaskDependencyService) Remove(ctx context.Context, exec db.Executor, ta
 	}
 	auditRole, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
+		return err
+	}
+	if err := requireTaskWriter(auditRole); err != nil {
 		return err
 	}
 	workspaceID, err := s.projects.GetWorkspaceID(ctx, exec, projectID)

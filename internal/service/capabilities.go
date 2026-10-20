@@ -15,18 +15,24 @@ type Capabilities struct {
 	ManageProject bool `json:"manage_project"`
 	ManageRules   bool `json:"manage_rules"`
 	ManageMembers bool `json:"manage_members"`
+	// ApproveTask -- menyetujui/menolak fase task (S7A-02, Sprint 7 "Approver Console"): Approver,
+	// Project Manager, dan Admin Workspace.
+	ApproveTask bool `json:"approve_task"`
 }
 
 // CapabilitiesForRole -- role tak dikenal mendapat semua false.
 func CapabilitiesForRole(role string) Capabilities {
 	switch role {
 	case "admin_workspace":
-		return Capabilities{true, true, true, true, true, true, true, true}
+		return Capabilities{true, true, true, true, true, true, true, true, true}
 	case "project_manager":
-		return Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true, ManageProject: true, ManageRules: true}
+		return Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true, ManageProject: true, ManageRules: true, ApproveTask: true}
 	case "editor":
 		return Capabilities{CreateTask: true, EditOwnTask: true, Comment: true, LogTime: true, Attach: true}
-	case "approver", "division_viewer":
+	case "approver":
+		// Approver: komentar, lampiran, dan setujui/tolak fase; tidak membuat/mengubah task atau mencatat waktu.
+		return Capabilities{Comment: true, Attach: true, ApproveTask: true}
+	case "division_viewer":
 		// Division Viewer boleh berkomentar dan mention (PRD 2.1), tidak lebih.
 		return Capabilities{Comment: true}
 	}
