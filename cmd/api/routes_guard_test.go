@@ -62,6 +62,10 @@ func TestEditorMatrix_WorkspaceRouteGuards(t *testing.T) {
 			if r == "editor" && !editorReadable[route] {
 				t.Errorf("%s membuka Editor (%v) padahal bukan rute baca yang diizinkan", route, rs)
 			}
+			// S7A-02 (IG-148): Approver mengikuti allowlist baca yang sama dengan Editor.
+			if r == "approver" && !editorReadable[route] {
+				t.Errorf("%s membuka Approver (%v) padahal bukan rute baca yang diizinkan", route, rs)
+			}
 		}
 	}
 	for route := range editorReadable {

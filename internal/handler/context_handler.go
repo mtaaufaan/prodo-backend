@@ -26,7 +26,7 @@ type ContextHandler struct {
 }
 
 // followedProjectLister -- interface didefinisikan di consumer, diimplementasikan
-// *repository.EditorProjectAccessRepository (S6E-02).
+// *repository.FollowedProjectAccessRepository (S6E-02).
 type followedProjectLister interface {
 	ListFollowedProjects(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]repository.FollowedProject, error)
 }

@@ -55,13 +55,16 @@ func TestTaskService_EditorOwnershipMatrix(t *testing.T) {
 		{"editor", false, domain.ErrNotYourTask},
 		{"project_manager", false, nil},
 		{"admin_workspace", false, nil},
-		{"approver", false, nil}, // batasan Approver menunggu sprint Approver (di luar S6E-06)
+		{"approver", false, nil}, // ubah status/PIC/reorder oleh Approver menunggu endpoint approval (S7A-04/06); Update ditolak (S7A-02)
 	}
 	for name, op := range ops {
 		for _, tc := range cases {
 			t.Run(name+"/"+tc.role+map[bool]string{true: "/milik", false: "/bukan-milik"}[tc.owned], func(t *testing.T) {
 				svc, _ := taskSvcWithRole(tc.role, tc.owned)
 				err := op(svc)
+				if name == "Update" && tc.role == "approver" {
+					tc.wantErr = domain.ErrForbidden // S7A-02: Approver tidak mengubah field task
+				}
 				if tc.wantErr == nil && err != nil {
 					t.Fatalf("err = %v, want nil", err)
 				}
