@@ -726,3 +726,7 @@ var ErrNotInReview = errors.New("task is not under review")
 
 // ErrApprovalNoteRequired -- menolak task tanpa alasan (minimal 5 karakter) (S7A-04, IG-150).
 var ErrApprovalNoteRequired = errors.New("rejection reason must be at least 5 characters")
+
+// ErrUseApproval -- Approver mengubah status task lewat jalur status biasa; perubahan status Approver hanya lewat
+// POST /tasks/:id/approval (S7A-06, IG-152).
+var ErrUseApproval = errors.New("approvers change task status only through the approval endpoint")

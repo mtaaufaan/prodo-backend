@@ -278,6 +278,9 @@ func (s *TaskPicService) AddPic(ctx context.Context, exec db.Executor, taskID, u
 	if err != nil {
 		return fmt.Errorf("service.AddPic: %w", err)
 	}
+	if err := requireActivePicIfApprover(role, active, actorID); err != nil {
+		return err
+	}
 	for i := range active {
 		if active[i].UserID == userID {
 			return fmt.Errorf("service.AddPic: %w", domain.ErrPicAlreadyActive)
@@ -291,6 +294,20 @@ func (s *TaskPicService) AddPic(ctx context.Context, exec db.Executor, taskID, u
 		return fmt.Errorf("service.AddPic: %w", err)
 	}
 	return nil
+}
+
+// requireActivePicIfApprover -- matriks RBAC No 12 (S7A-06, IG-152): Approver "Terbatas" -- hanya PIC aktif task
+// yang boleh menambah/menyerahkan PIC. Role lain tidak terpengaruh (Editor sudah dibatasi requireOwnTask).
+func requireActivePicIfApprover(role string, active []repository.TaskPicPhase, actorID string) error {
+	if role != "approver" {
+		return nil
+	}
+	for i := range active {
+		if active[i].UserID == actorID {
+			return nil
+		}
+	}
+	return fmt.Errorf("service.requireActivePicIfApprover: %w", domain.ErrForbidden)
 }
 
 // RemovePic (IG-97 susulan, tombol "✕ HAPUS PIC") -- lepas SATU PIC aktif
@@ -359,6 +376,9 @@ func (s *TaskPicService) HandoffPic(ctx context.Context, exec db.Executor, taskI
 	active, err := s.repo.ListActiveForTask(ctx, exec, taskID)
 	if err != nil {
 		return fmt.Errorf("service.HandoffPic: %w", err)
+	}
+	if err := requireActivePicIfApprover(role, active, actorID); err != nil {
+		return err
 	}
 	if len(active) == 0 {
 		return fmt.Errorf("service.HandoffPic: %w", domain.ErrNotActivePic)
