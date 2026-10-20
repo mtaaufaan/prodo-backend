@@ -258,7 +258,7 @@ func run() error {
 	customStatusSvc := service.NewCustomStatusService(customStatusRepo, rbacSvc, ruleSvc, projectRepo)
 	sprintSvc := service.NewSprintService(sprintRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo)
 	projectImportSvc := service.NewProjectImportService(projectImportRepo, sprintRepo, projectRepo, rbacSvc, customStatusRepo, projectMemberRepo, taskRepo)
-	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc, sprintRepo)
+	taskSvc := service.NewTaskService(taskRepo, taskPicRepo, taskDependencyRepo, taskStatusSessionRepo, projectRepo, customStatusRepo, rbacSvc, projectMemberRepo, ruleSvc, sprintRepo).WithApprovals(repository.NewTaskApprovalRepository()) // S7A-04, IG-150
 	ruleSvc.SetTaskActions(taskSvc)
 	taskPicSvc := service.NewTaskPicService(taskPicRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo, customStatusRepo, projectMemberRepo)
 	taskDependencySvc := service.NewTaskDependencyService(taskDependencyRepo, taskRepo, projectRepo, rbacSvc, projectMemberRepo)
@@ -849,6 +849,9 @@ func run() error {
 	v1.Delete("/tasks/:id/follow", jwtAuth, dbCtx, followedTaskGate, taskCommentHandler.Unfollow)
 	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
 	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
+	// Approval task (S7A-04): keputusan setuju/tolak dan antrean/riwayat.
+	v1.Post("/tasks/:id/approval", jwtAuth, dbCtx, followedTaskGate, taskHandler.DecideApproval)
+	v1.Get("/me/approvals", jwtAuth, dbCtx, taskHandler.ListApprovals)
 	v1.Put("/tasks/:id/reorder", jwtAuth, dbCtx, taskHandler.Reorder)
 	v1.Post("/projects/:id/tasks/bulk-status", jwtAuth, dbCtx, taskHandler.BulkSetStatus)
 	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
