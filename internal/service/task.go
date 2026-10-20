@@ -115,6 +115,7 @@ type TaskService struct {
 	projectRoles sprintProjectRoleChecker
 	rules        taskRuleEvaluator
 	sprints      taskSprintChecker
+	approvals    taskApprovalStore // diisi WithApprovals (S7A-04); nil di tes/worker yang tidak butuh approval
 }
 
 func NewTaskService(repo taskRepository, pics taskPicRepository, deps taskDependencyChecker, sessions taskStatusSessionRepository, projects taskProjectResolver, statuses taskCustomStatuses, rbac sprintWorkspaceRoleChecker, projectRoles sprintProjectRoleChecker, rules taskRuleEvaluator, sprints taskSprintChecker) *TaskService {
@@ -449,6 +450,22 @@ func (s *TaskService) isTaskInWorkableSprint(ctx context.Context, exec db.Execut
 // infinite loop), guard/validasi bisnis (dependency, completeness, PIC
 // Group) TETAP SAMA PERSIS untuk kedua jalur.
 func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string, fireRules bool) error {
+	return s.setStatusWith(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, statusOpts{fireRules: fireRules})
+}
+
+// statusOpts -- variasi jalur status (S7A-04): keputusan approval memakai guard yang sama tetapi tanpa pilihan PIC
+// manual (PIC fase kerja diaktifkan kembali oleh service), tanpa PIC Group, dan audit task.approved/task.rejected.
+type statusOpts struct {
+	fireRules    bool
+	skipPicGroup bool
+	skipDeps     bool
+	// approval != nil -> status diubah lewat TaskApprovalRepository.SetStatusByApproval dengan audit approval.
+	approval *approvalAudit
+}
+
+type approvalAudit struct{ action, note string }
+
+func (s *TaskService) setStatusWith(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string, o statusOpts) error {
 	if taskID == "" || statusID == "" {
 		return fmt.Errorf("service.SetStatus: %w", domain.ErrInvalidInput)
 	}
@@ -501,7 +518,7 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 			return fmt.Errorf("service.SetStatus: %w", domain.ErrTaskNotInSprint)
 		}
 	}
-	if status.Name != "BACKLOG" && status.Name != "BLOCKED" && status.Name != "CANCELED" {
+	if !o.skipDeps && status.Name != "BACKLOG" && status.Name != "BLOCKED" && status.Name != "CANCELED" {
 		blocking, err := s.deps.ListIncompletePredecessors(ctx, exec, taskID)
 		if err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
@@ -520,7 +537,7 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 		}
 	}
 
-	if status.RequirePic && !isFullPicMode(role) {
+	if status.RequirePic && !isFullPicMode(role) && !o.skipPicGroup {
 		group, err := s.pics.ListGroupForStatus(ctx, exec, projectID, statusID)
 		if err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
@@ -544,7 +561,11 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	}
 	isRegression := status.Position < currentStatus.Position
 
-	if err := s.repo.SetStatus(ctx, exec, taskID, statusID, status.Name == "DONE", actorID, role, workspaceID, current.StatusName, status.Name); err != nil {
+	if o.approval != nil {
+		if err := s.approvals.SetStatusByApproval(ctx, exec, taskID, statusID, status.Name == "DONE", actorID, role, workspaceID, o.approval.action, current.StatusName, status.Name, o.approval.note); err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+	} else if err := s.repo.SetStatus(ctx, exec, taskID, statusID, status.Name == "DONE", actorID, role, workspaceID, current.StatusName, status.Name); err != nil {
 		return fmt.Errorf("service.SetStatus: %w", err)
 	}
 	if err := s.pics.DeactivateActiveForTask(ctx, exec, taskID); err != nil {
@@ -586,7 +607,7 @@ func (s *TaskService) setStatusCore(ctx context.Context, exec db.Executor, taskI
 	// assignee dievaluasi terhadap task PASCA-perubahan. Best-effort, tidak
 	// menggagalkan SetStatus yang sudah berhasil. fireRules=false untuk
 	// panggilan dari SetStatusForRule sendiri (mencegah infinite loop).
-	if fireRules {
+	if o.fireRules {
 		current.StatusID = statusID
 		current.StatusName = status.Name
 		s.fireRules(ctx, exec, workspaceID, "status_changed", current, actorID, actorRole)

@@ -33,6 +33,9 @@ func TestWorkspaceAuditNarrativeTaskActions(t *testing.T) {
 	}{
 		{"dibuat dari import", entry("task.created", "Login", meta, "", `{"imported":true}`), `Task PRODO-023 "Login" dibuat (hasil import)`},
 		{"status", entry("task.status_changed", "Login", meta, `{"status":"BACKLOG"}`, `{"status":"IN PROGRESS"}`), `Status task PRODO-023 "Login" diubah dari BACKLOG menjadi IN PROGRESS`},
+		{"disetujui dengan catatan", entry("task.approved", "Login", meta, `{"status":"UNDER REVIEW"}`, `{"status":"DONE","note":"Sesuai kriteria."}`), `Task PRODO-023 "Login" disetujui dan dipindahkan ke DONE (catatan: Sesuai kriteria.)`},
+		{"disetujui tanpa catatan", entry("task.approved", "Login", meta, `{"status":"UNDER REVIEW"}`, `{"status":"DONE"}`), `Task PRODO-023 "Login" disetujui dan dipindahkan ke DONE`},
+		{"ditolak dengan alasan", entry("task.rejected", "Login", meta, `{"status":"UNDER REVIEW"}`, `{"status":"IN PROGRESS","note":"Uji ulang pembayaran."}`), `Task PRODO-023 "Login" ditolak dan dikembalikan ke IN PROGRESS. Alasan: Uji ulang pembayaran.`},
 		{"kelengkapan", entry("task.completeness_changed", "Login", meta, `{"completeness":"incomplete"}`, `{"completeness":"complete"}`), `Kelengkapan task PRODO-023 "Login" diubah dari Belum Lengkap menjadi Lengkap`},
 		{"diperbarui dengan nilai sebelum", entry("task.updated", "Baru", meta, `{"title":"Lama","priority":"low"}`, `{"title":"Baru","priority":"high"}`), `Task PRODO-023 "Baru" diperbarui: judul "Lama" menjadi "Baru", prioritas low menjadi high`},
 		{"diperbarui baris lama tanpa nilai sebelum", entry("task.updated", "Baru", "", "", `{"title":"Baru","priority":"high"}`), `Task "Baru" diperbarui`},

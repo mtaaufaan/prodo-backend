@@ -719,3 +719,10 @@ type CircularDependencyError struct {
 func (e *CircularDependencyError) Error() string {
 	return fmt.Sprintf("adding this dependency would create a circular dependency: %s", strings.Join(e.CyclePath, " -> "))
 }
+
+// ErrNotInReview -- keputusan approval pada task yang TIDAK (lagi) berstatus UNDER REVIEW, termasuk keputusan kedua
+// oleh approver lain atas task yang sama (S7A-04, IG-150).
+var ErrNotInReview = errors.New("task is not under review")
+
+// ErrApprovalNoteRequired -- menolak task tanpa alasan (minimal 5 karakter) (S7A-04, IG-150).
+var ErrApprovalNoteRequired = errors.New("rejection reason must be at least 5 characters")
