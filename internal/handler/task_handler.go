@@ -698,6 +698,10 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_YOUR_TASK", "Anda hanya dapat mengubah task yang ditugaskan kepada Anda.", nil))
 	case errors.Is(err, domain.ErrBulkNotAllowed):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("BULK_NOT_ALLOWED", "Role Anda tidak dapat memakai aksi bulk.", nil))
+	case errors.Is(err, domain.ErrNotInReview):
+		return c.Status(fiber.StatusConflict).JSON(response.Error("NOT_IN_REVIEW", "Task ini tidak (lagi) berstatus UNDER REVIEW -- mungkin sudah diputuskan approver lain.", nil))
+	case errors.Is(err, domain.ErrApprovalNoteRequired):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response.Error("VALIDATION_ERROR", "Alasan penolakan minimal 5 karakter agar assignee tahu apa yang perlu diperbaiki.", nil))
 	case errors.Is(err, domain.ErrNotBacklogPic):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_BACKLOG_PIC", "Hanya PIC backlog task ini yang dapat menyatakan lengkap atau belum lengkap.", nil))
 	case errors.Is(err, domain.ErrTaskNotInSprint):

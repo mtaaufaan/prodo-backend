@@ -162,6 +162,15 @@ func workspaceAuditNarrativeText(e *repository.WorkspaceAuditLogEntry) string {
 	case "task.status_changed":
 		return fmt.Sprintf(`Status task %s diubah dari %s menjadi %s`, workspaceAuditTaskLabel(e, meta),
 			workspaceAuditMetaString(workspaceAuditStateBefore(e), "status", "?"), workspaceAuditMetaString(workspaceAuditStateAfter(e), "status", "?"))
+	case "task.approved":
+		text := fmt.Sprintf(`Task %s disetujui dan dipindahkan ke %s`, workspaceAuditTaskLabel(e, meta), workspaceAuditMetaString(workspaceAuditStateAfter(e), "status", "?"))
+		if note := workspaceAuditMetaString(workspaceAuditStateAfter(e), "note", ""); note != "" {
+			text += fmt.Sprintf(` (catatan: %s)`, note)
+		}
+		return text
+	case "task.rejected":
+		return fmt.Sprintf(`Task %s ditolak dan dikembalikan ke %s. Alasan: %s`, workspaceAuditTaskLabel(e, meta),
+			workspaceAuditMetaString(workspaceAuditStateAfter(e), "status", "?"), workspaceAuditMetaString(workspaceAuditStateAfter(e), "note", "-"))
 	case "task.completeness_changed":
 		return fmt.Sprintf(`Kelengkapan task %s diubah dari %s menjadi %s`, workspaceAuditTaskLabel(e, meta),
 			workspaceAuditCompletenessLabel(workspaceAuditMetaString(workspaceAuditStateBefore(e), "completeness", "")),
