@@ -422,7 +422,7 @@ func isFullPicMode(role string) bool {
 // KECUALI BACKLOG/BLOCKED. Setelah status berubah, successor LANGSUNG
 // task ini diberi tahu kalau task ini baru masuk/keluar DONE (S4-50).
 func (s *TaskService) SetStatus(ctx context.Context, exec db.Executor, taskID, statusID string, picIDs []string, actorID, actorRole string) error {
-	return s.setStatusCore(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, true)
+	return s.setStatusWith(ctx, exec, taskID, statusID, picIDs, actorID, actorRole, statusOpts{fireRules: true, denyApprover: true})
 }
 
 // isTaskInWorkableSprint (susulan domain.ErrTaskNotInSprint) -- true HANYA
@@ -459,6 +459,8 @@ type statusOpts struct {
 	fireRules    bool
 	skipPicGroup bool
 	skipDeps     bool
+	// denyApprover -- jalur status biasa (SetStatus publik): Approver ditolak ErrUseApproval (S7A-06).
+	denyApprover bool
 	// approval != nil -> status diubah lewat TaskApprovalRepository.SetStatusByApproval dengan audit approval.
 	approval *approvalAudit
 }
@@ -476,6 +478,9 @@ func (s *TaskService) setStatusWith(ctx context.Context, exec db.Executor, taskI
 	role, err := s.resolveRole(ctx, exec, projectID, actorID, actorRole)
 	if err != nil {
 		return err
+	}
+	if o.denyApprover && role == "approver" {
+		return fmt.Errorf("service.SetStatus: %w", domain.ErrUseApproval)
 	}
 	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
 		return err
@@ -665,6 +670,9 @@ func (s *TaskService) Reorder(ctx context.Context, exec db.Executor, taskID, tar
 	if err != nil {
 		return err
 	}
+	if err := requireTaskWriter(role); err != nil {
+		return err
+	}
 	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
 		return err
 	}
@@ -780,8 +788,22 @@ func (s *TaskService) StartWork(ctx context.Context, exec db.Executor, taskID, a
 	if err != nil {
 		return err
 	}
-	if _, err := s.authorize(ctx, exec, projectID, actorID, actorRole); err != nil {
+	role, err := s.authorize(ctx, exec, projectID, actorID, actorRole)
+	if err != nil {
 		return err
+	}
+	// Matriks RBAC 10b: Editor Terbatas (task miliknya), Approver Terbatas (hanya saat PIC aktif) -- S7A-06, IG-152.
+	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {
+		return err
+	}
+	if role == "approver" {
+		isPic, err := s.pics.IsActivePic(ctx, exec, taskID, actorID)
+		if err != nil {
+			return fmt.Errorf("service.StartWork: %w", err)
+		}
+		if !isPic {
+			return fmt.Errorf("service.StartWork: %w", domain.ErrForbidden)
+		}
 	}
 	if err := s.sessions.StartWork(ctx, exec, taskID); err != nil {
 		return fmt.Errorf("service.StartWork: %w", err)
@@ -864,6 +886,9 @@ func (s *TaskService) SetCompleteness(ctx context.Context, exec db.Executor, tas
 	// lagi boleh -- PM dapat menambahkan diri sebagai PIC paralel dulu.
 	role, err := s.resolveRole(ctx, exec, task.ProjectID, actorID, actorRole)
 	if err != nil {
+		return err
+	}
+	if err := requireTaskWriter(role); err != nil {
 		return err
 	}
 	if err := requireOwnTask(ctx, exec, s.repo, role, taskID, actorID); err != nil {

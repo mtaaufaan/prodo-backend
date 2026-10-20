@@ -867,11 +867,11 @@ func run() error {
 	v1.Post("/tasks/:id/pic/add", jwtAuth, dbCtx, taskHandler.AddPic)
 	v1.Post("/tasks/:id/pic/handoff", jwtAuth, dbCtx, taskHandler.HandoffPic)
 	v1.Delete("/tasks/:id/pic/:userId", jwtAuth, dbCtx, taskHandler.RemovePic)
-	v1.Get("/tasks/:id/pic-history", jwtAuth, dbCtx, taskHandler.PicHistory)
-	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, picGroupHandler.List)
+	v1.Get("/tasks/:id/pic-history", jwtAuth, dbCtx, followedTaskGate, taskHandler.PicHistory)
+	v1.Get("/projects/:id/pic-groups", jwtAuth, dbCtx, followedProjectGate, picGroupHandler.List)
 	v1.Put("/projects/:id/pic-groups/:statusId", jwtAuth, dbCtx, picGroupHandler.Replace)
 	v1.Put("/tasks/:id/completeness", jwtAuth, dbCtx, taskHandler.Completeness)
-	v1.Get("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.Dependencies)
+	v1.Get("/tasks/:id/dependencies", jwtAuth, dbCtx, followedTaskGate, taskHandler.Dependencies)
 	v1.Post("/tasks/:id/dependencies", jwtAuth, dbCtx, taskHandler.AddDependency)
 	v1.Delete("/tasks/:id/dependencies/:predecessorId", jwtAuth, dbCtx, taskHandler.RemoveDependency)
 
@@ -882,9 +882,9 @@ func run() error {
 	v1.Put("/statuses/:id/pic-requirement", jwtAuth, dbCtx, customStatusHandler.UpdateRequirePic)
 	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
 	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
-	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, taskHandler.StatusSessions)
-	v1.Get("/tasks/:id/versions", jwtAuth, dbCtx, taskHandler.Versions)
-	v1.Get("/tasks/:id/activity", jwtAuth, dbCtx, taskHandler.Activity)
+	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, followedTaskGate, taskHandler.StatusSessions)
+	v1.Get("/tasks/:id/versions", jwtAuth, dbCtx, followedTaskGate, taskHandler.Versions)
+	v1.Get("/tasks/:id/activity", jwtAuth, dbCtx, followedTaskGate, taskHandler.Activity)
 
 	// Timesheet (IG-97/US-036/037, API_CONTRACT.md §15).
 	v1.Post("/tasks/:id/time-entries/start", jwtAuth, dbCtx, timeEntryHandler.StartTimer)
@@ -892,7 +892,7 @@ func run() error {
 	v1.Get("/tasks/:id/time-entries/active", jwtAuth, dbCtx, timeEntryHandler.GetActive)
 	v1.Post("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.CreateManual)
 	v1.Post("/tasks/:id/time-log", jwtAuth, dbCtx, followedTaskGate, timeEntryHandler.LogHours) // catat jam Editor, S6E-10
-	v1.Get("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.List)
+	v1.Get("/tasks/:id/time-entries", jwtAuth, dbCtx, followedTaskGate, timeEntryHandler.List)
 	v1.Patch("/time-entries/:entryId", jwtAuth, dbCtx, timeEntryHandler.UpdateManual)
 	v1.Post("/time-entries/:entryId/approve", jwtAuth, dbCtx, timeEntryHandler.Approve)
 	v1.Post("/time-entries/:entryId/reject", jwtAuth, dbCtx, timeEntryHandler.Reject)
@@ -913,7 +913,7 @@ func run() error {
 
 	// SUB-TASK / checklist item (IG-97 susulan).
 	v1.Post("/tasks/:id/checklist-items", jwtAuth, dbCtx, checklistItemHandler.Create)
-	v1.Get("/tasks/:id/checklist-items", jwtAuth, dbCtx, checklistItemHandler.List)
+	v1.Get("/tasks/:id/checklist-items", jwtAuth, dbCtx, followedTaskGate, checklistItemHandler.List)
 	v1.Patch("/tasks/checklist-items/:itemId", jwtAuth, dbCtx, checklistItemHandler.Update)
 	v1.Delete("/tasks/checklist-items/:itemId", jwtAuth, dbCtx, checklistItemHandler.Delete)
 
@@ -922,7 +922,7 @@ func run() error {
 	// sudah cukup, pola sama endpoint task lain); grid "AW Documents" level
 	// workspace AW-only.
 	v1.Post("/tasks/:id/attachments", jwtAuth, dbCtx, attachmentHandler.Upload)
-	v1.Get("/tasks/:id/attachments", jwtAuth, dbCtx, attachmentHandler.ListForTask)
+	v1.Get("/tasks/:id/attachments", jwtAuth, dbCtx, followedTaskGate, attachmentHandler.ListForTask)
 	v1.Get("/attachments/:id/download", jwtAuth, dbCtx, attachmentHandler.Download)
 	v1.Put("/attachments/:id", jwtAuth, dbCtx, attachmentHandler.Rename)
 	v1.Delete("/attachments/:id", jwtAuth, dbCtx, attachmentHandler.Delete)

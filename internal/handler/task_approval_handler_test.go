@@ -26,6 +26,7 @@ func TestTaskHandler_MapError_Approval(t *testing.T) {
 		status   int
 		wantCode string
 	}{
+		{domain.ErrUseApproval, http.StatusForbidden, "USE_APPROVAL"},
 		{domain.ErrNotInReview, http.StatusConflict, "NOT_IN_REVIEW"},
 		{fmt.Errorf("service.DecideApproval: %w", domain.ErrNotInReview), http.StatusConflict, "NOT_IN_REVIEW"},
 		{domain.ErrApprovalNoteRequired, http.StatusUnprocessableEntity, "VALIDATION_ERROR"},
