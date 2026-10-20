@@ -698,6 +698,8 @@ func (h *TaskHandler) mapError(c *fiber.Ctx, err error, fallbackMessage string) 
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("NOT_YOUR_TASK", "Anda hanya dapat mengubah task yang ditugaskan kepada Anda.", nil))
 	case errors.Is(err, domain.ErrBulkNotAllowed):
 		return c.Status(fiber.StatusForbidden).JSON(response.Error("BULK_NOT_ALLOWED", "Role Anda tidak dapat memakai aksi bulk.", nil))
+	case errors.Is(err, domain.ErrUseApproval):
+		return c.Status(fiber.StatusForbidden).JSON(response.Error("USE_APPROVAL", "Approver mengubah status task lewat keputusan Setujui/Tolak (antrean approval atau detail task), bukan memindahkan status secara langsung.", nil))
 	case errors.Is(err, domain.ErrNotInReview):
 		return c.Status(fiber.StatusConflict).JSON(response.Error("NOT_IN_REVIEW", "Task ini tidak (lagi) berstatus UNDER REVIEW -- mungkin sudah diputuskan approver lain.", nil))
 	case errors.Is(err, domain.ErrApprovalNoteRequired):
