@@ -12,46 +12,46 @@ import (
 )
 
 type stubAccessChecker struct {
-	isEditor, followed  bool
-	err                 error
-	gotProject, gotTask string
+	restricted, followed bool
+	err                  error
+	gotProject, gotTask  string
 }
 
-func (s *stubAccessChecker) EditorProjectAccess(_ context.Context, _ db.Executor, projectID, _ string) (isEditor, followed bool, err error) {
+func (s *stubAccessChecker) FollowedProjectAccess(_ context.Context, _ db.Executor, projectID, _ string) (restricted, followed bool, err error) {
 	s.gotProject = projectID
-	return s.isEditor, s.followed, s.err
+	return s.restricted, s.followed, s.err
 }
 
-func (s *stubAccessChecker) EditorTaskAccess(_ context.Context, _ db.Executor, taskID, _ string) (isEditor, followed bool, err error) {
+func (s *stubAccessChecker) FollowedTaskAccess(_ context.Context, _ db.Executor, taskID, _ string) (restricted, followed bool, err error) {
 	s.gotTask = taskID
-	return s.isEditor, s.followed, s.err
+	return s.restricted, s.followed, s.err
 }
 
-func accessApp(checker EditorProjectAccessChecker, byTask bool) *fiber.App {
+func accessApp(checker FollowedProjectAccessChecker, byTask bool) *fiber.App {
 	app := fiber.New()
 	app.Get("/x/:id", withDBTx(), func(c *fiber.Ctx) error {
 		c.Locals(actorUserIDLocalsKey, "u1")
 		return c.Next()
-	}, RequireEditorProjectAccess(checker, byTask), func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+	}, RequireFollowedProjectAccess(checker, byTask), func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 	return app
 }
 
-func TestRequireEditorProjectAccess(t *testing.T) {
+func TestRequireFollowedProjectAccess(t *testing.T) {
 	cases := []struct {
-		name               string
-		isEditor, followed bool
-		byTask             bool
-		want               int
+		name                 string
+		restricted, followed bool
+		byTask               bool
+		want                 int
 	}{
-		{"editor pengikut lolos", true, true, false, http.StatusOK},
-		{"editor non-anggota ditolak", true, false, false, http.StatusForbidden},
+		{"editor/approver pengikut lolos", true, true, false, http.StatusOK},
+		{"editor/approver non-anggota ditolak", true, false, false, http.StatusForbidden},
 		{"role lain tidak digerbang", false, false, false, http.StatusOK},
 		{"editor non-anggota ditolak lewat task", true, false, true, http.StatusForbidden},
 		{"editor pengikut lolos lewat task", true, true, true, http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			checker := &stubAccessChecker{isEditor: tc.isEditor, followed: tc.followed}
+			checker := &stubAccessChecker{restricted: tc.restricted, followed: tc.followed}
 			resp, err := accessApp(checker, tc.byTask).Test(httptest.NewRequest(http.MethodGet, "/x/abc", http.NoBody))
 			if err != nil {
 				t.Fatal(err)
@@ -67,7 +67,7 @@ func TestRequireEditorProjectAccess(t *testing.T) {
 	}
 }
 
-func TestRequireEditorProjectAccess_checkerError(t *testing.T) {
+func TestRequireFollowedProjectAccess_checkerError(t *testing.T) {
 	checker := &stubAccessChecker{err: context.DeadlineExceeded}
 	resp, err := accessApp(checker, false).Test(httptest.NewRequest(http.MethodGet, "/x/abc", http.NoBody))
 	if err != nil {

@@ -309,14 +309,14 @@ func run() error {
 	authHandler := handler.NewAuthHandler(activationSvc, authSvc, logger)
 	stepUpHandler := handler.NewStepUpHandler(stepUpSvc, accountSvc, logger)
 	requireStepUp := middleware.RequireStepUp(stepUpSvc)
-	editorAccessRepo := repository.NewEditorProjectAccessRepository()
-	editorProjectGate := middleware.RequireEditorProjectAccess(editorAccessRepo, false) // S6E-02, IG-133
+	followedAccessRepo := repository.NewFollowedProjectAccessRepository()
+	followedProjectGate := middleware.RequireFollowedProjectAccess(followedAccessRepo, false) // S6E-02, IG-133
 	taskCommentRepo := repository.NewTaskCommentRepository()
 	taskCommentHandler := handler.NewTaskCommentHandler(service.NewTaskCommentService(taskCommentRepo), logger) // S6E-04, IG-135
 	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
 	notificationHandler := handler.NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository()), logger)
-	editorTaskGate := middleware.RequireEditorProjectAccess(editorAccessRepo, true)
-	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, editorAccessRepo, logger)
+	followedTaskGate := middleware.RequireFollowedProjectAccess(followedAccessRepo, true)
+	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, followedAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
 	accountSettingsHandler := handler.NewAccountSettingsHandler(accountSvc, profileSvc, logger)
@@ -510,7 +510,7 @@ func run() error {
 	// presisi di service (authorizeScope). Mutasi selain Create reuse
 	// endpoint /statuses/:id/* di atas apa adanya (statusID sudah cukup
 	// meresolve scope-nya sendiri lewat CustomStatusRepository.Get).
-	v1.Get("/projects/:id/statuses", jwtAuth, dbCtx, editorProjectGate, customStatusHandler.ListForProject)
+	v1.Get("/projects/:id/statuses", jwtAuth, dbCtx, followedProjectGate, customStatusHandler.ListForProject)
 	v1.Post("/projects/:id/statuses", jwtAuth, dbCtx, customStatusHandler.CreateForProject)
 	// S4W-14, US-054 ("AW Webhook.dc.html"+"AW Add Webhook.dc.html") -- reuse
 	// WebhookService (Track S4G), AW-only (ditegakkan service, sama pola
@@ -792,7 +792,7 @@ func run() error {
 	v1.Put("/projects/:id/unarchive", jwtAuth, dbCtx, projectHandler.Unarchive)
 	v1.Delete("/projects/:id", jwtAuth, dbCtx, projectHandler.Delete)
 	v1.Post("/projects/:id/restore", jwtAuth, dbCtx, projectHandler.Restore)
-	v1.Get("/projects/:id/members", jwtAuth, dbCtx, editorProjectGate, projectMemberHandler.ListMembers)
+	v1.Get("/projects/:id/members", jwtAuth, dbCtx, followedProjectGate, projectMemberHandler.ListMembers)
 	v1.Post("/projects/:id/members", jwtAuth, dbCtx, projectMemberHandler.AddMember)
 	// IG-100 susulan, tombol "+ MEMBER" -- daftar email sekaligus, boleh
 	// dari luar workspace/organisasi ini (lihat service/project_member.go).
@@ -829,7 +829,7 @@ func run() error {
 		}),
 		projectImportHandler.Execute)
 	v1.Post("/projects/:id/sprints", jwtAuth, dbCtx, sprintHandler.Create)
-	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, editorProjectGate, sprintHandler.List)
+	v1.Get("/projects/:id/sprints", jwtAuth, dbCtx, followedProjectGate, sprintHandler.List)
 	v1.Put("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Update)
 	v1.Post("/sprints/:id/start", jwtAuth, dbCtx, sprintHandler.Start)
 	v1.Post("/sprints/:id/complete", jwtAuth, dbCtx, sprintHandler.Complete)
@@ -837,16 +837,16 @@ func run() error {
 	v1.Post("/sprints/:id/assign-tasks", jwtAuth, dbCtx, sprintHandler.AssignTasks)
 	v1.Delete("/sprints/:id", jwtAuth, dbCtx, sprintHandler.Delete)
 
-	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, editorProjectGate, taskHandler.Create)
-	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, editorProjectGate, taskHandler.List)
-	v1.Get("/tasks/:id", jwtAuth, dbCtx, editorTaskGate, taskHandler.Get)
+	v1.Post("/projects/:id/tasks", jwtAuth, dbCtx, followedProjectGate, taskHandler.Create)
+	v1.Get("/projects/:id/tasks", jwtAuth, dbCtx, followedProjectGate, taskHandler.List)
+	v1.Get("/tasks/:id", jwtAuth, dbCtx, followedTaskGate, taskHandler.Get)
 	// Komentar + ikuti task (S6E-04, IG-135). Edit/hapus lewat id komentar: penulis/PM/AW ditegakkan di service.
-	v1.Post("/tasks/:id/comments", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.Create)
-	v1.Get("/tasks/:id/comments", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.List)
+	v1.Post("/tasks/:id/comments", jwtAuth, dbCtx, followedTaskGate, taskCommentHandler.Create)
+	v1.Get("/tasks/:id/comments", jwtAuth, dbCtx, followedTaskGate, taskCommentHandler.List)
 	v1.Patch("/comments/:id", jwtAuth, dbCtx, taskCommentHandler.Edit)
 	v1.Delete("/comments/:id", jwtAuth, dbCtx, taskCommentHandler.Delete)
-	v1.Put("/tasks/:id/follow", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.Follow)
-	v1.Delete("/tasks/:id/follow", jwtAuth, dbCtx, editorTaskGate, taskCommentHandler.Unfollow)
+	v1.Put("/tasks/:id/follow", jwtAuth, dbCtx, followedTaskGate, taskCommentHandler.Follow)
+	v1.Delete("/tasks/:id/follow", jwtAuth, dbCtx, followedTaskGate, taskCommentHandler.Unfollow)
 	v1.Put("/tasks/:id", jwtAuth, dbCtx, taskHandler.Update)
 	v1.Put("/tasks/:id/status", jwtAuth, dbCtx, taskHandler.SetStatus)
 	v1.Put("/tasks/:id/reorder", jwtAuth, dbCtx, taskHandler.Reorder)
@@ -854,8 +854,8 @@ func run() error {
 	v1.Delete("/tasks/:id", jwtAuth, dbCtx, taskHandler.Delete)
 	// Menu Board tab Gantt (US-039/H22-24): bulk per-project, bukan per-task
 	// (N+1) -- lihat komentar handler ProjectStatusSessions/ProjectDependencies.
-	v1.Get("/projects/:id/status-sessions", jwtAuth, dbCtx, editorProjectGate, taskHandler.ProjectStatusSessions)
-	v1.Get("/projects/:id/dependencies", jwtAuth, dbCtx, editorProjectGate, taskHandler.ProjectDependencies)
+	v1.Get("/projects/:id/status-sessions", jwtAuth, dbCtx, followedProjectGate, taskHandler.ProjectStatusSessions)
+	v1.Get("/projects/:id/dependencies", jwtAuth, dbCtx, followedProjectGate, taskHandler.ProjectDependencies)
 
 	// Task Management Core Phase 2 (US-017/017b, PIC Handoff + PIC Group).
 	v1.Post("/tasks/:id/pic/acknowledge", jwtAuth, dbCtx, taskHandler.Acknowledge)
@@ -888,7 +888,7 @@ func run() error {
 	v1.Post("/tasks/:id/time-entries/stop", jwtAuth, dbCtx, timeEntryHandler.StopTimer)
 	v1.Get("/tasks/:id/time-entries/active", jwtAuth, dbCtx, timeEntryHandler.GetActive)
 	v1.Post("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.CreateManual)
-	v1.Post("/tasks/:id/time-log", jwtAuth, dbCtx, editorTaskGate, timeEntryHandler.LogHours) // catat jam Editor, S6E-10
+	v1.Post("/tasks/:id/time-log", jwtAuth, dbCtx, followedTaskGate, timeEntryHandler.LogHours) // catat jam Editor, S6E-10
 	v1.Get("/tasks/:id/time-entries", jwtAuth, dbCtx, timeEntryHandler.List)
 	v1.Patch("/time-entries/:entryId", jwtAuth, dbCtx, timeEntryHandler.UpdateManual)
 	v1.Post("/time-entries/:entryId/approve", jwtAuth, dbCtx, timeEntryHandler.Approve)
