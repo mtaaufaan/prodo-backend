@@ -17,6 +17,7 @@ type FollowedProjectAccessChecker interface {
 	FollowedProjectAccess(ctx context.Context, exec db.Executor, projectID, userID string) (restricted, followed bool, err error)
 	FollowedTaskAccess(ctx context.Context, exec db.Executor, taskID, userID string) (restricted, followed bool, err error)
 	FollowedAttachmentAccess(ctx context.Context, exec db.Executor, attachmentID, userID string) (restricted, followed bool, err error)
+	FollowedSprintAccess(ctx context.Context, exec db.Executor, sprintID, userID string) (restricted, followed bool, err error)
 }
 
 // followedKind -- jenis id yang dibawa permintaan: project, task, atau lampiran.
@@ -26,6 +27,7 @@ const (
 	kindProject followedKind = iota
 	kindTask
 	kindAttachment
+	kindSprint
 )
 
 // RequireFollowedProjectAccess -- gerbang baca untuk endpoint yang dipakai frame
@@ -40,6 +42,12 @@ func RequireFollowedProjectAccess(checker FollowedProjectAccessChecker, byTask b
 		kind = kindTask
 	}
 	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Params("id") }, kind, false)
+}
+
+// RequireFollowedSprintAccess -- gerbang yang sama untuk rute berbasis id sprint yang dapat dibaca role biasa
+// (GET /sprints/:id/summary, S7A-13, IG-159): project diturunkan dari sprint. :id bukan UUID ditolak 422.
+func RequireFollowedSprintAccess(checker FollowedProjectAccessChecker) fiber.Handler {
+	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Params("id") }, kindSprint, true)
 }
 
 // RequireFollowedAttachmentAccess -- gerbang yang sama untuk rute berbasis id lampiran (download/rename/hapus/pulihkan,
@@ -86,6 +94,8 @@ func followedAccessGate(checker FollowedProjectAccessChecker, idOf func(*fiber.C
 			restricted, followed, err = checker.FollowedTaskAccess(c.Context(), exec, id, userID)
 		case kindAttachment:
 			restricted, followed, err = checker.FollowedAttachmentAccess(c.Context(), exec, id, userID)
+		case kindSprint:
+			restricted, followed, err = checker.FollowedSprintAccess(c.Context(), exec, id, userID)
 		case kindProject:
 			restricted, followed, err = checker.FollowedProjectAccess(c.Context(), exec, id, userID)
 		}

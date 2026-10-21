@@ -37,6 +37,7 @@ func TestApproverEditorReadGates(t *testing.T) {
 		{`v1.Post("/tasks/:id/comments"`, "followedTaskGate"},
 		{`v1.Put("/tasks/:id/follow"`, "followedTaskGate"},
 		{`v1.Post("/tasks/:id/attachments"`, "followedTaskGate"},
+		{`v1.Get("/sprints/:id/summary"`, "followedSprintGate"},
 		{`v1.Get("/attachments/:id/download"`, "followedAttachmentGate"},
 		{`v1.Put("/attachments/:id"`, "followedAttachmentGate"},
 		{`v1.Delete("/attachments/:id"`, "followedAttachmentGate"},

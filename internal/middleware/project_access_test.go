@@ -16,6 +16,7 @@ type stubAccessChecker struct {
 	err                  error
 	gotProject, gotTask  string
 	gotAttachment        string
+	gotSprint            string
 }
 
 func (s *stubAccessChecker) FollowedProjectAccess(_ context.Context, _ db.Executor, projectID, _ string) (restricted, followed bool, err error) {
@@ -30,6 +31,11 @@ func (s *stubAccessChecker) FollowedTaskAccess(_ context.Context, _ db.Executor,
 
 func (s *stubAccessChecker) FollowedAttachmentAccess(_ context.Context, _ db.Executor, attachmentID, _ string) (restricted, followed bool, err error) {
 	s.gotAttachment = attachmentID
+	return s.restricted, s.followed, s.err
+}
+
+func (s *stubAccessChecker) FollowedSprintAccess(_ context.Context, _ db.Executor, sprintID, _ string) (restricted, followed bool, err error) {
+	s.gotSprint = sprintID
 	return s.restricted, s.followed, s.err
 }
 
@@ -161,6 +167,44 @@ func TestRequireFollowedAttachmentAccess(t *testing.T) {
 			}
 			if got := checker.gotAttachment == aid; got != tc.wantChecked {
 				t.Fatalf("checker dipanggil dengan %q, dipanggil=%v want %v", checker.gotAttachment, got, tc.wantChecked)
+			}
+		})
+	}
+}
+
+// S7A-13 (IG-159): GET /sprints/:id/summary memakai gerbang project diikuti yang sama.
+func TestRequireFollowedSprintAccess(t *testing.T) {
+	const sid = "33333333-3333-4333-8333-333333333333"
+	cases := []struct {
+		name                 string
+		id                   string
+		restricted, followed bool
+		want                 int
+		wantChecked          bool
+	}{
+		{"pengikut lolos", sid, true, true, http.StatusOK, true},
+		{"editor/approver non-anggota 403", sid, true, false, http.StatusForbidden, true},
+		{"role lain tidak digerbang", sid, false, false, http.StatusOK, true},
+		{"id bukan UUID 422", "abc", true, true, http.StatusUnprocessableEntity, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checker := &stubAccessChecker{restricted: tc.restricted, followed: tc.followed}
+			app := fiber.New()
+			app.Get("/sprints/:id/summary", withDBTx(), func(c *fiber.Ctx) error {
+				c.Locals(actorUserIDLocalsKey, "u1")
+				return c.Next()
+			}, RequireFollowedSprintAccess(checker), func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sprints/"+tc.id+"/summary", http.NoBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			if got := checker.gotSprint == sid; got != tc.wantChecked {
+				t.Fatalf("checker dipanggil dengan %q, dipanggil=%v want %v", checker.gotSprint, got, tc.wantChecked)
 			}
 		})
 	}
