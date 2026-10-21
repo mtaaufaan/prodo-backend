@@ -16,7 +16,17 @@ import (
 type FollowedProjectAccessChecker interface {
 	FollowedProjectAccess(ctx context.Context, exec db.Executor, projectID, userID string) (restricted, followed bool, err error)
 	FollowedTaskAccess(ctx context.Context, exec db.Executor, taskID, userID string) (restricted, followed bool, err error)
+	FollowedAttachmentAccess(ctx context.Context, exec db.Executor, attachmentID, userID string) (restricted, followed bool, err error)
 }
+
+// followedKind -- jenis id yang dibawa permintaan: project, task, atau lampiran.
+type followedKind int
+
+const (
+	kindProject followedKind = iota
+	kindTask
+	kindAttachment
+)
 
 // RequireFollowedProjectAccess -- gerbang baca untuk endpoint yang dipakai frame
 // Editor dan Approver: role itu yang BUKAN anggota/assignee/PIC aktif project
@@ -25,17 +35,27 @@ type FollowedProjectAccessChecker interface {
 // diturunkan dari task; false: :id adalah id project. Harus dipasang SETELAH
 // jwtAuth dan DBContextMiddleware.
 func RequireFollowedProjectAccess(checker FollowedProjectAccessChecker, byTask bool) fiber.Handler {
-	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Params("id") }, byTask, false)
+	kind := kindProject
+	if byTask {
+		kind = kindTask
+	}
+	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Params("id") }, kind, false)
+}
+
+// RequireFollowedAttachmentAccess -- gerbang yang sama untuk rute berbasis id lampiran (download/rename/hapus/pulihkan,
+// S7A-10, IG-156): project diturunkan dari lampiran -> task. :id yang bukan UUID ditolak 422.
+func RequireFollowedAttachmentAccess(checker FollowedProjectAccessChecker) fiber.Handler {
+	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Params("id") }, kindAttachment, true)
 }
 
 // RequireFollowedProjectQuery -- gerbang yang sama untuk endpoint yang menerima id project lewat query string
 // (GET /me/tasks?project_id=, S7A-08, IG-154). project_id kosong diteruskan ke handler (422 di sana); yang
 // bukan UUID ditolak 422 di sini supaya tidak menjadi galat database.
 func RequireFollowedProjectQuery(checker FollowedProjectAccessChecker, param string) fiber.Handler {
-	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Query(param) }, false, true)
+	return followedAccessGate(checker, func(c *fiber.Ctx) string { return c.Query(param) }, kindProject, true)
 }
 
-func followedAccessGate(checker FollowedProjectAccessChecker, idOf func(*fiber.Ctx) string, byTask, optionalUUID bool) fiber.Handler {
+func followedAccessGate(checker FollowedProjectAccessChecker, idOf func(*fiber.Ctx) string, kind followedKind, optionalUUID bool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		userID, _, ok := ActorFromContext(c)
 		exec, txOK := DBTxFromContext(c)
@@ -61,9 +81,12 @@ func followedAccessGate(checker FollowedProjectAccessChecker, idOf func(*fiber.C
 			restricted, followed bool
 			err                  error
 		)
-		if byTask {
+		switch kind {
+		case kindTask:
 			restricted, followed, err = checker.FollowedTaskAccess(c.Context(), exec, id, userID)
-		} else {
+		case kindAttachment:
+			restricted, followed, err = checker.FollowedAttachmentAccess(c.Context(), exec, id, userID)
+		case kindProject:
 			restricted, followed, err = checker.FollowedProjectAccess(c.Context(), exec, id, userID)
 		}
 		if err != nil {

@@ -316,7 +316,10 @@ func run() error {
 	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
 	notificationHandler := handler.NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository()), logger)
 	followedTaskGate := middleware.RequireFollowedProjectAccess(followedAccessRepo, true)
-	followedProjectQueryGate := middleware.RequireFollowedProjectQuery(followedAccessRepo, "project_id") // GET /me/tasks, S7A-08, IG-154
+	// Gerbang rute berbasis id lampiran (S7A-10, IG-156).
+	followedAttachmentGate := middleware.RequireFollowedAttachmentAccess(followedAccessRepo)
+	// Gerbang GET /me/tasks (S7A-08, IG-154).
+	followedProjectQueryGate := middleware.RequireFollowedProjectQuery(followedAccessRepo, "project_id")
 	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, followedAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
@@ -922,12 +925,12 @@ func run() error {
 	// per task tanpa RequireRole tambahan (RLS + otorisasi role di service
 	// sudah cukup, pola sama endpoint task lain); grid "AW Documents" level
 	// workspace AW-only.
-	v1.Post("/tasks/:id/attachments", jwtAuth, dbCtx, attachmentHandler.Upload)
+	v1.Post("/tasks/:id/attachments", jwtAuth, dbCtx, followedTaskGate, attachmentHandler.Upload)
 	v1.Get("/tasks/:id/attachments", jwtAuth, dbCtx, followedTaskGate, attachmentHandler.ListForTask)
-	v1.Get("/attachments/:id/download", jwtAuth, dbCtx, attachmentHandler.Download)
-	v1.Put("/attachments/:id", jwtAuth, dbCtx, attachmentHandler.Rename)
-	v1.Delete("/attachments/:id", jwtAuth, dbCtx, attachmentHandler.Delete)
-	v1.Post("/attachments/:id/restore", jwtAuth, dbCtx, attachmentHandler.Restore)
+	v1.Get("/attachments/:id/download", jwtAuth, dbCtx, followedAttachmentGate, attachmentHandler.Download)
+	v1.Put("/attachments/:id", jwtAuth, dbCtx, followedAttachmentGate, attachmentHandler.Rename)
+	v1.Delete("/attachments/:id", jwtAuth, dbCtx, followedAttachmentGate, attachmentHandler.Delete)
+	v1.Post("/attachments/:id/restore", jwtAuth, dbCtx, followedAttachmentGate, attachmentHandler.Restore)
 	// Dokumen & Lampiran PM (IG-123): rute project tanpa RequireRole, otorisasi
 	// PM/AW/GA/PA di service. Bulk delete hanya mode retensi (bisa dipulihkan).
 	v1.Get("/me/attachments", jwtAuth, dbCtx, attachmentHandler.ListMine) // Lampiran Saya Editor, S6E-12
