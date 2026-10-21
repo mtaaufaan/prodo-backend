@@ -105,3 +105,23 @@ func (r *FollowedProjectAccessRepository) FollowedTaskAccess(ctx context.Context
 	}
 	return restricted, followed, nil
 }
+
+// FollowedAttachmentAccess -- sama seperti FollowedTaskAccess, project diturunkan dari lampiran -> task (S7A-10, IG-156).
+// Lampiran yang tidak ditemukan -> (false, false, nil): gerbang meneruskan, handler yang menjawab 404.
+func (r *FollowedProjectAccessRepository) FollowedAttachmentAccess(ctx context.Context, exec db.Executor, attachmentID, userID string) (restricted, followed bool, err error) {
+	err = exec.QueryRow(ctx, `
+		SELECT COALESCE(wm.role::text IN ('editor', 'approver'), FALSE), `+followedPredicate+`
+		FROM task_attachments ta
+		JOIN tasks tk ON tk.id = ta.task_id
+		JOIN projects p ON p.id = tk.project_id
+		LEFT JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $1
+		WHERE ta.id = $2
+	`, userID, attachmentID).Scan(&restricted, &followed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("repository.FollowedAttachmentAccess: %w", err)
+	}
+	return restricted, followed, nil
+}
