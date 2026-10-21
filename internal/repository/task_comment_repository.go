@@ -267,7 +267,10 @@ type MentionCandidate struct {
 }
 
 // MentionCandidates -- anggota project, PM project, Admin Workspace dan Division Viewer workspace
-// (set yang sama dengan daftar kelola member project).
+// (set yang sama dengan daftar kelola member project), ditambah assignee dan PIC aktif task project
+// (S7A-08, IG-154): anggota project-scoped hanya melihat baris keanggotaannya sendiri lewat RLS
+// (pm_select), tetapi membaca assignee/PIC lewat RLS task -- tanpa tambahan ini mereka hampir tidak
+// bisa me-mention siapa pun.
 func (r *TaskCommentRepository) MentionCandidates(ctx context.Context, exec db.Executor, projectID string) ([]MentionCandidate, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT DISTINCT u.id::text, COALESCE(u.display_name, ''), COALESCE(u.email, '')
@@ -275,6 +278,10 @@ func (r *TaskCommentRepository) MentionCandidates(ctx context.Context, exec db.E
 		WHERE u.id IN (
 			SELECT user_id FROM project_members WHERE project_id = $1
 			UNION SELECT user_id FROM project_managers WHERE project_id = $1
+			UNION SELECT ta.user_id FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id
+			      WHERE t.project_id = $1 AND t.deleted_at IS NULL
+			UNION SELECT tpp.user_id FROM task_pic_phases tpp JOIN tasks t ON t.id = tpp.task_id
+			      WHERE t.project_id = $1 AND t.deleted_at IS NULL AND tpp.is_active
 			UNION SELECT wm.user_id FROM workspace_members wm JOIN projects p ON p.workspace_id = wm.workspace_id
 			      WHERE p.id = $1 AND wm.role IN ('admin_workspace', 'division_viewer')
 		)
