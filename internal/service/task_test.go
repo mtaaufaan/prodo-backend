@@ -152,7 +152,7 @@ func (f *fakeTaskStatuses) Get(_ context.Context, _ db.Executor, statusID string
 	return s, nil
 }
 
-type fakeTaskSessions struct{}
+type fakeTaskSessions struct{ approvalPending []string } // taskID yang memicu NotifyApprovalPending
 
 func (f *fakeTaskSessions) OpenSession(_ context.Context, _ db.Executor, _, _ string, _ bool, _ string) error {
 	return nil
@@ -168,6 +168,10 @@ func (f *fakeTaskSessions) ListForProject(_ context.Context, _ db.Executor, _ st
 	return nil, nil
 }
 func (f *fakeTaskSessions) NotifyRegression(_ context.Context, _ db.Executor, _, _ string) error {
+	return nil
+}
+func (f *fakeTaskSessions) NotifyApprovalPending(_ context.Context, _ db.Executor, taskID, _, _ string) error {
+	f.approvalPending = append(f.approvalPending, taskID)
 	return nil
 }
 
