@@ -102,7 +102,11 @@ type taskStatusSessionRepository interface {
 	ListForTask(ctx context.Context, exec db.Executor, taskID string) ([]repository.TaskStatusSession, error)
 	ListForProject(ctx context.Context, exec db.Executor, projectID string) ([]repository.TaskStatusSession, error)
 	NotifyRegression(ctx context.Context, exec db.Executor, taskID, projectID string) error
+	NotifyApprovalPending(ctx context.Context, exec db.Executor, taskID, projectID, actorID string) error
 }
+
+// statusUnderReview -- nama status sistem tahap review (jalur approval, S7A-04).
+const statusUnderReview = "UNDER REVIEW"
 
 type TaskService struct {
 	repo         taskRepository
@@ -593,6 +597,14 @@ func (s *TaskService) setStatusWith(ctx context.Context, exec db.Executor, taskI
 	}
 	if isRegression {
 		if err := s.sessions.NotifyRegression(ctx, exec, taskID, projectID); err != nil {
+			return fmt.Errorf("service.SetStatus: %w", err)
+		}
+	}
+	// S7A-12 (IG-158): task MASUK UNDER REVIEW (dari perpindahan status mana pun: manual, bulk, rule) -> notifikasi
+	// `approval_pending` ke Approver project, tidak ke pelaku, sekali per fase. Setelah OpenSession karena dedupe
+	// memakai sesi yang baru terbuka.
+	if status.Name == statusUnderReview && current.StatusName != statusUnderReview {
+		if err := s.sessions.NotifyApprovalPending(ctx, exec, taskID, projectID, actorID); err != nil {
 			return fmt.Errorf("service.SetStatus: %w", err)
 		}
 	}
