@@ -180,3 +180,17 @@ func (r *TaskStatusSessionRepository) NotifyRegression(ctx context.Context, exec
 	}
 	return nil
 }
+
+// NotifyApprovalPending -- S7A-12 (IG-158): notifikasi in-app `approval_pending` ke Approver project saat task MASUK
+// UNDER REVIEW. Penerima: anggota project berperan `approver`, atau Approver workspace yang mengikuti project (anggota
+// project, assignee, atau PIC aktif -- yang tidak mengikuti tidak dapat membuka task, jadi tidak dinotifikasi);
+// pengguna aktif; bukan pelaku. Satu kali per penerima per fase (harus dipanggil SETELAH OpenSession).
+// Logika berjalan di fungsi SQL SECURITY DEFINER `prodo_notify_approval_pending` (migrasi 20261118090100): sesi pelaku
+// (mis. Editor project-scoped) tidak melihat anggota lain maupun notifikasi milik orang lain lewat RLS.
+func (r *TaskStatusSessionRepository) NotifyApprovalPending(ctx context.Context, exec db.Executor, taskID, projectID, actorID string) error {
+	_ = projectID // project diturunkan dari task di dalam fungsi SQL
+	if _, err := exec.Exec(ctx, `SELECT prodo_notify_approval_pending($1::uuid, NULLIF($2, '')::uuid)`, taskID, actorID); err != nil {
+		return fmt.Errorf("repository.NotifyApprovalPending: %w", err)
+	}
+	return nil
+}
