@@ -316,8 +316,10 @@ func run() error {
 	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
 	notificationHandler := handler.NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository()), logger)
 	followedTaskGate := middleware.RequireFollowedProjectAccess(followedAccessRepo, true)
-	followedAttachmentGate := middleware.RequireFollowedAttachmentAccess(followedAccessRepo) // rute berbasis id lampiran, S7A-10, IG-156
-	followedProjectQueryGate := middleware.RequireFollowedProjectQuery(followedAccessRepo, "project_id") // GET /me/tasks, S7A-08, IG-154
+	// Gerbang rute berbasis id lampiran (S7A-10, IG-156).
+	followedAttachmentGate := middleware.RequireFollowedAttachmentAccess(followedAccessRepo)
+	// Gerbang GET /me/tasks (S7A-08, IG-154).
+	followedProjectQueryGate := middleware.RequireFollowedProjectQuery(followedAccessRepo, "project_id")
 	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, followedAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
