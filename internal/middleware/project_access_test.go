@@ -78,3 +78,46 @@ func TestRequireFollowedProjectAccess_checkerError(t *testing.T) {
 		t.Fatalf("status = %d, want 500", resp.StatusCode)
 	}
 }
+
+func queryApp(checker FollowedProjectAccessChecker) *fiber.App {
+	app := fiber.New()
+	app.Get("/me/tasks", withDBTx(), func(c *fiber.Ctx) error {
+		c.Locals(actorUserIDLocalsKey, "u1")
+		return c.Next()
+	}, RequireFollowedProjectQuery(checker, "project_id"), func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+	return app
+}
+
+// S7A-08 (IG-154): GET /me/tasks?project_id= memakai gerbang project diikuti yang sama dengan endpoint baca lain.
+func TestRequireFollowedProjectQuery(t *testing.T) {
+	const pid = "11111111-1111-4111-8111-111111111111"
+	cases := []struct {
+		name                 string
+		url                  string
+		restricted, followed bool
+		want                 int
+		wantChecked          bool
+	}{
+		{"approver/editor pengikut lolos", "/me/tasks?project_id=" + pid, true, true, http.StatusOK, true},
+		{"approver/editor non-anggota 403", "/me/tasks?project_id=" + pid, true, false, http.StatusForbidden, true},
+		{"role lain tidak digerbang", "/me/tasks?project_id=" + pid, false, false, http.StatusOK, true},
+		{"project_id kosong diteruskan ke handler (422 di sana)", "/me/tasks", true, false, http.StatusOK, false},
+		{"project_id bukan UUID 422", "/me/tasks?project_id=abc", true, true, http.StatusUnprocessableEntity, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checker := &stubAccessChecker{restricted: tc.restricted, followed: tc.followed}
+			resp, err := queryApp(checker).Test(httptest.NewRequest(http.MethodGet, tc.url, http.NoBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			if got := checker.gotProject == pid; got != tc.wantChecked {
+				t.Fatalf("checker dipanggil dengan %q, dipanggil=%v want %v", checker.gotProject, got, tc.wantChecked)
+			}
+		})
+	}
+}

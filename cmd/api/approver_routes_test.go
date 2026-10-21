@@ -33,6 +33,9 @@ func TestApproverEditorReadGates(t *testing.T) {
 		{`v1.Get("/tasks/:id/checklist-items"`, "followedTaskGate"},
 		{`v1.Get("/tasks/:id/attachments"`, "followedTaskGate"},
 		{`v1.Post("/tasks/:id/approval"`, "followedTaskGate"},
+		{`v1.Get("/me/tasks"`, "followedProjectQueryGate"},
+		{`v1.Post("/tasks/:id/comments"`, "followedTaskGate"},
+		{`v1.Put("/tasks/:id/follow"`, "followedTaskGate"},
 	}
 	for _, tc := range cases {
 		found := false
