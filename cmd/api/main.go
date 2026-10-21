@@ -316,6 +316,7 @@ func run() error {
 	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
 	notificationHandler := handler.NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository()), logger)
 	followedTaskGate := middleware.RequireFollowedProjectAccess(followedAccessRepo, true)
+	followedProjectQueryGate := middleware.RequireFollowedProjectQuery(followedAccessRepo, "project_id") // GET /me/tasks, S7A-08, IG-154
 	contextHandler := handler.NewContextHandler(contextSvc, contextRepo, followedAccessRepo, logger)
 	groupMemberHandler := handler.NewGroupMemberHandler(groupMemberSvc, groupRepo, accountSvc, logger)
 	sessionHandler := handler.NewSessionHandler(accountSvc, sessionSvc, logger)
@@ -449,7 +450,7 @@ func run() error {
 	v1.Get("/me/context", jwtAuth, dbCtx, contextHandler.Get)
 	v1.Patch("/me/context", jwtAuth, dbCtx, contextHandler.Switch)
 	v1.Get("/me/projects", jwtAuth, dbCtx, contextHandler.Projects)
-	v1.Get("/me/tasks", jwtAuth, dbCtx, myTaskHandler.List) // Task Saya Editor, S6E-04
+	v1.Get("/me/tasks", jwtAuth, dbCtx, followedProjectQueryGate, myTaskHandler.List) // Task Saya Editor (S6E-04) dan Approver (S7A-08)
 	// Lonceng notifikasi in-app (US-034, S6E-14): selalu hanya milik pemanggil.
 	v1.Get("/me/notifications", jwtAuth, dbCtx, notificationHandler.List)
 	v1.Get("/me/notifications/unread-count", jwtAuth, dbCtx, notificationHandler.UnreadCount)

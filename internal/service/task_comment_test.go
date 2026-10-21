@@ -122,7 +122,7 @@ func TestCreateComment_validasiDanIzin(t *testing.T) {
 	if _, err := svc.Create(ctx, nil, "t1", "me", "halo"); !errors.Is(err, domain.ErrCommentForbidden) {
 		t.Fatalf("viewer: err = %v, want ErrCommentForbidden", err)
 	}
-	for _, r := range []repository.ActorProjectRoles{{WorkspaceRole: "editor"}, {WorkspaceRole: "division_viewer"}, {IsPM: true}, {ProjectRole: "approver"}} {
+	for _, r := range []repository.ActorProjectRoles{{WorkspaceRole: "editor"}, {WorkspaceRole: "approver"}, {WorkspaceRole: "division_viewer"}, {IsPM: true}, {ProjectRole: "approver"}} {
 		f.roles = r
 		if _, err := svc.Create(ctx, nil, "t1", "me", "halo"); err != nil {
 			t.Fatalf("%+v: %v", r, err)
