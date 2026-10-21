@@ -125,3 +125,22 @@ func (r *FollowedProjectAccessRepository) FollowedAttachmentAccess(ctx context.C
 	}
 	return restricted, followed, nil
 }
+
+// FollowedSprintAccess -- sama seperti FollowedTaskAccess, project diturunkan dari sprint (S7A-13, IG-159).
+// Sprint tidak ditemukan -> (false, false, nil): gerbang meneruskan, handler yang menjawab 404.
+func (r *FollowedProjectAccessRepository) FollowedSprintAccess(ctx context.Context, exec db.Executor, sprintID, userID string) (restricted, followed bool, err error) {
+	err = exec.QueryRow(ctx, `
+		SELECT COALESCE(wm.role::text IN ('editor', 'approver'), FALSE), `+followedPredicate+`
+		FROM sprints sp
+		JOIN projects p ON p.id = sp.project_id
+		LEFT JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $1
+		WHERE sp.id = $2
+	`, userID, sprintID).Scan(&restricted, &followed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("repository.FollowedSprintAccess: %w", err)
+	}
+	return restricted, followed, nil
+}

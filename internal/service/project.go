@@ -23,6 +23,7 @@ type projectRepository interface {
 	GetWorkspaceID(ctx context.Context, exec db.Executor, projectID string) (string, error)
 	Create(ctx context.Context, exec db.Executor, workspaceID, name, code, actorID, actorRole string) (*repository.Project, error)
 	List(ctx context.Context, exec db.Executor, workspaceID string) ([]repository.Project, error)
+	FollowedProjectIDs(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]string, error)
 	NameExists(ctx context.Context, exec db.Executor, workspaceID, name, excludeProjectID string) (bool, error)
 	Update(ctx context.Context, exec db.Executor, projectID, name, status, actorID, actorRole string, endDate *time.Time) error
 	SetArchived(ctx context.Context, exec db.Executor, projectID string, archive bool, actorID, actorRole string) error
@@ -307,6 +308,41 @@ func (s *ProjectService) List(ctx context.Context, exec db.Executor, workspaceID
 		return nil, fmt.Errorf("service.List: %w", err)
 	}
 	return list, nil
+}
+
+// ListForActor -- daftar project untuk pemanggil (S7A-13, IG-159): Editor dan Approver workspace hanya melihat project yang
+// MEREKA IKUTI (anggota project, assignee, atau PIC aktif; sama dengan GET /me/projects dan gerbang baca project), role lain
+// tetap seluruh project workspace.
+func (s *ProjectService) ListForActor(ctx context.Context, exec db.Executor, workspaceID, actorID, actorRole string) ([]repository.Project, error) {
+	list, err := s.List(ctx, exec, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if actorRole == "platform_admin" || actorRole == "group_admin" {
+		return list, nil
+	}
+	role, err := s.rbac.GetMemberRole(ctx, exec, workspaceID, actorID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListForActor: %w", err)
+	}
+	if role != "editor" && role != "approver" {
+		return list, nil
+	}
+	ids, err := s.repo.FollowedProjectIDs(ctx, exec, workspaceID, actorID)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListForActor: %w", err)
+	}
+	followed := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		followed[id] = true
+	}
+	out := make([]repository.Project, 0, len(list))
+	for i := range list {
+		if followed[list[i].ID] {
+			out = append(out, list[i])
+		}
+	}
+	return out, nil
 }
 
 // Update mengubah nama, status siklus hidup, dan/atau tanggal berakhir

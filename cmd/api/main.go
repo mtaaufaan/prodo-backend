@@ -316,6 +316,8 @@ func run() error {
 	myTaskHandler := handler.NewMyTaskHandler(service.NewMyTaskService(repository.NewMyTaskRepository()), logger)
 	notificationHandler := handler.NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository()), logger)
 	followedTaskGate := middleware.RequireFollowedProjectAccess(followedAccessRepo, true)
+	// Gerbang GET /sprints/:id/summary (S7A-13, IG-159).
+	followedSprintGate := middleware.RequireFollowedSprintAccess(followedAccessRepo)
 	// Gerbang rute berbasis id lampiran (S7A-10, IG-156).
 	followedAttachmentGate := middleware.RequireFollowedAttachmentAccess(followedAccessRepo)
 	// Gerbang GET /me/tasks (S7A-08, IG-154).
@@ -884,7 +886,7 @@ func run() error {
 	v1.Put("/projects/:id/settings", jwtAuth, dbCtx, projectHandler.UpdateSettings)
 	v1.Put("/statuses/:id", jwtAuth, dbCtx, customStatusHandler.UpdateRequireStartConfirmation)
 	v1.Put("/statuses/:id/pic-requirement", jwtAuth, dbCtx, customStatusHandler.UpdateRequirePic)
-	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, sprintHandler.Summary)
+	v1.Get("/sprints/:id/summary", jwtAuth, dbCtx, followedSprintGate, sprintHandler.Summary)
 	v1.Post("/tasks/:id/start-work", jwtAuth, dbCtx, taskHandler.StartWork)
 	v1.Get("/tasks/:id/status-sessions", jwtAuth, dbCtx, followedTaskGate, taskHandler.StatusSessions)
 	v1.Get("/tasks/:id/versions", jwtAuth, dbCtx, followedTaskGate, taskHandler.Versions)

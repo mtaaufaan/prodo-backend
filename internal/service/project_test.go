@@ -20,6 +20,7 @@ type fakeProjectRepo struct {
 	getWsIDErr  error
 	createErr   error
 	listResult  []repository.Project
+	followedIDs []string // hasil FollowedProjectIDs (S7A-13)
 	updateErr   error
 	updateCalls []struct {
 		name, status string
@@ -65,6 +66,10 @@ func (f *fakeProjectRepo) Create(_ context.Context, _ db.Executor, workspaceID, 
 
 func (f *fakeProjectRepo) List(_ context.Context, _ db.Executor, _ string) ([]repository.Project, error) {
 	return f.listResult, nil
+}
+
+func (f *fakeProjectRepo) FollowedProjectIDs(_ context.Context, _ db.Executor, _, _ string) ([]string, error) {
+	return f.followedIDs, nil
 }
 
 func (f *fakeProjectRepo) NameExists(_ context.Context, _ db.Executor, _, _, _ string) (bool, error) {
