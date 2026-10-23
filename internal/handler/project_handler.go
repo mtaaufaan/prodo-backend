@@ -112,9 +112,13 @@ func (h *ProjectHandler) List(c *fiber.Ctx) error {
 		h.logger.Error("ProjectHandler.List dipanggil tanpa DBContextMiddleware -- tidak ada transaksi RLS")
 		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal menyiapkan koneksi database", nil))
 	}
+	actorUserID, actorRole, aok := middleware.ActorFromContext(c)
+	if !aok {
+		return c.Status(fiber.StatusInternalServerError).JSON(response.Error("INTERNAL_ERROR", "Gagal mengidentifikasi user", nil))
+	}
 	workspaceID := c.Params("wsId")
 
-	list, err := h.projects.List(c.Context(), exec, workspaceID)
+	list, err := h.projects.ListForActor(c.Context(), exec, workspaceID, actorUserID, actorRole)
 	if err != nil {
 		return h.mapProjectError(c, err, "Gagal mengambil daftar project")
 	}

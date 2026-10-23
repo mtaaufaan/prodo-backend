@@ -160,22 +160,13 @@ func (r *TaskStatusSessionRepository) ListForProject(ctx context.Context, exec d
 
 // NotifyRegression -- S4-68: notify SEMUA PM project (project_managers,
 // susulan multi-PM -- dulu satu dari projects.pm_user_id) + seluruh Admin
-// Workspace begitu regresi terjadi. Satu INSERT...SELECT, bukan loop
-// per-recipient.
+// Workspace begitu regresi terjadi. Berjalan di fungsi SQL SECURITY DEFINER
+// `prodo_notify_regression` (migrasi 20261118090200, S7A-13, IG-159): pelaku
+// project-scoped (mis. Editor) tidak melihat PM/Admin Workspace lewat RLS
+// sehingga INSERT...SELECT di sesinya menghasilkan 0 penerima.
 func (r *TaskStatusSessionRepository) NotifyRegression(ctx context.Context, exec db.Executor, taskID, projectID string) error {
-	_, err := exec.Exec(ctx, `
-		INSERT INTO notifications (user_id, actor_id, type, entity_type, entity_id, title, body)
-		SELECT DISTINCT recipients.user_id, NULL::uuid, 'task_regressed', 'task', $1::uuid,
-		       'Task Mengalami Regresi', 'Sebuah task kembali ke status yang lebih awal dari sebelumnya.'
-		FROM (
-			SELECT user_id FROM project_managers WHERE project_id = $2
-			UNION
-			SELECT wm.user_id FROM workspace_members wm
-			JOIN projects p ON p.workspace_id = wm.workspace_id
-			WHERE p.id = $2 AND wm.role = 'admin_workspace'
-		) recipients
-	`, taskID, projectID)
-	if err != nil {
+	_ = projectID // project diturunkan dari task di dalam fungsi SQL
+	if _, err := exec.Exec(ctx, `SELECT prodo_notify_regression($1::uuid)`, taskID); err != nil {
 		return fmt.Errorf("repository.NotifyRegression: %w", err)
 	}
 	return nil

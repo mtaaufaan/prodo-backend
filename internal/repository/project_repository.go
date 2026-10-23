@@ -591,3 +591,24 @@ func insertProjectAudit(ctx context.Context, exec db.Executor, actorID, actorRol
 	`, actorID, actorRole, action, projectID, workspaceID, ip, beforeJSON, afterJSON, metaJSON)
 	return err
 }
+
+// FollowedProjectIDs -- id project non-hapus di workspace yang diikuti userID (anggota project, assignee, atau PIC aktif;
+// predikat sama dengan GET /me/projects). Dipakai menyaring daftar project untuk Editor/Approver (S7A-13, IG-159).
+func (r *ProjectRepository) FollowedProjectIDs(ctx context.Context, exec db.Executor, workspaceID, userID string) ([]string, error) {
+	rows, err := exec.Query(ctx, `
+		SELECT p.id::text FROM projects p
+		WHERE p.workspace_id = $2 AND p.deleted_at IS NULL AND `+followedPredicate, userID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("repository.FollowedProjectIDs: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("repository.FollowedProjectIDs: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
